@@ -100,21 +100,30 @@ def check_result(raw: Any) -> dict[str, Any]:
     return result
 
 
+def result_files(directory: Path) -> list[Path]:
+    """Locate ``result.json`` at the top level and one level down.
+
+    download-artifact lays several matching artifacts out one per
+    subdirectory, but writes a single match straight into the path
+    with no subdirectory, so both shapes are read.
+    """
+    found = [directory / "result.json"]
+    found.extend(child / "result.json" for child in sorted(directory.iterdir()))
+    return [path for path in found if path.is_file()]
+
+
 def load_results(directory: Path) -> tuple[list[dict[str, Any]], list[str]]:
-    """Read every ``*/result.json``, ordered by key, naming the ones left out."""
+    """Read every result file, ordered by key, naming the ones left out."""
     results: list[dict[str, Any]] = []
     unreadable: list[str] = []
     if not directory.is_dir():
         return results, unreadable
-    for child in sorted(directory.iterdir()):
-        path = child / "result.json"
-        if not path.is_file():
-            continue
+    for path in result_files(directory):
         try:
             content = read_regular(path, MAX_RESULT_BYTES)
             results.append(check_result(json.loads(content)))
         except (OSError, ValueError, RecursionError):
-            unreadable.append(child.name)
+            unreadable.append(path.parent.name)
     results.sort(key=lambda result: str(result["key"]))
     return results, unreadable
 

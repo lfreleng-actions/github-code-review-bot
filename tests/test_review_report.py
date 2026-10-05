@@ -174,6 +174,14 @@ class LoadResultsTest(unittest.TestCase):
         """No results dir means no results, not a failure."""
         self.assertEqual(report.load_results(self.root / "absent"), ([], []))
 
+    def test_single_artifact_extracted_flat_is_read(self) -> None:
+        """download-artifact writes one match straight into the path."""
+        (self.root / "result.json").write_bytes(json.dumps(make_result()).encode())
+        (self.root / "check.json").write_text("{}")
+        results, unreadable = report.load_results(self.root)
+        self.assertEqual([r["key"] for r in results], ["repo-157"])
+        self.assertEqual(unreadable, [])
+
     def test_subdirectories_without_a_result_are_ignored(self) -> None:
         """Only ``*/result.json`` counts; other files are not results."""
         (self.root / "other").mkdir()
