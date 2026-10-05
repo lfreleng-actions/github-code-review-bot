@@ -1,0 +1,20 @@
+version = 1
+
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Linux Foundation
+
+# Licensing for files that cannot carry an inline SPDX header, so REUSE
+# lint passes. docs/requirements.txt is regenerated wholesale by
+# `uv pip compile`, which would discard any header committed into it;
+# the human-edited input, docs/requirements.in, carries its own. JSON
+# has no comment syntax, and npm rewrites package-lock.json wholesale.
+
+[[annotations]]
+path = [
+    "docs/requirements.txt",
+    "*.lock",
+    "tools/copilot-cli/package.json",
+    "tools/copilot-cli/package-lock.json",
+]
+SPDX-License-Identifier = "Apache-2.0"
+SPDX-FileCopyrightText = "2026 The Linux Foundation"

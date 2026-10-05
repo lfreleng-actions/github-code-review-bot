@@ -1,0 +1,43 @@
+---
+# SPDX-FileCopyrightText: 2026 The Linux Foundation
+# SPDX-License-Identifier: Apache-2.0
+
+version: 2
+updates:
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    commit-message:
+      prefix: "CI(actions)"
+    # Wait before opening a bump PR so we don't churn on a release
+    # that gets retracted or superseded shortly after it ships.
+    # This is required to satisfy the zizmor workflow auditing tool.
+    cooldown:
+      default-days: 7
+    open-pull-requests-limit: 15
+
+  # Pinned MkDocs toolchain behind the documentation site. The pin
+  # lives in docs/requirements.txt so a bump arrives as a reviewable
+  # pull request rather than a silent floating upgrade.
+  - package-ecosystem: "pip"
+    directory: "/docs"
+    schedule:
+      interval: "weekly"
+    commit-message:
+      prefix: "Build(docs)"
+    cooldown:
+      default-days: 7
+    open-pull-requests-limit: 5
+
+  # Copilot CLI the review job runs, installed with npm ci from the
+  # committed lockfile so the whole tree is pinned by hash.
+  - package-ecosystem: "npm"
+    directory: "/tools/copilot-cli"
+    schedule:
+      interval: "weekly"
+    commit-message:
+      prefix: "Build(copilot)"
+    cooldown:
+      default-days: 7
+    open-pull-requests-limit: 5
