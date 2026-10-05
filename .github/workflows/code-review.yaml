@@ -1,0 +1,890 @@
+---
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Linux Foundation
+
+# Reusable workflow: select open, human-authored pull requests across
+# an organisation, run one Copilot CLI review session per pull request
+# against an offline packet and a read-only checkout, and let a trusted
+# job approve the ones that are trivial or reviewed low risk. Nothing
+# else is ever written to a pull request.
+#
+# Trust boundary (docs/DESIGN.md sections 4 and 5): the review job
+# holds no repository credential and never sees the App key. It emits
+# a verdict; the apply job treats it as hostile input, corroborates it
+# offline, re-reads the live pull request, and makes the one write
+# with a per-repository App token.
+name: 'Code Review Bot [R] 🤖'
+
+# yamllint disable-line rule:truthy
+on:
+  workflow_call:
+    inputs:
+      org:
+        description: 'Target owner; live runs require an organisation App'
+        required: true
+        type: string
+      dry_run:
+        description: 'Run the agent and the checks; approve nothing'
+        type: boolean
+        default: true
+      model:
+        description: 'Copilot CLI model identifier'
+        type: string
+        default: 'claude-opus-5.5'
+      approve_tiers:
+        description: >-
+          Tiers the run may approve: trivial,low-risk (default),
+          trivial, or none for a report-only run
+        type: string
+        default: 'trivial,low-risk'
+      pull_requests:
+        description: >-
+          Pull requests to review instead of scanning: repo/pull/N,
+          owner/repo/pull/N, repo#N or URLs; commas and/or spaces
+        type: string
+        default: ''
+      repositories:
+        description: 'Repositories to scan; commas and/or spaces'
+        type: string
+        default: ''
+      exclude_repos:
+        description: 'Comma-separated repos to skip (overrides bundled list)'
+        type: string
+        default: ''
+      max_pull_requests:
+        description: 'Pull requests to review at most; 0 lifts the cap'
+        type: string
+        default: '20'
+      max_concurrent_agents:
+        description: 'Review sessions running at once (1-30)'
+        type: string
+        default: '5'
+      max_runtime_minutes:
+        description: 'Wall-clock budget for each review session'
+        type: string
+        default: '20'
+      reassess:
+        description: 'Review heads the ledger already records'
+        type: boolean
+        default: false
+      skip_agent:
+        description: 'Plumbing test: select and report without sessions'
+        type: boolean
+        default: false
+      egress_policy:
+        description: 'harden-runner egress for trusted jobs: audit or block'
+        type: string
+        default: 'block'
+      egress_allow_config:
+        description: 'harden-runner-block-action config coordinate'
+        type: string
+        default: ''
+      github_app_client_id:
+        description: 'GitHub App client id; empty limits runs to dry-run'
+        type: string
+        default: ''
+      assets_repository:
+        description: 'Trusted repository providing the prompt and scripts'
+        type: string
+        default: 'lfreleng-actions/github-code-review-bot'
+      assets_ref:
+        description: >-
+          Commit, tag or branch of the assets; empty resolves the
+          calling workflow's own commit
+        type: string
+        default: ''
+    secrets:
+      copilot_token:
+        description: >-
+          Personal fine-grained PAT with Copilot Requests and no
+          repository grants; the only credential the agent receives
+        required: false
+      github_app_private_key:
+        description: 'GitHub App private key, used in trusted jobs alone'
+        required: false
+
+permissions: {}
+
+# Live runs hold one lock per caller repository and owner across the
+# whole pipeline. Dry runs write nothing, so they lock within their
+# own caller run and never cancel or wait on a live run.
+concurrency:
+  group: >-
+    ${{ inputs.dry_run
+    && format('code-review-dry-run-{0}-{1}', github.run_id, inputs.org)
+    || format('code-review-{0}-{1}', github.repository, inputs.org) }}
+  cancel-in-progress: false
+
+jobs:
+  select:
+    name: 'Select'
+    runs-on: 'ubuntu-latest'
+    timeout-minutes: 20
+    permissions:
+      pull-requests: read  # Candidate scan without an App (dry-run plumbing)
+      contents: read  # Checkout trusted assets; read public repositories
+      actions: read  # Fetch prior ledgers from this repository's runs
+    outputs:
+      assets_sha: "${{ steps.pinned.outputs.sha }}"
+      namespace: "${{ steps.identity.outputs.namespace }}"
+      evidence_id: "${{ steps.evidence.outputs.artifact-id }}"
+      selection_sha256: "${{ steps.digests.outputs.selection }}"
+      ledger_sha256: "${{ steps.digests.outputs.ledger }}"
+      count: "${{ steps.chosen.outputs.count }}"
+      matrix: "${{ steps.chosen.outputs.matrix }}"
+      run_agent: "${{ steps.chosen.outputs.run_agent }}"
+      review_timeout: "${{ steps.budget.outputs.review_timeout }}"
+      agent_timeout: "${{ steps.budget.outputs.agent_timeout }}"
+      max_parallel: "${{ steps.budget.outputs.max_parallel }}"
+    steps:
+      - name: 'Load egress allow-list'
+        if: inputs.egress_policy == 'block'
+        # yamllint disable-line rule:line-length
+        uses: lfreleng-actions/harden-runner-block-action@a32eb064a1188f6b0f15d2c0c0381efe54b0dd22 # v0.12.2
+        with:
+          config: "${{ inputs.egress_allow_config }}"
+          allow_list_summary: 'true'
+
+      - name: 'Harden runner'
+        # yamllint disable-line rule:line-length
+        uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
+        with:
+          egress-policy: "${{ inputs.egress_policy }}"
+          allowed-endpoints: "${{ env.CONNECTION_ALLOW_LIST }}"
+
+      - name: 'Allocate invocation identity'
+        id: identity
+        env:
+          RUN_ID: "${{ github.run_id }}"
+          RUN_ATTEMPT: "${{ github.run_attempt }}"
+        run: |
+          python3 - <<'PY'
+          import os, uuid
+          run = os.environ['RUN_ID']
+          attempt = os.environ['RUN_ATTEMPT']
+          namespace = f"{run}-{attempt}-{uuid.uuid4().hex}"
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
+              output.write(f'namespace={namespace}\n')
+          PY
+
+      - name: 'Check inputs'
+        id: budget
+        env:
+          MAX_PRS: "${{ inputs.max_pull_requests }}"
+          MAX_RUNTIME: "${{ inputs.max_runtime_minutes }}"
+          MAX_AGENTS: "${{ inputs.max_concurrent_agents }}"
+          MODEL: "${{ inputs.model }}"
+          APPROVE_TIERS: "${{ inputs.approve_tiers }}"
+          REPOSITORIES: "${{ inputs.repositories }}"
+          PULL_REQUESTS: "${{ inputs.pull_requests }}"
+        run: |
+          [[ "$MAX_PRS" =~ ^[0-9]+$ ]] || {
+            echo '::error::max_pull_requests must be a non-negative integer'
+            exit 1; }
+          [[ "$MAX_RUNTIME" =~ ^[1-9][0-9]*$ ]] && [ "$MAX_RUNTIME" -le 120 ] ||
+            { echo '::error::max_runtime_minutes must be 1-120'; exit 1; }
+          [[ "$MAX_AGENTS" =~ ^[1-9][0-9]*$ ]] && [ "$MAX_AGENTS" -le 30 ] || {
+            echo '::error::max_concurrent_agents must be 1-30'; exit 1; }
+          [[ "$MODEL" =~ ^[a-z0-9.-]+$ ]] || {
+            echo '::error::model must be a lower-case identifier'; exit 1; }
+          case "$APPROVE_TIERS" in
+            'trivial,low-risk'|'low-risk,trivial') ;;
+            'trivial'|'low-risk'|'none'|'') ;;
+            *) echo '::error::approve_tiers must name trivial, low-risk or none'
+               exit 1 ;;
+          esac
+          # Expressions cannot add, so the job budget (session plus
+          # toolchain setup and upload) is computed here. The read
+          # token scopes to the named repositories, or to the
+          # repositories of the named pull requests; empty keeps it
+          # organisation-wide, which the scan needs. Both lists are
+          # normalised to commas for the App token action, which does
+          # not split on spaces. sed rather than grep -v: grep exits 1
+          # on empty input, which would fail this assignment.
+          repositories="$(printf '%s' "$REPOSITORIES" | tr ', ' '\n' \
+            | sed '/^$/d' | paste -sd, -)"
+          if [ -n "$PULL_REQUESTS" ]; then
+            repositories="$(printf '%s' "$PULL_REQUESTS" | tr ', ' '\n' \
+              | sed -e '/^$/d' -e 's#^https://github.com/##' \
+                -e 's#/pull/[0-9]*/*$##' -e 's/#[0-9]*$//' -e 's#^.*/##' \
+              | sort -u | paste -sd, -)"
+          fi
+          [[ "$repositories" =~ ^[A-Za-z0-9_.,-]*$ ]] || {
+            echo '::error::repository names carry unexpected characters'
+            exit 1; }
+          {
+            echo "agent_timeout=$MAX_RUNTIME"
+            echo "review_timeout=$((MAX_RUNTIME + 15))"
+            echo "max_parallel=$MAX_AGENTS"
+            echo "repositories=$repositories"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: 'Require App for live runs'
+        if: ${{ !inputs.dry_run && inputs.github_app_client_id == '' }}
+        run: |
+          echo '::error::Live runs require organisation App credentials'
+          exit 1
+
+      - name: 'Mint read-only App token'
+        id: app-token
+        if: inputs.github_app_client_id != ''
+        # yamllint disable-line rule:line-length
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: "${{ inputs.github_app_client_id }}"
+          private-key: "${{ secrets.github_app_private_key }}"
+          owner: "${{ inputs.org }}"
+          # Empty means every repository of the owner: the candidate
+          # scan is organisation-wide by design and this token reads.
+          repositories: "${{ steps.budget.outputs.repositories }}"
+          permission-pull-requests: 'read'
+          permission-contents: 'read'
+          permission-checks: 'read'
+          permission-statuses: 'read'
+          permission-metadata: 'read'
+
+      - name: 'Resolve assets ref'
+        id: assets
+        env:
+          ASSETS_REF: "${{ inputs.assets_ref }}"
+          # yamllint disable-line rule:line-length
+          JOB_WORKFLOW_SHA: "${{ job.workflow_sha || github.job_workflow_sha }}"
+        run: |
+          ref="${ASSETS_REF:-$JOB_WORKFLOW_SHA}"
+          if [ -z "$ref" ]; then
+            echo '::error::Cannot resolve workflow commit; set assets_ref'
+            exit 1
+          fi
+          echo "ref=$ref" >> "$GITHUB_OUTPUT"
+
+      - name: 'Checkout trusted assets'
+        # yamllint disable-line rule:line-length
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: "${{ inputs.assets_repository }}"
+          ref: "${{ steps.assets.outputs.ref }}"
+          path: 'review-assets'
+          persist-credentials: false
+
+      - name: 'Pin assets commit'
+        id: pinned
+        run: |
+          sha="$(git -C review-assets rev-parse HEAD)"
+          [[ "$sha" =~ ^[0-9a-f]{40}$ ]]
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+
+      # The ledger lives in this repository's own artifacts, so the
+      # native token reads it; the App token has no grant here.
+      - name: 'Fetch prior ledger'
+        env:
+          GH_TOKEN: "${{ github.token }}"
+          REPOSITORY: "${{ github.repository }}"
+        run: |
+          python3 review-assets/scripts/ledger.py fetch \
+            --repository "$REPOSITORY" --output artefacts/ledger.json
+
+      - name: 'Select pull requests'
+        env:
+          GH_TOKEN: "${{ steps.app-token.outputs.token || github.token }}"
+          ORG: "${{ inputs.org }}"
+          MODEL: "${{ inputs.model }}"
+          DRY_RUN: "${{ inputs.dry_run }}"
+          REASSESS: "${{ inputs.reassess }}"
+          APPROVE_TIERS: "${{ inputs.approve_tiers }}"
+          PULL_REQUESTS: "${{ inputs.pull_requests }}"
+          REPOSITORIES: "${{ inputs.repositories }}"
+          EXCLUDE_REPOS: "${{ inputs.exclude_repos }}"
+          MAX_PRS: "${{ inputs.max_pull_requests }}"
+          BOT_SLUG: "${{ steps.app-token.outputs.app-slug }}"
+        run: |
+          extra=()
+          if [ "$DRY_RUN" = true ]; then extra+=(--dry-run); fi
+          if [ "$REASSESS" = true ]; then extra+=(--reassess); fi
+          python3 review-assets/scripts/select_pulls.py \
+            --org "$ORG" --output-dir artefacts \
+            --model "$MODEL" --approve-tiers "$APPROVE_TIERS" \
+            --ledger artefacts/ledger.json \
+            --pull-requests "$PULL_REQUESTS" \
+            --repositories "$REPOSITORIES" \
+            --exclude-file review-assets/config/excluded-repos.txt \
+            --exclude-repos "$EXCLUDE_REPOS" \
+            --max-pull-requests "$MAX_PRS" \
+            --bot-slug "$BOT_SLUG" "${extra[@]}"
+          cat artefacts/selection-summary.md >> "$GITHUB_STEP_SUMMARY"
+
+      - name: 'Publish selection outputs'
+        id: chosen
+        env:
+          SKIP_AGENT: "${{ inputs.skip_agent }}"
+        run: |
+          count="$(jq '.include | length' artefacts/matrix.json)"
+          [[ "$count" =~ ^[0-9]+$ ]]
+          run_agent=false
+          if [ "$SKIP_AGENT" != true ] && [ "$count" != 0 ]; then
+            run_agent=true
+          fi
+          {
+            echo "count=$count"
+            echo "run_agent=$run_agent"
+            echo "matrix=$(jq -c . artefacts/matrix.json)"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: 'Record evidence digests'
+        id: digests
+        run: |
+          python3 - <<'PY'
+          import hashlib, os, pathlib
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
+              for name, path in (('selection', 'selection.json'),
+                                 ('ledger', 'ledger.json')):
+                  content = pathlib.Path('artefacts', path).read_bytes()
+                  output.write(f'{name}={hashlib.sha256(content).hexdigest()}\n')
+          PY
+
+      # Artifact IDs and file digests come from this trusted job.
+      # An artifact name alone is not an integrity boundary.
+      - name: 'Publish selection evidence'
+        id: evidence
+        # yamllint disable-line rule:line-length
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: "code-review-evidence-${{ steps.identity.outputs.namespace }}"
+          path: 'artefacts/'
+          retention-days: 7
+          if-no-files-found: 'error'
+
+  review:
+    name: 'Review (${{ matrix.key }})'
+    needs: 'select'
+    if: needs.select.outputs.run_agent == 'true'
+    runs-on: 'ubuntu-latest'
+    # Session budget plus toolchain setup and artifact upload.
+    timeout-minutes: ${{ fromJSON(needs.select.outputs.review_timeout) }}
+    strategy:
+      fail-fast: false
+      max-parallel: ${{ fromJSON(needs.select.outputs.max_parallel) }}
+      matrix: ${{ fromJSON(needs.select.outputs.matrix) }}
+    permissions:
+      contents: read  # Checkout assets and the public head repository
+    steps:
+      # Always audit: the model backend (api.githubcopilot.com) is not
+      # in the organisation allow-list, and this job holds nothing a
+      # block could protect beyond the model credential.
+      - name: 'Harden runner (audit)'
+        # yamllint disable-line rule:line-length
+        uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
+        with:
+          egress-policy: 'audit'
+
+      - name: 'Require pinned provenance'
+        env:
+          ASSETS_SHA: "${{ needs.select.outputs.assets_sha }}"
+          HEAD_SHA: "${{ matrix.head_sha }}"
+          KEY: "${{ matrix.key }}"
+          HEAD_REPOSITORY: "${{ matrix.head_repository }}"
+        run: |
+          [[ "$ASSETS_SHA" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$HEAD_SHA" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$KEY" =~ ^[A-Za-z0-9_.-]+$ ]]
+          repo_re='^[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9._-]+$'
+          [[ "$HEAD_REPOSITORY" =~ $repo_re ]]
+
+      - name: 'Checkout prompt assets'
+        # yamllint disable-line rule:line-length
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: "${{ inputs.assets_repository }}"
+          ref: "${{ needs.select.outputs.assets_sha }}"
+          path: 'review-assets'
+          persist-credentials: false
+
+      - name: 'Fetch selection evidence'
+        # yamllint disable-line rule:line-length
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          artifact-ids: "${{ needs.select.outputs.evidence_id }}"
+          merge-multiple: true
+          path: 'evidence'
+
+      - name: 'Verify evidence bytes'
+        env:
+          SELECTION_SHA: "${{ needs.select.outputs.selection_sha256 }}"
+          LEDGER_SHA: "${{ needs.select.outputs.ledger_sha256 }}"
+        run: |
+          python3 review-assets/scripts/review_evidence.py verify \
+            --directory evidence --selection-sha256 "$SELECTION_SHA" \
+            --ledger-sha256 "$LEDGER_SHA"
+
+      # The default token has no grant on the head repository; the
+      # checkout succeeds because the estate is public. The checkout
+      # is context for the agent, read with the same tools as the
+      # packet; nothing here can push.
+      - name: 'Checkout pull request head'
+        # yamllint disable-line rule:line-length
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: "${{ matrix.head_repository }}"
+          ref: "${{ matrix.head_sha }}"
+          path: 'workspace'
+          persist-credentials: false
+
+      - name: 'Set up Node.js'
+        # yamllint disable-line rule:line-length
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '22'
+          package-manager-cache: false
+
+      - name: 'Install Copilot CLI'
+        env:
+          PIN_DIR: 'review-assets/tools/copilot-cli'
+        run: |
+          # npm ci from the committed lockfile rather than npm install
+          # of a version: the lockfile pins the whole tree by integrity
+          # hash. The pin comes from the verified assets checkout and
+          # installs outside the workspace the session reads.
+          dest="$RUNNER_TEMP/copilot-cli"
+          mkdir -p "$dest"
+          cp "$PIN_DIR/package.json" "$PIN_DIR/package-lock.json" \
+            "$PIN_DIR/.npmrc" "$dest/"
+          cd "$dest"
+          npm ci --ignore-scripts --no-audit --no-fund
+          echo "$dest/node_modules/.bin" >> "$GITHUB_PATH"
+
+      - name: 'Prepare packet and prompt'
+        id: packet
+        env:
+          KEY: "${{ matrix.key }}"
+          HEAD_SHA: "${{ matrix.head_sha }}"
+          DRY_RUN: "${{ inputs.dry_run }}"
+          APPROVE_TIERS: "${{ inputs.approve_tiers }}"
+        run: |
+          mkdir -p artefacts
+          jq -e --arg key "$KEY" '.pull_requests[] | select(.key == $key)' \
+            evidence/selection.json > artefacts/pull.json
+          repository="$(jq -r '.repository' artefacts/pull.json)"
+          number="$(jq -r '.number' artefacts/pull.json)"
+          [[ "$repository" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9._-]+$ ]]
+          [[ "$number" =~ ^[1-9][0-9]*$ ]]
+          [ "$(jq -r '.head_sha' artefacts/pull.json)" = "$HEAD_SHA" ]
+          [ "$(git -C workspace rev-parse HEAD)" = "$HEAD_SHA" ]
+          # shellcheck disable=SC2016  # literal backticks for markdown
+          {
+            cat review-assets/prompt/review.md
+            printf '\n## Runtime context\n\n'
+            printf -- '- repository: `%s`\n' "$repository"
+            printf -- '- pull_request: `%s`\n' "$number"
+            printf -- '- head_sha: `%s`\n' "$HEAD_SHA"
+            printf -- '- dry run: `%s`; approvable tiers: `%s`\n' \
+              "$DRY_RUN" "${APPROVE_TIERS:-none}"
+            printf -- '- packet: `artefacts/pull.json`\n'
+            printf -- '- checkout of the head commit: `workspace/`\n'
+          } > artefacts/prompt.md
+
+      - name: 'Run review agent (Copilot)'
+        id: agent
+        timeout-minutes: ${{ fromJSON(needs.select.outputs.agent_timeout) }}
+        env:
+          COPILOT_GITHUB_TOKEN: "${{ secrets.copilot_token }}"
+          COPILOT_HOME: "${{ runner.temp }}/copilot"
+          MODEL: "${{ inputs.model }}"
+        run: |
+          # The prefix rejects native/classic tokens, not extra PAT
+          # grants. The caller must provision Copilot Requests only.
+          case "$COPILOT_GITHUB_TOKEN" in
+            github_pat_*) ;;
+            *)
+              echo '::error::Use a model-only fine-grained Copilot PAT'
+              exit 1 ;;
+          esac
+          mkdir -p artefacts/copilot-logs
+          prompt="$(cat artefacts/prompt.md)"
+          # Read-only utilities for the packet and the checkout. The
+          # CLI auto-approves what it classifies as a read, so the
+          # allow list states intent; enforcement is the missing
+          # credential, the deny list below and the apply job's own
+          # checks. awk, sed and find stay out: each can write or run
+          # commands, which would hand a bypass to a prompt-injected
+          # pull request.
+          allow=''
+          for cmd in cat jq grep head tail wc ls; do
+            allow="$allow,shell($cmd),shell($cmd:*)"
+          done
+          copilot \
+            --prompt="$prompt" \
+            --model="$MODEL" \
+            --available-tools=bash,list_bash,read_bash,stop_bash \
+            --allow-tool="${allow#,}" \
+            --deny-tool='write,shell(gh),shell(gh:*),shell(git),shell(git:*)' \
+            --secret-env-vars=COPILOT_GITHUB_TOKEN \
+            --no-ask-user --no-custom-instructions --disable-builtin-mcps \
+            --no-auto-update --no-color \
+            --log-dir=artefacts/copilot-logs \
+            --usage-output-file artefacts/usage.json \
+            --share=artefacts/session-summary.md
+
+      - name: 'Preserve session output'
+        if: always() && steps.packet.outcome == 'success'
+        # yamllint disable-line rule:line-length
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          # One name per pull request across attempts, so the apply
+          # job always finds it; a rerun of this entry replaces its
+          # own earlier session instead of colliding with it.
+          # yamllint disable-line rule:line-length
+          name: "code-review-session-${{ needs.select.outputs.namespace }}-${{ matrix.key }}"
+          path: |
+            artefacts/session-summary.md
+            artefacts/usage.json
+            artefacts/prompt.md
+            artefacts/copilot-logs/
+          retention-days: 7
+          overwrite: true
+          if-no-files-found: 'warn'
+
+      # Hygiene, not secure erasure: plain deletion of the CLI's
+      # spilled tool output, its home and the checkout, on a
+      # single-use VM. continue-on-error because cleanup must never
+      # gate the apply path.
+      - name: 'Clear session scratch files'
+        if: always()
+        continue-on-error: true
+        env:
+          COPILOT_HOME: "${{ runner.temp }}/copilot"
+        run: |
+          scratch="${TMPDIR:-/tmp}"
+          found=$(find "$scratch" -maxdepth 1 -type f \
+            -name '*-copilot-tool-output-*' -print -delete)
+          removed=0
+          if [ -n "$found" ]; then
+            removed=$(printf '%s\n' "$found" | wc -l | tr -d '[:space:]')
+          fi
+          rm -rf "$COPILOT_HOME" workspace
+          echo "Cleared $removed spilled tool-output file(s), the CLI home" \
+            "and the checkout."
+
+  apply:
+    name: 'Apply (${{ matrix.key }})'
+    needs: [select, review]
+    # Runs after every review entry, including failed ones, so each
+    # pull request gets a verdict; never after cancellation or a
+    # failed selection.
+    if: >-
+      !cancelled() && needs.select.result == 'success' &&
+      needs.select.outputs.run_agent == 'true'
+    runs-on: 'ubuntu-latest'
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.select.outputs.matrix) }}
+    permissions:
+      actions: read  # Locate the session artifact for this matrix key
+      contents: read  # Checkout the trusted applier
+    steps:
+      - name: 'Load egress allow-list'
+        if: inputs.egress_policy == 'block'
+        # yamllint disable-line rule:line-length
+        uses: lfreleng-actions/harden-runner-block-action@a32eb064a1188f6b0f15d2c0c0381efe54b0dd22 # v0.12.2
+        with:
+          config: "${{ inputs.egress_allow_config }}"
+          allow_list_summary: 'false'
+
+      - name: 'Harden runner'
+        # yamllint disable-line rule:line-length
+        uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
+        with:
+          egress-policy: "${{ inputs.egress_policy }}"
+          allowed-endpoints: "${{ env.CONNECTION_ALLOW_LIST }}"
+
+      - name: 'Require trusted provenance'
+        env:
+          ASSETS_SHA: "${{ needs.select.outputs.assets_sha }}"
+          EVIDENCE_ID: "${{ needs.select.outputs.evidence_id }}"
+          SELECTION_SHA: "${{ needs.select.outputs.selection_sha256 }}"
+          LEDGER_SHA: "${{ needs.select.outputs.ledger_sha256 }}"
+          KEY: "${{ matrix.key }}"
+        run: |
+          [[ "$ASSETS_SHA" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$EVIDENCE_ID" =~ ^[1-9][0-9]*$ ]]
+          [[ "$SELECTION_SHA" =~ ^[0-9a-f]{64}$ ]]
+          [[ "$LEDGER_SHA" =~ ^[0-9a-f]{64}$ ]]
+          [[ "$KEY" =~ ^[A-Za-z0-9_.-]+$ ]]
+
+      - name: 'Checkout trusted applier'
+        # yamllint disable-line rule:line-length
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: "${{ inputs.assets_repository }}"
+          ref: "${{ needs.select.outputs.assets_sha }}"
+          path: 'review-assets'
+          persist-credentials: false
+
+      - name: 'Fetch selection evidence'
+        # yamllint disable-line rule:line-length
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          artifact-ids: "${{ needs.select.outputs.evidence_id }}"
+          merge-multiple: true
+          path: 'evidence'
+
+      - name: 'Verify evidence bytes'
+        id: verified
+        env:
+          SELECTION_SHA: "${{ needs.select.outputs.selection_sha256 }}"
+          LEDGER_SHA: "${{ needs.select.outputs.ledger_sha256 }}"
+        run: |
+          python3 review-assets/scripts/review_evidence.py verify \
+            --directory evidence --selection-sha256 "$SELECTION_SHA" \
+            --ledger-sha256 "$LEDGER_SHA"
+
+      # The session is untrusted whatever its name, and its archive is
+      # never extracted blindly: artifact_fetch.py bounds the zip size,
+      # entry count and each file before writing anything. A missing
+      # or refused artifact still yields a verdict for this pull
+      # request, through the --failure text below.
+      - name: 'Fetch and accept bounded session'
+        id: fetch
+        env:
+          GH_TOKEN: "${{ github.token }}"
+          REPOSITORY: "${{ github.repository }}"
+          RUN_ID: "${{ github.run_id }}"
+          # yamllint disable-line rule:line-length
+          NAME: "code-review-session-${{ needs.select.outputs.namespace }}-${{ matrix.key }}"
+        run: |
+          status=0
+          python3 review-assets/scripts/artifact_fetch.py \
+            --repository "$REPOSITORY" --run-id "$RUN_ID" --name "$NAME" \
+            --profile session --output accepted >> "$GITHUB_OUTPUT" \
+            || status=$?
+          case "$status" in
+            0) failure='' ;;
+            3) failure='the review job produced no session artifact' ;;
+            4) failure='the session artifact failed bounded acceptance' ;;
+            *) exit "$status" ;;
+          esac
+          echo "failure=$failure" >> "$GITHUB_OUTPUT"
+
+      - name: 'Check verdict offline'
+        id: check
+        env:
+          KEY: "${{ matrix.key }}"
+          APPROVE_TIERS: "${{ inputs.approve_tiers }}"
+          FAILURE: "${{ steps.fetch.outputs.failure }}"
+        run: |
+          extra=()
+          if [ -n "$FAILURE" ]; then extra+=(--failure "$FAILURE"); fi
+          mkdir -p accepted artefacts
+          python3 review-assets/scripts/apply_review.py check \
+            --selection evidence/selection.json --key "$KEY" \
+            --session-dir accepted --approve-tiers "$APPROVE_TIERS" \
+            --output artefacts/check.json \
+            --summary artefacts/check-summary.md "${extra[@]}" \
+            >> "$GITHUB_OUTPUT"
+          cat artefacts/check-summary.md >> "$GITHUB_STEP_SUMMARY"
+
+      # The one write this pipeline makes. Minted for one repository,
+      # only on the live path, only once the offline check accepted
+      # the verdict. Every other path re-reads with the native token,
+      # which cannot approve anything.
+      - name: 'Mint pull request write token'
+        id: write-token
+        if: >-
+          !inputs.dry_run && steps.check.outputs.approvable == 'true' &&
+          inputs.github_app_client_id != ''
+        # yamllint disable-line rule:line-length
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: "${{ inputs.github_app_client_id }}"
+          private-key: "${{ secrets.github_app_private_key }}"
+          owner: "${{ inputs.org }}"
+          # The bare name, relative to owner: independent of how the
+          # action parses an owner/repository form.
+          repositories: "${{ matrix.repo_name }}"
+          permission-pull-requests: 'write'
+          permission-checks: 'read'
+          permission-statuses: 'read'
+          permission-metadata: 'read'
+
+      - name: 'Apply verdict'
+        id: apply
+        env:
+          GH_TOKEN: "${{ steps.write-token.outputs.token || github.token }}"
+          DRY_RUN: "${{ inputs.dry_run }}"
+          RUN_ATTEMPT: "${{ github.run_attempt }}"
+          # yamllint disable-line rule:line-length
+          RUN_URL: "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+        run: |
+          extra=()
+          if [ "$DRY_RUN" = true ]; then extra+=(--dry-run); fi
+          python3 review-assets/scripts/apply_review.py apply \
+            --check artefacts/check.json \
+            --selection evidence/selection.json \
+            --output artefacts/result.json \
+            --run-url "$RUN_URL" --run-attempt "$RUN_ATTEMPT" "${extra[@]}"
+
+      # Every selected pull request gets a row in the report. When an
+      # earlier step failed before apply wrote a result (the offline
+      # check, a token mint, GitHub unreachable), record a typed
+      # failure.
+      - name: 'Ensure a result exists'
+        if: always()
+        env:
+          KEY: "${{ matrix.key }}"
+          REPOSITORY: "${{ matrix.repository }}"
+          NUMBER: "${{ matrix.number }}"
+          HEAD_SHA: "${{ matrix.head_sha }}"
+          DRY_RUN: "${{ inputs.dry_run }}"
+          RUN_ATTEMPT: "${{ github.run_attempt }}"
+          CHECK_OUTCOME: "${{ steps.check.outcome }}"
+          APPLY_OUTCOME: "${{ steps.apply.outcome }}"
+        run: |
+          # shellcheck disable=SC2016  # jq variables, not shell expansions
+          if [ -s artefacts/result.json ]; then exit 0; fi
+          mkdir -p artefacts
+          usage='{}'
+          if [ -s artefacts/check.json ]; then
+            usage="$(jq -c '{premium_requests, agent_seconds, url, title}' \
+              artefacts/check.json)" || usage='{}'
+          fi
+          reason="apply did not complete (offline check: $CHECK_OUTCOME,"
+          reason="$reason apply: $APPLY_OUTCOME)"
+          jq -n --arg key "$KEY" --arg repo "$REPOSITORY" \
+            --argjson number "$NUMBER" --arg head "$HEAD_SHA" \
+            --arg reason "$reason" --argjson dry "$DRY_RUN" \
+            --argjson attempt "$RUN_ATTEMPT" --argjson usage "$usage" '
+            def number: if type == "number" then . else null end;
+            def text: if type == "string" then . else null end;
+            {
+              schema: 1, key: $key, repository: $repo, number: $number,
+              url: ($usage.url | text), title: ($usage.title | text),
+              head_sha: $head, verdict: "failed", tier: null,
+              reasons: [$reason], summary: null, findings: [],
+              injection_attempts: [], review_url: null,
+              dry_run: $dry, run_attempt: $attempt,
+              premium_requests: ($usage.premium_requests | number),
+              agent_seconds: ($usage.agent_seconds | number)
+            }' > artefacts/result.json
+
+      - name: 'Attach apply result'
+        if: always()
+        # yamllint disable-line rule:line-length
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          # yamllint disable-line rule:line-length
+          name: "code-review-result-${{ needs.select.outputs.namespace }}-${{ matrix.key }}-${{ github.run_attempt }}"
+          path: |
+            artefacts/check.json
+            artefacts/check-summary.md
+            artefacts/result.json
+          retention-days: 90
+          if-no-files-found: 'warn'
+
+  report:
+    name: 'Report'
+    needs: [select, review, apply]
+    if: ${{ !cancelled() && needs.select.result == 'success' }}
+    runs-on: 'ubuntu-latest'
+    timeout-minutes: 10
+    permissions:
+      actions: read  # Gather per-pull-request result artifacts
+      contents: read  # Checkout the report script
+    steps:
+      - name: 'Load egress allow-list'
+        if: inputs.egress_policy == 'block'
+        # yamllint disable-line rule:line-length
+        uses: lfreleng-actions/harden-runner-block-action@a32eb064a1188f6b0f15d2c0c0381efe54b0dd22 # v0.12.2
+        with:
+          config: "${{ inputs.egress_allow_config }}"
+          allow_list_summary: 'false'
+
+      - name: 'Harden runner'
+        # yamllint disable-line rule:line-length
+        uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
+        with:
+          egress-policy: "${{ inputs.egress_policy }}"
+          allowed-endpoints: "${{ env.CONNECTION_ALLOW_LIST }}"
+
+      - name: 'Require trusted provenance'
+        env:
+          ASSETS_SHA: "${{ needs.select.outputs.assets_sha }}"
+          EVIDENCE_ID: "${{ needs.select.outputs.evidence_id }}"
+          SELECTION_SHA: "${{ needs.select.outputs.selection_sha256 }}"
+          LEDGER_SHA: "${{ needs.select.outputs.ledger_sha256 }}"
+        run: |
+          [[ "$ASSETS_SHA" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$EVIDENCE_ID" =~ ^[1-9][0-9]*$ ]]
+          [[ "$SELECTION_SHA" =~ ^[0-9a-f]{64}$ ]]
+          [[ "$LEDGER_SHA" =~ ^[0-9a-f]{64}$ ]]
+
+      - name: 'Checkout report script'
+        # yamllint disable-line rule:line-length
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: "${{ inputs.assets_repository }}"
+          ref: "${{ needs.select.outputs.assets_sha }}"
+          path: 'review-assets'
+          persist-credentials: false
+
+      - name: 'Fetch selection evidence'
+        # yamllint disable-line rule:line-length
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          artifact-ids: "${{ needs.select.outputs.evidence_id }}"
+          merge-multiple: true
+          path: 'evidence'
+
+      - name: 'Verify evidence bytes'
+        env:
+          SELECTION_SHA: "${{ needs.select.outputs.selection_sha256 }}"
+          LEDGER_SHA: "${{ needs.select.outputs.ledger_sha256 }}"
+        run: |
+          python3 review-assets/scripts/review_evidence.py verify \
+            --directory evidence --selection-sha256 "$SELECTION_SHA" \
+            --ledger-sha256 "$LEDGER_SHA"
+
+      - name: 'Gather results'
+        if: needs.select.outputs.run_agent == 'true'
+        # yamllint disable-line rule:line-length
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: "code-review-result-${{ needs.select.outputs.namespace }}-*"
+          path: 'results'
+
+      - name: 'Build report and ledger'
+        env:
+          RUN_ID: "${{ github.run_id }}"
+          REVIEW_RESULT: "${{ needs.review.result }}"
+          APPLY_RESULT: "${{ needs.apply.result }}"
+        run: |
+          mkdir -p results artefacts ledger
+          python3 review-assets/scripts/review_report.py \
+            --selection evidence/selection.json --results results \
+            --ledger evidence/ledger.json --run-id "$RUN_ID" \
+            --output-md artefacts/report.md \
+            --output-json artefacts/report.json \
+            --output-ledger ledger/ledger.json
+          cat artefacts/report.md >> "$GITHUB_STEP_SUMMARY"
+          printf '\nReview job: %s; apply job: %s\n' \
+            "$REVIEW_RESULT" "$APPLY_RESULT" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: 'Attach run report'
+        # yamllint disable-line rule:line-length
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          # yamllint disable-line rule:line-length
+          name: "code-review-${{ needs.select.outputs.namespace }}-${{ github.run_attempt }}"
+          path: 'artefacts/'
+          retention-days: 90
+          if-no-files-found: 'warn'
+
+      # The next run's select job fetches the newest few of these by
+      # name and merges them (scripts/ledger.py). A fixed name is
+      # unique within a run, which is all the upload requires.
+      - name: 'Publish ledger'
+        # yamllint disable-line rule:line-length
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: 'code-review-ledger'
+          path: 'ledger/'
+          retention-days: 90
+          if-no-files-found: 'error'
