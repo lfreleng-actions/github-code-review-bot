@@ -198,6 +198,7 @@ class SelectContracts(ReusableWorkflowCase):
         ledger = self.step("select", "Fetch prior ledger")
         self.assertEqual(ledger["env"]["GH_TOKEN"], "${{ github.token }}")
         self.assertIn("ledger.py fetch", flatten(ledger["run"]))
+        self.assertIn("--artifact-name code-review-ledger", flatten(ledger["run"]))
         self.assertLess(
             self.position("select", "Fetch prior ledger"),
             self.position("select", "Select pull requests"),
@@ -379,8 +380,11 @@ class ReviewContracts(ReusableWorkflowCase):
         self.assertEqual(
             download["with"]["artifact-ids"], "${{ needs.select.outputs.evidence_id }}"
         )
-        verify = self.step("review", "Verify evidence bytes")
-        self.assertIn("review_evidence.py verify", flatten(verify["run"]))
+        for job in ("review", "apply", "report"):
+            run = flatten(self.step(job, "Verify evidence bytes")["run"])
+            self.assertIn("bot_evidence.py verify", run)
+            self.assertIn('--expect "selection.json=$SELECTION_SHA"', run)
+            self.assertIn('--expect "ledger.json=$LEDGER_SHA"', run)
         self.assertLess(
             self.position("review", "Verify evidence bytes"),
             self.position("review", "Prepare packet and prompt"),

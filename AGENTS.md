@@ -44,6 +44,10 @@ hand data to each other.
   review, apply, report); `code-review-cron.yaml` schedules and
   dispatches it; `testing.yaml` runs the suite and PR plumbing.
 - `scripts/`: the Python the jobs run; `tests/`: its offline suite.
+  Every bot carries five shared modules, copied verbatim from
+  `lfreleng-actions/bots-template`: `bot_github.py`, `bot_evidence.py`,
+  `artifact_fetch.py`, `preflight.py`, `ledger.py`. Fix them in the
+  template first, then copy; never patch a copy alone.
 - `prompt/review.md`: the agent's task and the three tiers. The
   trusted side of each tier lives in `scripts/review_vetoes.py`;
   change the two together.

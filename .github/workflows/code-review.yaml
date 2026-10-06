@@ -335,7 +335,8 @@ jobs:
           REPOSITORY: "${{ github.repository }}"
         run: |
           python3 review-assets/scripts/ledger.py fetch \
-            --repository "$REPOSITORY" --output artefacts/ledger.json
+            --repository "$REPOSITORY" --output artefacts/ledger.json \
+            --artifact-name code-review-ledger
 
       - name: 'Select pull requests'
         env:
@@ -465,9 +466,9 @@ jobs:
           SELECTION_SHA: "${{ needs.select.outputs.selection_sha256 }}"
           LEDGER_SHA: "${{ needs.select.outputs.ledger_sha256 }}"
         run: |
-          python3 review-assets/scripts/review_evidence.py verify \
-            --directory evidence --selection-sha256 "$SELECTION_SHA" \
-            --ledger-sha256 "$LEDGER_SHA"
+          python3 review-assets/scripts/bot_evidence.py verify \
+            --directory evidence --expect "selection.json=$SELECTION_SHA" \
+            --expect "ledger.json=$LEDGER_SHA"
 
       # The default token has no grant on the head repository; the
       # checkout succeeds because the estate is public. The checkout
@@ -687,9 +688,9 @@ jobs:
           SELECTION_SHA: "${{ needs.select.outputs.selection_sha256 }}"
           LEDGER_SHA: "${{ needs.select.outputs.ledger_sha256 }}"
         run: |
-          python3 review-assets/scripts/review_evidence.py verify \
-            --directory evidence --selection-sha256 "$SELECTION_SHA" \
-            --ledger-sha256 "$LEDGER_SHA"
+          python3 review-assets/scripts/bot_evidence.py verify \
+            --directory evidence --expect "selection.json=$SELECTION_SHA" \
+            --expect "ledger.json=$LEDGER_SHA"
 
       # The session is untrusted whatever its name, and its archive is
       # never extracted blindly: artifact_fetch.py bounds the zip size,
@@ -903,9 +904,9 @@ jobs:
           SELECTION_SHA: "${{ needs.select.outputs.selection_sha256 }}"
           LEDGER_SHA: "${{ needs.select.outputs.ledger_sha256 }}"
         run: |
-          python3 review-assets/scripts/review_evidence.py verify \
-            --directory evidence --selection-sha256 "$SELECTION_SHA" \
-            --ledger-sha256 "$LEDGER_SHA"
+          python3 review-assets/scripts/bot_evidence.py verify \
+            --directory evidence --expect "selection.json=$SELECTION_SHA" \
+            --expect "ledger.json=$LEDGER_SHA"
 
       - name: 'Gather results'
         if: needs.select.outputs.run_agent == 'true'

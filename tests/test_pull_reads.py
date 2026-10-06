@@ -14,7 +14,7 @@ from typing import Any
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
-github = import_module("review_github")
+github = import_module("bot_github")
 reads = import_module("pull_reads")
 changes = import_module("pull_changes")
 

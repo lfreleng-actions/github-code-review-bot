@@ -19,7 +19,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 preflight = import_module("preflight")
-github = import_module("review_github")
+github = import_module("bot_github")
 
 ROOT = Path(__file__).resolve().parents[1]
 CLIENT_ID = "Iv23liB4s8f6cI7i0oQB"

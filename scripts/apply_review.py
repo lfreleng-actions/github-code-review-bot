@@ -19,9 +19,9 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any, cast
 
+import bot_evidence as evidence
+import bot_github as github
 import pull_reads
-import review_evidence as evidence
-import review_github as github
 import review_policy as policy
 
 SCHEMA = 1
@@ -117,7 +117,7 @@ def write_json(path: Path, data: dict[str, Any]) -> None:
 def run_check(args: argparse.Namespace) -> None:
     """Offline check: verdict, corroboration, vetoes, enabled tiers."""
     approve_tiers = policy.parse_approve_tiers(args.approve_tiers)
-    selection = load_json(args.selection, evidence.MAX_SELECTION_BYTES, "selection")
+    selection = load_json(args.selection, evidence.MAX_EVIDENCE_BYTES, "selection")
     entry = find_entry(selection, args.key)
     verdict: dict[str, Any] | None = None
     failure: str | None = str(args.failure) if args.failure else None
@@ -200,7 +200,7 @@ def validated_check(path: Path) -> dict[str, Any]:
 def run_apply(args: argparse.Namespace) -> None:
     """Gate the live pull request, then approve or record why not."""
     check = validated_check(args.check)
-    selection = load_json(args.selection, evidence.MAX_SELECTION_BYTES, "selection")
+    selection = load_json(args.selection, evidence.MAX_EVIDENCE_BYTES, "selection")
     repository, number = str(check["repository"]), int(check["number"])
     result: dict[str, Any] = {
         "schema": SCHEMA,

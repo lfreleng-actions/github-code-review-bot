@@ -21,11 +21,11 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 
 fetcher = import_module("artifact_fetch")
-github = import_module("review_github")
-evidence = import_module("review_evidence")
+github = import_module("bot_github")
+evidence = import_module("bot_evidence")
 
 SUMMARY = b"# Session\n\n```json\n{}\n```\n"
-SESSION = fetcher.PROFILES["session"]
+SESSION = fetcher.profiles()["session"]
 
 
 def make_zip(entries: dict[str, bytes], path: Path) -> Path:

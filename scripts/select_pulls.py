@@ -29,10 +29,10 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+import bot_github as github
 import ledger
 import pull_changes as changes
 import pull_reads as reads
-import review_github as github
 from pull_reads import SelectionError
 from selection_inputs import (
     load_exclusions,

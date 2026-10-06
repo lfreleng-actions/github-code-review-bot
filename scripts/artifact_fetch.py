@@ -11,9 +11,9 @@ streams the zip to disk under that limit, inspects the zip directory,
 and extracts the permitted files alone, each read with a hard stop so
 a zip that lies about sizes cannot expand past its cap.
 
-Two profiles exist: ``session`` takes a review session's summary and
+Two profiles exist: ``session`` takes an agent session's summary and
 usage file from one run; ``ledger`` takes a prior run's ledger. The
-apply job uses the first; the select job uses the second through
+apply job uses the first; the prepare job uses the second through
 ``ledger.py``.
 
 Exit status: 0 accepted, with ``artifact_id=<id>`` on stdout; 3 no
@@ -35,11 +35,11 @@ from pathlib import Path
 from typing import Any, cast
 from urllib.parse import quote
 
-import review_github as github
-from review_evidence import LEDGER_FILES, SESSION_FILES
+import bot_github as github
+import ledger
+from bot_evidence import SESSION_FILES
 
 Profile = tuple[tuple[str, int, bool], ...]
-PROFILES: dict[str, Profile] = {"session": SESSION_FILES, "ledger": LEDGER_FILES}
 ZIP_OVERHEAD = 1024 * 1024
 MAX_ENTRIES = 64
 CHUNK = 64 * 1024
@@ -54,6 +54,15 @@ class Refused(Exception):
 
 class Missing(Exception):
     """No such artifact exists."""
+
+
+def profiles() -> dict[str, Profile]:
+    """The named cap tables an artifact may be fetched under.
+
+    Built on demand: ``ledger`` imports this module, so its table is
+    read when the command runs rather than while modules load.
+    """
+    return {"session": SESSION_FILES, "ledger": ledger.LEDGER_FILES}
 
 
 def zip_limit(profile: Profile) -> int:
@@ -249,12 +258,13 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--repository", required=True)
     parser.add_argument("--run-id", required=True)
     parser.add_argument("--name", required=True)
-    parser.add_argument("--profile", choices=sorted(PROFILES), default="session")
+    tables = profiles()
+    parser.add_argument("--profile", choices=sorted(tables), default="session")
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args(argv)
     try:
         artifact_id, copied = fetch_from_run(
-            args.repository, args.run_id, args.name, args.output, PROFILES[args.profile]
+            args.repository, args.run_id, args.name, args.output, tables[args.profile]
         )
     except Missing as exc:
         print(f"artifact: {exc}", file=sys.stderr)

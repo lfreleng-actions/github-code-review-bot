@@ -288,6 +288,7 @@ class MainTest(unittest.TestCase):
             prior,
             make_result(key="old-1", number=1, head_sha="b" * 40),
             run_id=1,
+            recorded=report.RECORDED_VERDICTS,
         )
         self.prior.write_text(json.dumps(prior))
         self.results = self.root / "results"

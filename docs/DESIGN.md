@@ -95,6 +95,11 @@ Shared credentials: this workflow reuses the triage App rather than
 adding a third one (§10.1). The App gains pull request, checks and
 commit status permissions; its issue permissions stay for triage.
 
+Shared code: the organisation's `bots-template` repository holds
+the pattern every bot starts from, and five of this repository's
+modules (`bot_github.py`, `bot_evidence.py`, `artifact_fetch.py`,
+`preflight.py`, `ledger.py`) are verbatim copies of its (§14).
+
 Three departures:
 
 - **The untrusted job produces a verdict, not labels or commits.**
@@ -805,8 +810,8 @@ requires; the next select job fetches the newest five by that name.
 prompt/review.md                         agent task (§7.3)
 config/excluded-repos.txt                repositories the scan skips
 tools/copilot-cli/                       pinned CLI lockfile
-scripts/review_github.py                 gh wrapper, REST and GraphQL
-scripts/review_evidence.py               evidence digests, file caps
+scripts/bot_github.py                    gh wrapper, REST and GraphQL
+scripts/bot_evidence.py                  evidence digests, file caps
 scripts/artifact_fetch.py                bounded artifact extraction
 scripts/ledger.py                        run-to-run memory (§6)
 scripts/pull_reads.py                    GitHub reads for selection
@@ -825,9 +830,15 @@ docs/DESIGN.md                           this document
 docs/setup/README.md                     operator's guide
 ```
 
+Every bot carries five shared modules, copied verbatim from
+`lfreleng-actions/bots-template`: `bot_github.py`, `bot_evidence.py`,
+`artifact_fetch.py`, `preflight.py`, `ledger.py`. Fix them in the
+template first, then copy; never patch a copy alone. The same holds
+for their test files.
+
 The suite holds one test file per script module that owns a
-contract (`apply_review`, `artifact_fetch`, `ledger`, `pull_reads`,
-`review_evidence`, `review_github`, `review_policy`,
+contract (`apply_review`, `artifact_fetch`, `bot_evidence`,
+`bot_github`, `ledger`, `preflight`, `pull_reads`, `review_policy`,
 `review_report`, `select_pulls`) plus `test_workflow.py`, which
 pins the workflow facts the scripts rely on: which job holds which
 credential, which step gates the write token, and the artifact

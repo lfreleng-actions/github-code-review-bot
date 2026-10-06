@@ -18,6 +18,7 @@ from typing import Any
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
+RECORDED = frozenset({"done", "would-do", "needs-human"})
 
 ledger = import_module("ledger")
 fetcher = import_module("artifact_fetch")
@@ -37,7 +38,7 @@ def make_entry(**overrides: Any) -> dict[str, Any]:
         "repository": "lfreleng-actions/repo",
         "number": 157,
         "head_sha": SHA,
-        "verdict": "approved",
+        "verdict": "done",
         "tier": "trivial",
         "dry_run": False,
         "run_id": 1,
@@ -79,8 +80,8 @@ class ParseLedgerTest(unittest.TestCase):
             {"number": 0},
             {"number": True},
             {"head_sha": "A" * 40},
-            {"verdict": "failed"},
-            {"verdict": "skipped"},
+            {"verdict": "Not Lower"},
+            {"verdict": ""},
             {"dry_run": "no"},
             {"assessed_at": "2026-10-05"},
             {"assessed_at": None},
@@ -181,17 +182,19 @@ class RecordTest(unittest.TestCase):
         }
 
     def test_recorded_verdicts_get_run_id_and_timestamp(self) -> None:
-        """Approved, would-approve and needs-human each become an entry."""
+        """Every verdict in RECORDED_VERDICTS becomes an entry."""
         held = ledger.empty_ledger()
-        for verdict in sorted(ledger.RECORDED_VERDICTS):
+        for verdict in sorted(RECORDED):
             self.assertTrue(
-                ledger.record(held, self.result(verdict), run_id=9, now=NOW)
+                ledger.record(
+                    held, self.result(verdict), run_id=9, recorded=RECORDED, now=NOW
+                )
             )
         self.assertEqual(
             held["entries"],
             [
                 make_entry(verdict=verdict, tier="low-risk", dry_run=True, run_id=9)
-                for verdict in sorted(ledger.RECORDED_VERDICTS)
+                for verdict in sorted(RECORDED)
             ],
         )
 
@@ -200,16 +203,20 @@ class RecordTest(unittest.TestCase):
         held = ledger.empty_ledger()
         for verdict in ("failed", "skipped", ""):
             self.assertFalse(
-                ledger.record(held, self.result(verdict), run_id=9, now=NOW)
+                ledger.record(
+                    held, self.result(verdict), run_id=9, recorded=RECORDED, now=NOW
+                )
             )
         self.assertEqual(held["entries"], [])
 
     def test_malformed_result_is_a_ledger_error(self) -> None:
         """A recordable verdict on a result missing its mode cannot be written."""
-        result = self.result("approved")
+        result = self.result("done")
         del result["dry_run"]
         with self.assertRaises(ledger.LedgerError):
-            ledger.record(ledger.empty_ledger(), result, run_id=9, now=NOW)
+            ledger.record(
+                ledger.empty_ledger(), result, run_id=9, recorded=RECORDED, now=NOW
+            )
 
 
 class FetchTest(unittest.TestCase):
@@ -250,7 +257,9 @@ class FetchTest(unittest.TestCase):
             self.fake_fetch(payloads),
         ):
             merged, notes = ledger.fetch("o/r", limit=4)
-        self.assertEqual(listed.call_args.args, ("o/r", ledger.ARTIFACT_NAME, 4))
+        self.assertEqual(
+            listed.call_args.args, ("o/r", ledger.DEFAULT_ARTIFACT_NAME, 4)
+        )
         self.assertEqual({e["run_id"] for e in merged["entries"]}, {3, 1})
         self.assertEqual(len(notes), 2)
         self.assertIn("skipped artifact 3: 'too big'", notes[0])
@@ -263,10 +272,21 @@ class FetchTest(unittest.TestCase):
             with (
                 patch.object(
                     ledger, "fetch", return_value=(ledger.empty_ledger(), ["n1"])
-                ),
+                ) as fetched,
                 redirect_stdout(io.StringIO()) as out,
             ):
-                ledger.main(["fetch", "--repository", "o/r", "--output", str(output)])
+                ledger.main(
+                    [
+                        "fetch",
+                        "--repository",
+                        "o/r",
+                        "--output",
+                        str(output),
+                        "--artifact-name",
+                        "my-ledger",
+                    ]
+                )
+            self.assertEqual(fetched.call_args.args, ("o/r", 5, "my-ledger"))
             self.assertEqual(json.loads(output.read_text()), ledger.empty_ledger())
             self.assertTrue(output.read_text().endswith("\n"))
         lines = out.getvalue().splitlines()

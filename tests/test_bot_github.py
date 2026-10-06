@@ -16,7 +16,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 
-github = import_module("review_github")
+github = import_module("bot_github")
 
 
 def completed(stdout: str = "", stderr: str = "", code: int = 0) -> Any:

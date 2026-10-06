@@ -3,6 +3,9 @@
 
 """Run-time checks that the trust boundary still holds before a job acts.
 
+Every bot repository carries this file verbatim: it checks the shape
+every bot shares, and knows nothing of what any one bot does.
+
 The contract tests in ``tests/test_workflow.py`` run when a pull
 request changes the workflow. A scheduled run executes whatever is on
 the default branch, and nothing there re-checks the boundary before
@@ -37,7 +40,7 @@ import unittest
 from pathlib import Path
 from typing import Any, cast
 
-import review_github as github
+import bot_github as github
 
 CLIENT_ID_RE = re.compile(r"^Iv[0-9A-Za-z]{18,}$")
 # Assembled rather than written out: a literal PEM header in source
@@ -132,9 +135,8 @@ def run_contract_tests(root: Path) -> None:
     """Re-run the workflow contract tests against the checked-out files."""
     sys.path.insert(0, str(root / "tests"))
     suite = unittest.defaultTestLoader.loadTestsFromName("test_workflow")
-    result = unittest.TextTestRunner(stream=open(os.devnull, "w"), verbosity=0).run(
-        suite
-    )
+    with open(os.devnull, "w", encoding="utf-8") as sink:
+        result = unittest.TextTestRunner(stream=sink, verbosity=0).run(suite)
     if not result.wasSuccessful():
         failed = [str(case) for case, _ in result.failures + result.errors]
         raise Drift(f"workflow contracts failed: {failed[:5]}")

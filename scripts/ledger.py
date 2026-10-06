@@ -1,20 +1,29 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: 2026 The Linux Foundation
 
-"""The run-to-run memory of which pull request heads were assessed.
+"""The run-to-run memory of which targets a run already handled.
 
-Every run's report job uploads ``ledger.json`` as the artifact
-``code-review-ledger``: the entries it inherited plus one for every
-pull request head this run reached a verdict on. The next run's
-select job fetches the newest few of those artifacts, merges them
-and skips any head already assessed, so an unchanged pull request
-costs one agent session rather than one every three hours.
+Every run's report job uploads ``ledger.json`` as an artifact (named
+``bot-ledger`` unless the workflow passes ``--artifact-name``): the
+entries it inherited plus one for every target this run reached a
+verdict on. The next run's prepare job fetches the newest few of
+those artifacts, merges them and skips any target already handled at
+the same head, so an unchanged target costs one agent session rather
+than one every schedule tick.
 
-Nothing here lives on the pull request. Dry runs record their
-verdicts too, so a rollout in dry-run does not re-review the same
-heads every run, but a live run ignores dry-run entries: the first
-live run after the flip must still approve what dry runs only
-reported.
+Nothing here lives on the target. Dry runs record their verdicts too,
+so a rollout in dry-run does not repeat the same work every run, but
+a live run ignores dry-run entries: the first live run after the flip
+must still act on what dry runs only reported.
+
+An entry names a target as ``repository``, ``number`` and
+``head_sha``; a bot whose targets are issues rather than pull
+requests can use the issue's number and the branch head it looked
+at. ``record`` takes the set of verdicts worth remembering, so each
+bot states its own without editing this module: a skip or a failure
+is not recorded, and the next run looks at that target again. Stored
+entries carry any lower-case verdict token, so one bot's ledger
+remains readable by a later version with different verdicts.
 
 ``fetch --repository OWNER/REPO --output FILE`` writes the merged
 prior ledger, or an empty one when no run has published yet.
@@ -24,6 +33,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import subprocess
 import tempfile
 from datetime import UTC, datetime, timedelta
@@ -31,14 +41,20 @@ from pathlib import Path
 from typing import Any, cast
 
 import artifact_fetch
-import review_github as github
-from review_evidence import LEDGER_FILES, MAX_LEDGER_BYTES, read_regular
+import bot_github as github
+from bot_evidence import read_regular
 
 SCHEMA = 1
-ARTIFACT_NAME = "code-review-ledger"
+DEFAULT_ARTIFACT_NAME = "bot-ledger"
+MAX_LEDGER_BYTES = 4 * 1024 * 1024
+# (name, byte cap, required): the cap table artifact_fetch applies to
+# a prior run's ledger artifact.
+LEDGER_FILES: tuple[tuple[str, int, bool], ...] = (
+    ("ledger.json", MAX_LEDGER_BYTES, True),
+)
 RECENT_RUNS = 5
 RETENTION_DAYS = 90
-RECORDED_VERDICTS = frozenset({"approved", "would-approve", "needs-human"})
+VERDICT_RE = re.compile(r"^[a-z][a-z0-9-]{0,39}$")
 TIMESTAMP = "%Y-%m-%dT%H:%M:%SZ"
 
 
@@ -77,7 +93,8 @@ def check_entry(raw: Any) -> dict[str, Any]:
         or number <= 0
         or not isinstance(head_sha, str)
         or not github.SHA_RE.fullmatch(head_sha)
-        or verdict not in RECORDED_VERDICTS
+        or not isinstance(verdict, str)
+        or not VERDICT_RE.fullmatch(verdict)
         or not isinstance(entry.get("dry_run"), bool)
     ):
         raise LedgerError("ledger entry has an invalid target, verdict or mode")
@@ -122,7 +139,7 @@ def load_ledger(path: Path) -> dict[str, Any]:
 
 
 def entry_key(entry: dict[str, Any]) -> tuple[str, int, str]:
-    """Identity of an assessment: one pull request at one head."""
+    """Identity of an assessment: one target at one head."""
     return (
         str(entry["repository"]).lower(),
         int(entry["number"]),
@@ -183,15 +200,17 @@ def record(
     result: dict[str, Any],
     *,
     run_id: int,
+    recorded: frozenset[str],
     now: datetime | None = None,
 ) -> bool:
     """Add one result's verdict to the ledger; return whether it was recorded.
 
-    Skips and failures are not assessments: the next run should look
-    at those heads again.
+    ``recorded`` names the verdicts that make a target a skip next
+    run. Skips and failures are not among them: the next run should
+    look at those heads again.
     """
     verdict = result.get("verdict")
-    if verdict not in RECORDED_VERDICTS:
+    if not isinstance(verdict, str) or verdict not in recorded:
         return False
     stamp = (now or datetime.now(UTC)).strftime(TIMESTAMP)
     entry = check_entry(
@@ -231,7 +250,9 @@ def fetch_one(repository: str, entry: dict[str, Any]) -> dict[str, Any] | str:
 
 
 def fetch(
-    repository: str, limit: int = RECENT_RUNS
+    repository: str,
+    limit: int = RECENT_RUNS,
+    artifact_name: str = DEFAULT_ARTIFACT_NAME,
 ) -> tuple[dict[str, Any], list[str]]:
     """Merge the newest published ledgers of the repository's runs.
 
@@ -239,7 +260,7 @@ def fetch(
     """
     ledgers: list[dict[str, Any]] = []
     notes: list[str] = []
-    for entry in artifact_fetch.list_named_artifacts(repository, ARTIFACT_NAME, limit):
+    for entry in artifact_fetch.list_named_artifacts(repository, artifact_name, limit):
         loaded = fetch_one(repository, entry)
         if isinstance(loaded, str):
             notes.append(loaded)
@@ -256,9 +277,10 @@ def main(argv: list[str] | None = None) -> None:
     fetcher.add_argument("--repository", required=True)
     fetcher.add_argument("--output", type=Path, required=True)
     fetcher.add_argument("--limit", type=int, default=RECENT_RUNS)
+    fetcher.add_argument("--artifact-name", default=DEFAULT_ARTIFACT_NAME)
     args = parser.parse_args(argv)
     try:
-        ledger, notes = fetch(args.repository, args.limit)
+        ledger, notes = fetch(args.repository, args.limit, args.artifact_name)
         args.output.parent.mkdir(parents=True, exist_ok=True)
         args.output.write_text(json.dumps(ledger, indent=2) + "\n", encoding="utf-8")
     except (OSError, subprocess.SubprocessError, github.GitHubError) as exc:

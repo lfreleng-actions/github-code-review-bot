@@ -12,7 +12,7 @@ from __future__ import annotations
 
 from typing import Any, cast
 
-import review_github as github
+import bot_github as github
 from pull_reads import (
     MAX_DIFF_BYTES,
     MAX_FILES,

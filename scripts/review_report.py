@@ -23,11 +23,13 @@ import re
 from pathlib import Path
 from typing import Any, cast
 
+import bot_github as github
 import ledger
-import review_github as github
-from review_evidence import MAX_SELECTION_BYTES, read_regular
+from bot_evidence import MAX_EVIDENCE_BYTES, read_regular
 
 SCHEMA = 1
+# The verdicts that make a head a skip next run; see ledger.record.
+RECORDED_VERDICTS = frozenset({"approved", "would-approve", "needs-human"})
 VERDICTS = ("approved", "would-approve", "needs-human", "failed")
 MAX_RESULT_BYTES = 1024 * 1024
 LINE_LIMIT = 120
@@ -130,7 +132,7 @@ def load_results(directory: Path) -> tuple[list[dict[str, Any]], list[str]]:
 
 def load_selection(path: Path) -> dict[str, Any]:
     """Read the trusted selection, which must be a JSON object."""
-    parsed: Any = json.loads(read_regular(path, MAX_SELECTION_BYTES))
+    parsed: Any = json.loads(read_regular(path, MAX_EVIDENCE_BYTES))
     if not isinstance(parsed, dict):
         raise ValueError("selection is not an object")
     return cast("dict[str, Any]", parsed)
@@ -200,7 +202,7 @@ def build_ledger(
 ) -> dict[str, Any]:
     """The prior ledger plus this run's assessments."""
     for result in results:
-        ledger.record(prior, result, run_id=run_id)
+        ledger.record(prior, result, run_id=run_id, recorded=RECORDED_VERDICTS)
     return prior
 
 
