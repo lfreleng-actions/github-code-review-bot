@@ -249,6 +249,103 @@ class SelectContracts(ReusableWorkflowCase):
         self.assertEqual(evidence["with"]["if-no-files-found"], "error")
 
 
+class PreflightContracts(ReusableWorkflowCase):
+    """The run-time gate runs from pinned assets before any token exists."""
+
+    def test_gate_runs_after_pinning_and_before_the_read_mint(self) -> None:
+        """Contract tests, zizmor and the config check precede the mint."""
+        pinned = self.position("select", "Pin assets commit")
+        workflow = self.position("select", "Pre-flight: workflow contracts and audit")
+        config = self.position("select", "Pre-flight: configuration and credentials")
+        mint = self.position("select", "Mint read-only App token")
+        self.assertLess(pinned, workflow)
+        self.assertLess(workflow, config)
+        self.assertLess(config, mint)
+        run = flatten(
+            self.step("select", "Pre-flight: workflow contracts and audit")["run"]
+        )
+        self.assertIn("scripts/preflight.py workflow --root .", run)
+        self.assertIn("cd review-assets", run)
+
+    def test_config_gate_sees_the_credentials_under_template_names(self) -> None:
+        """Shape checks read the inputs the workflow was handed, nothing else."""
+        step = self.step("select", "Pre-flight: configuration and credentials")
+        self.assertEqual(
+            step["env"]["BOT_APP_CLIENT_ID"], "${{ inputs.github_app_client_id }}"
+        )
+        self.assertEqual(
+            step["env"]["BOT_APP_PRIVATE_KEY"], "${{ secrets.github_app_private_key }}"
+        )
+        self.assertEqual(
+            step["env"]["COPILOT_GITHUB_TOKEN"], "${{ secrets.copilot_token }}"
+        )
+        run = flatten(step["run"])
+        self.assertIn("--config review-assets/config/bot.json", run)
+        self.assertIn(
+            '--workflow-sha "$JOB_WORKFLOW_SHA" --assets-sha "$ASSETS_SHA"', run
+        )
+
+    def test_minted_tokens_are_checked_for_identity(self) -> None:
+        """Both mints hand their app-slug to the identity check before use."""
+        read = self.step("select", "Pre-flight: App identity and token grants")
+        self.assertEqual(
+            read["env"]["MINTED_SLUG"], "${{ steps.app-token.outputs.app-slug }}"
+        )
+        self.assertEqual(
+            read["env"]["GH_TOKEN"], "${{ steps.app-token.outputs.token }}"
+        )
+        self.assertIn("preflight.py token", flatten(read["run"]))
+        self.assertLess(
+            self.position("select", "Pre-flight: App identity and token grants"),
+            self.position("select", "Fetch prior ledger"),
+        )
+        write = self.step("apply", "Pre-flight: write token identity")
+        self.assertEqual(
+            write["env"]["MINTED_SLUG"], "${{ steps.write-token.outputs.app-slug }}"
+        )
+        self.assertLess(
+            self.position("apply", "Pre-flight: write token identity"),
+            self.position("apply", "Apply verdict"),
+        )
+
+    def test_zizmor_is_pinned(self) -> None:
+        """The auditor the gate runs is an exact version."""
+        run = flatten(self.step("select", "Install zizmor")["run"])
+        self.assertRegex(run, r"uv tool install 'zizmor==\d+\.\d+\.\d+'")
+
+
+class MintProvenanceContracts(ReusableWorkflowCase):
+    """No token is ever minted for an owner or scope from untrusted input."""
+
+    def test_every_mint_owner_is_the_trusted_org_input(self) -> None:
+        """owner is literally inputs.org on every create-github-app-token step."""
+        mints = [
+            (job, step)
+            for job in self.jobs
+            if "steps" in self.jobs[job]
+            for step in self.actions(job, APP_TOKEN)
+        ]
+        self.assertEqual({job for job, _ in mints}, {"select", "apply"})
+        for job, step in mints:
+            with self.subTest(job=job):
+                self.assertEqual(step["with"]["owner"], "${{ inputs.org }}")
+                self.assertEqual(
+                    step["with"]["client-id"], "${{ inputs.github_app_client_id }}"
+                )
+                self.assertEqual(
+                    step["with"]["private-key"], "${{ secrets.github_app_private_key }}"
+                )
+
+    def test_write_mint_scope_is_one_recorded_repository(self) -> None:
+        """The only write token names a single matrix repository, never a list."""
+        mint = self.action("apply", APP_TOKEN)
+        self.assertEqual(mint["with"]["repositories"], "${{ matrix.repo_name }}")
+        read = self.action("select", APP_TOKEN)
+        self.assertEqual(
+            read["with"]["repositories"], "${{ steps.budget.outputs.repositories }}"
+        )
+
+
 class ReviewContracts(ReusableWorkflowCase):
     """The untrusted review job: no App key, bounded tools, typed outputs."""
 
@@ -539,7 +636,11 @@ class CronContracts(WorkflowCase):
         )
 
     def test_caller_forwards_credentials_and_pins_assets(self) -> None:
-        """The triage App credentials and the model PAT reach the reusable workflow."""
+        """The template-named App credentials and the model PAT reach the workflow.
+
+        Every bot repository uses the same names, so no caller names an
+        App or a repository in a credential.
+        """
         call = self.jobs["code-review"]
         self.assertEqual(
             call["with"]["github_app_client_id"],

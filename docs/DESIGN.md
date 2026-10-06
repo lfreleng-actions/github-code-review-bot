@@ -186,6 +186,54 @@ commit. `github_app_client_id` and the two secrets reach trusted
 jobs alone, by construction of the reusable workflow: no step in the
 review job references them.
 
+### 4.3 What the design does not trust the caller with
+
+The `owner` of every token mint is `inputs.org`, and the
+`repositories` of the one write mint is a single matrix repository
+name recorded by the trusted select job. No mint takes its owner or
+scope from a pull request, an issue, agent output or a config file.
+The contract tests pin both, and the pre-flight gate re-runs those
+tests before any mint.
+
+### 4.4 The pre-flight gate
+
+The contract tests in `tests/test_workflow.py` run when a pull
+request changes the workflow. A scheduled run executes whatever is on
+the default branch, and nothing in that path re-checks the boundary
+before the first App token mint: a drift merged through any route
+the tests do not cover, a wrong secret wired to the right name, or a
+broader App's key in this workflow would all run. The gate
+closes that: `scripts/preflight.py` runs from the pinned assets
+checkout, before any `create-github-app-token` step, and fails the
+run closed.
+
+<!-- markdownlint-disable MD013 -->
+
+| Stage                | Check                                                                                            | Drift it refuses                                                                                                                                                                                               |
+| -------------------- | ------------------------------------------------------------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Before the read mint | Re-run `tests/test_workflow.py` against the checked-out workflow files                           | An App key or mint in the review job, an unpinned action, a write mint no longer gated on `!dry_run` and the check outcome, a download by name where the design demands an ID, `persist-credentials` turned on |
+| Before the read mint | `zizmor --persona auditor` on the checked-out workflows: zero findings                           | Expression injection, `pull_request_target`, cache poisoning, anything the contract tests do not name                                                                                                          |
+| Before the read mint | `config/bot.json` is a small object naming one lower-case slug                                   | A config edit that points identity checks at a different App                                                                                                                                                   |
+| Before the read mint | Credential shapes: client id pattern, PEM markers and plausible key length, `github_pat_` prefix | The wrong secret under the right name; values are never printed                                                                                                                                                |
+| Before the read mint | Block mode has a commit-pinned allow-list coordinate and a loaded list                           | An allow-list absent without an error, or pinned to a moving branch                                                                                                                                            |
+| Before the read mint | A live run's `assets_sha` equals `job.workflow_sha`                                              | A reviewed workflow executing unreviewed scripts through `assets_ref`                                                                                                                                          |
+| After the read mint  | The `app-slug` the mint returns equals `config/bot.json`                                         | Another App's private key wired into this workflow                                                                                                                                                             |
+| After the read mint  | `GET /repos/{this}` with the token shows no `push`, `maintain` or `admin`                        | A read mint that obtained more than it asked for                                                                                                                                                               |
+| Before the write     | The write mint's `app-slug` equals `config/bot.json`                                             | The same, on the one token that can approve                                                                                                                                                                    |
+
+<!-- markdownlint-enable MD013 -->
+
+The gate costs about half a minute per run: a `uv` setup and a
+`zizmor` install from PyPI, which the allow-list already carries.
+Everything it checks is a file already on the runner or a value the
+workflow already holds; it introduces nothing new to trust. A run it
+fails is a run that must not proceed, and the error annotation names
+the check without quoting what the check read.
+
+The gate is not where policy lives. It verifies that the
+workflow still has the shape the design and tests describe; the
+design and tests remain the place to change that shape.
+
 ## 5. Selection
 
 The select job runs `select_pulls.py` with the App read token, or
@@ -628,7 +676,7 @@ Every bot repository in the organisation uses the same two names,
 so the callers are identical and the App behind a name can change
 without a code change.
 
-Repository permissions the App needs for this workflow:
+Repository permissions the App needs, and no others:
 
 <!-- markdownlint-disable MD013 -->
 
@@ -641,9 +689,6 @@ Repository permissions the App needs for this workflow:
 | Metadata        | read           | required by every token      |
 
 <!-- markdownlint-enable MD013 -->
-
-Issues write and the organisation-level issue field and type reads
-remain for triage and go unused here.
 
 Two mints, each the least its step needs. Select mints
 `pull-requests`, `contents`, `checks`, `statuses` and `metadata` at
