@@ -543,13 +543,13 @@ class CronContracts(WorkflowCase):
         call = self.jobs["code-review"]
         self.assertEqual(
             call["with"]["github_app_client_id"],
-            "${{ vars.LF_TRIAGE_BOT_CLIENT_ID || '' }}",
+            "${{ vars.BOT_APP_CLIENT_ID || '' }}",
         )
         self.assertEqual(
             call["secrets"],
             {
                 "copilot_token": "${{ secrets.COPILOT_CLI_TOKEN }}",
-                "github_app_private_key": "${{ secrets.LF_TRIAGE_BOT_PRIVATE_KEY }}",
+                "github_app_private_key": "${{ secrets.BOT_APP_PRIVATE_KEY }}",
             },
         )
         self.assertEqual(call["with"]["assets_repository"], "${{ github.repository }}")

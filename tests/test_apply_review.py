@@ -23,7 +23,7 @@ policy = import_module("review_policy")
 HEAD = "a" * 40
 MOVED = "b" * 40
 REPO = "lfreleng-actions/repo"
-BOT = "lf-releng-issues-triage-bot[bot]"
+BOT = "lf-releng-code-review-bot[bot]"
 RUN_URL = "https://github.com/lfreleng-actions/bot/actions/runs/1"
 
 

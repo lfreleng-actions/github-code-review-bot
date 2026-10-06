@@ -19,9 +19,12 @@ This guide covers what an operator configures and checks.
 
 ## GitHub App
 
-The workflow reuses the **LF/RelEng Issues Triage Bot** App (slug
-`lf-releng-issues-triage-bot`). Grant it these repository
-permissions, beyond the ones triage already uses:
+The workflow runs as a dedicated GitHub App that does nothing but
+review pull requests. In this organisation that App is **LF/RelEng
+Code Review Bot** (slug `lf-releng-code-review-bot`); the slug lives
+in `config/bot.json`, and the select job refuses a token minted by
+any other App (see *Pre-flight gate* below). Grant it these
+repository permissions and nothing else:
 
 <!-- markdownlint-disable MD013 -->
 
@@ -35,19 +38,20 @@ permissions, beyond the ones triage already uses:
 
 <!-- markdownlint-enable MD013 -->
 
-Issues write and the organisation-level issue field and type reads
-stay as they are; triage needs them and this workflow leaves them
-unused.
+The App stays separate from the issues triage and code monkey Apps
+on purpose: an approving identity must never be one that also pushes
+code, and a permission added for one pipeline must never widen
+another.
 
-**Accept the new permissions on the installation.** Adding
+**Accept permission changes on the installation.** Adding
 permissions to an App does not change its existing installations.
 GitHub emails the organisation owners a request, and the
-installation page under *Organization settings → GitHub Apps →
-LF/RelEng Issues Triage Bot* shows a pending review. Until an owner
-accepts it there, the select job's token mint fails with a message
-naming the permission the installation lacks. The installation must
-cover every repository the scan should see; "all repositories"
-matches the organisation-wide scan.
+installation page under *Organization settings → GitHub Apps* shows
+a pending review. Until an owner accepts it there, the select job's
+token mint fails with a message naming the permission the
+installation lacks. The installation must cover every repository the
+scan should see; "all repositories" matches the organisation-wide
+scan.
 
 Select mints `pull-requests`, `contents`, `checks`, `statuses` and
 `metadata` at read, scoped to the named repositories when any.
@@ -57,15 +61,18 @@ Review receives neither the App key nor any App token.
 
 ## Variables and secrets
 
-Configure these on the repository that runs the scheduled caller:
+Every bot repository in this organisation uses the same names, so
+the calling workflow is identical across them and the App behind a
+name can change without a code change. Configure these on the
+repository that runs the scheduled caller:
 
 <!-- markdownlint-disable MD013 -->
 
-| Name                        | Kind                | Value                                                 |
-| --------------------------- | ------------------- | ----------------------------------------------------- |
-| `LF_TRIAGE_BOT_CLIENT_ID`   | Repository variable | The App's client id; empty limits runs to dry-run     |
-| `LF_TRIAGE_BOT_PRIVATE_KEY` | Repository secret   | The App's private key (PEM)                           |
-| `COPILOT_CLI_TOKEN`         | Organisation secret | Fine-grained PAT with Copilot Requests (next section) |
+| Name                  | Kind                | Value                                                 |
+| --------------------- | ------------------- | ----------------------------------------------------- |
+| `BOT_APP_CLIENT_ID`   | Repository variable | The App's client id; empty limits runs to dry-run     |
+| `BOT_APP_PRIVATE_KEY` | Repository secret   | The App's private key (PEM)                           |
+| `COPILOT_CLI_TOKEN`   | Organisation secret | Fine-grained PAT with Copilot Requests (next section) |
 
 <!-- markdownlint-enable MD013 -->
 

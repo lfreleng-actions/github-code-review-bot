@@ -49,7 +49,7 @@ nothing to a pull request other than that one approval.
 
 Each approval:
 
-- comes from the **LF/RelEng Issues Triage Bot** App identity, not
+- comes from the **LF/RelEng Code Review Bot** App identity, not
   from a person, and says so in its body;
 - counts towards the required review under the organisation's
   branch ruleset, which is the intended effect;
@@ -478,7 +478,7 @@ composes the body; the agent never writes to GitHub:
 <sanitised summary>
 
 ---
-Automated review by `lf-releng-issues-triage-bot[bot]` using model
+Automated review by `lf-releng-code-review-bot[bot]` using model
 `claude-opus-5.5`; see the [run](<run_url>). This is not a human review.
 ```
 
@@ -556,7 +556,7 @@ Astra to `gpt-6-astra`. The caller passes
 `org: github.repository_owner`, so a fork's scheduled runs stay
 inside the fork; pins the assets to `github.sha`; runs trusted jobs
 in block mode with the organisation allow-list; and hands
-`vars.LF_TRIAGE_BOT_CLIENT_ID`, `secrets.LF_TRIAGE_BOT_PRIVATE_KEY`
+`vars.BOT_APP_CLIENT_ID`, `secrets.BOT_APP_PRIVATE_KEY`
 and `secrets.COPILOT_CLI_TOKEN` to the reusable workflow.
 
 Scheduled runs take `dry_run` from the expression
@@ -609,14 +609,24 @@ applies, and the read token scopes to their repositories.
 
 ## 10. Credentials
 
-### 10.1 The triage App, extended
+### 10.1 A dedicated App, under template names
 
-The workflow reuses the **LF/RelEng Issues Triage Bot** App (slug
-`lf-releng-issues-triage-bot`), configured through the repository
-variable `LF_TRIAGE_BOT_CLIENT_ID` and the secret
-`LF_TRIAGE_BOT_PRIVATE_KEY`. One App for both workflows keeps the
-organisation's App inventory short and means a single identity
-appears on triage labels and review approvals.
+The workflow runs as its own GitHub App. The first live approval
+used the issues triage App with its permissions widened, and that
+was a mistake worth recording: an identity that approves pull
+requests must never be one that also labels issues or pushes code,
+because a permission added for one pipeline widens the other, and
+because the ruleset exception an approver needs must stay as narrow
+as the approver. In this organisation the App is **LF/RelEng Code
+Review Bot**; its slug lives in `config/bot.json`, and the
+pre-flight gate (section 4.4) refuses a token minted by any other
+App.
+
+The calling workflow names the credentials by role, never by App or
+repository: `vars.BOT_APP_CLIENT_ID` and `secrets.BOT_APP_PRIVATE_KEY`.
+Every bot repository in the organisation uses the same two names,
+so the callers are identical and the App behind a name can change
+without a code change.
 
 Repository permissions the App needs for this workflow:
 
@@ -884,7 +894,7 @@ against the trusted `selection.json`.
   "dry_run": true,
   "model": "claude-opus-5.5",
   "approve_tiers": ["low-risk", "trivial"],
-  "bot_login": "lf-releng-issues-triage-bot[bot]",
+  "bot_login": "lf-releng-code-review-bot[bot]",
   "explicit_pull_requests": ["lfreleng-actions/repo#157"],
   "explicit_repositories": ["repo"],
   "exclusions": ["project-reporting-artifacts"],
