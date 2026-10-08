@@ -438,6 +438,13 @@ limit, and extracts `session-summary.md` (8 MiB cap) and
 check rather than a failed job, so a session that never ran still
 yields a verdict for its pull request.
 
+The fetch retries a download that `gh` reports without an HTTP
+status, meaning no reply arrived, or with a `500`, `502`, `503` or
+`504`, using the read backoff inside one five-minute deadline: the
+runner can lose DNS for a second while harden-runner restarts its
+resolver. A failure that outlasts the retries fails the step, and
+the fallback in §13 records it.
+
 ### 8.2 Offline check
 
 `apply_review.py check` reads the summary, extracts the final fenced
@@ -784,6 +791,7 @@ requires; the next select job fetches the newest five by that name.
 | -------------------------------------------------------- | ------------------------------------------ | ------------------------------------------------------------------------------------------------- |
 | Session times out or the CLI fails                       | Summary missing or without a verdict block | Apply writes a typed `needs-human` result with the reason; `reassess` retries the head            |
 | Session artifact missing or refused by the bounded fetch | Exit 3 or 4 from the fetch                 | `--failure` text becomes the reason; typed `needs-human`, no job failure                          |
+| Session download gets no reply or a transient `5xx`      | `gh` exits 1 in the fetch                  | Retried within the fetch deadline; if it persists, the `failed` fallback and a retry next run     |
 | Verdict names another repository, number or head         | Target mismatch                            | Offline check refuses; `needs-human` with the reason                                              |
 | Agent claims `trivial` on a code change                  | Classifier disagrees                       | Tier drops to `needs-human`; non-trivial paths listed                                             |
 | Head moves between select and apply                      | Live re-read sees a new SHA                | `needs-human` with "head moved"; the new head is a new key next run                               |
