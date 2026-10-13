@@ -673,6 +673,31 @@ class CronContracts(WorkflowCase):
         self.assertIn("'code-review'", group)
         self.assertFalse(self.workflow["concurrency"]["cancel-in-progress"])
 
+    @unittest.expectedFailure
+    def test_options_job_blocks_egress_with_the_allow_list(self) -> None:
+        """The options job loads the caller's allow-list, then blocks with it.
+
+        Without the loader, harden-runner in block mode configures no
+        egress rules at all. The loader reads the public ``.github``
+        repository, so the job keeps an empty permission set.
+        """
+        self.assertEqual(self.jobs["options"]["permissions"], {})
+        steps = self.steps("options")
+        first_action = next(s for s in steps if "uses" in s)
+        self.assertTrue(is_action(first_action, BLOCK_ACTION))
+        loader = self.action("options", BLOCK_ACTION)
+        self.assertEqual(
+            loader["with"]["config"],
+            self.jobs["code-review"]["with"]["egress_allow_config"],
+        )
+        self.assertEqual(loader["with"]["allow_list_summary"], "false")
+        harden = self.action("options", HARDEN_RUNNER)
+        self.assertLess(steps.index(loader), steps.index(harden))
+        self.assertEqual(harden["with"]["egress-policy"], "block")
+        self.assertEqual(
+            harden["with"]["allowed-endpoints"], "${{ env.CONNECTION_ALLOW_LIST }}"
+        )
+
     def test_caller_steps_are_pinned(self) -> None:
         """The options job's actions name commits."""
         self.assert_pinned_steps()
