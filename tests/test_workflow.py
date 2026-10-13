@@ -673,7 +673,6 @@ class CronContracts(WorkflowCase):
         self.assertIn("'code-review'", group)
         self.assertFalse(self.workflow["concurrency"]["cancel-in-progress"])
 
-    @unittest.expectedFailure
     def test_options_job_blocks_egress_with_the_allow_list(self) -> None:
         """The options job loads the caller's allow-list, then blocks with it.
 
