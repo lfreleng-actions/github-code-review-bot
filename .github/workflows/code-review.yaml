@@ -48,7 +48,7 @@ on:
         type: string
         default: ''
       exclude_repos:
-        description: 'Comma-separated repos to skip (overrides bundled list)'
+        description: 'Repos to skip, commas and/or spaces; overrides bundle'
         type: string
         default: ''
       max_pull_requests:
@@ -175,8 +175,6 @@ jobs:
           MAX_AGENTS: "${{ inputs.max_concurrent_agents }}"
           MODEL: "${{ inputs.model }}"
           APPROVE_TIERS: "${{ inputs.approve_tiers }}"
-          REPOSITORIES: "${{ inputs.repositories }}"
-          PULL_REQUESTS: "${{ inputs.pull_requests }}"
         run: |
           [[ "$MAX_PRS" =~ ^[0-9]+$ ]] || {
             echo '::error::max_pull_requests must be a non-negative integer'
@@ -194,30 +192,48 @@ jobs:
                exit 1 ;;
           esac
           # Expressions cannot add, so the job budget (session plus
-          # toolchain setup and upload) is computed here. The read
-          # token scopes to the named repositories, or to the
-          # repositories of the named pull requests; empty keeps it
-          # organisation-wide, which the scan needs. Both lists are
-          # normalised to commas for the App token action, which does
-          # not split on spaces. sed rather than grep -v: grep exits 1
-          # on empty input, which would fail this assignment.
-          repositories="$(printf '%s' "$REPOSITORIES" | tr ', ' '\n' \
-            | sed '/^$/d' | paste -sd, -)"
-          if [ -n "$PULL_REQUESTS" ]; then
-            repositories="$(printf '%s' "$PULL_REQUESTS" | tr ', ' '\n' \
-              | sed -e '/^$/d' -e 's#^https://github.com/##' \
-                -e 's#/pull/[0-9]*/*$##' -e 's/#[0-9]*$//' -e 's#^.*/##' \
-              | sort -u | paste -sd, -)"
-          fi
-          [[ "$repositories" =~ ^[A-Za-z0-9_.,-]*$ ]] || {
-            echo '::error::repository names carry unexpected characters'
-            exit 1; }
+          # toolchain setup and upload) is computed here.
           {
             echo "agent_timeout=$MAX_RUNTIME"
             echo "review_timeout=$((MAX_RUNTIME + 15))"
             echo "max_parallel=$MAX_AGENTS"
-            echo "repositories=$repositories"
           } >> "$GITHUB_OUTPUT"
+
+      # Operator lists: commas, spaces or newlines between items of
+      # the target owner. Each splits offline, with no token, and a
+      # bad item fails the run before the App key is used, every
+      # mistake reported at once. Repeats collapse without regard to
+      # case; a pull request publishes as owner/repo#N whichever of
+      # the accepted spellings named it.
+      - name: 'Split repositories'
+        id: repositories
+        # yamllint disable-line rule:line-length
+        uses: lfreleng-actions/list-splitter-action@b56a625474875d05ca8d1c1eb3314c29c526c9a6 # v0.1.0
+        with:
+          list: "${{ inputs.repositories }}"
+          validate: 'repository'
+          owner: "${{ inputs.org }}"
+          token: ''
+
+      - name: 'Split excluded repositories'
+        id: exclusions
+        # yamllint disable-line rule:line-length
+        uses: lfreleng-actions/list-splitter-action@b56a625474875d05ca8d1c1eb3314c29c526c9a6 # v0.1.0
+        with:
+          list: "${{ inputs.exclude_repos }}"
+          validate: 'repository'
+          owner: "${{ inputs.org }}"
+          token: ''
+
+      - name: 'Split pull requests'
+        id: pulls
+        # yamllint disable-line rule:line-length
+        uses: lfreleng-actions/list-splitter-action@b56a625474875d05ca8d1c1eb3314c29c526c9a6 # v0.1.0
+        with:
+          list: "${{ inputs.pull_requests }}"
+          validate: 'pull-request'
+          owner: "${{ inputs.org }}"
+          token: ''
 
       - name: 'Require App for live runs'
         if: ${{ !inputs.dry_run && inputs.github_app_client_id == '' }}
@@ -304,9 +320,14 @@ jobs:
           client-id: "${{ inputs.github_app_client_id }}"
           private-key: "${{ secrets.github_app_private_key }}"
           owner: "${{ inputs.org }}"
-          # Empty means every repository of the owner: the candidate
-          # scan is organisation-wide by design and this token reads.
-          repositories: "${{ steps.budget.outputs.repositories }}"
+          # The repositories of the named pull requests, else the named
+          # repositories. Empty means every repository of the owner:
+          # the candidate scan is organisation-wide by design and this
+          # token reads.
+          repositories: >-
+            ${{ steps.pulls.outputs.count != '0'
+            && steps.pulls.outputs.repositories
+            || steps.repositories.outputs.repositories }}
           permission-pull-requests: 'read'
           permission-contents: 'read'
           permission-checks: 'read'
@@ -346,9 +367,9 @@ jobs:
           DRY_RUN: "${{ inputs.dry_run }}"
           REASSESS: "${{ inputs.reassess }}"
           APPROVE_TIERS: "${{ inputs.approve_tiers }}"
-          PULL_REQUESTS: "${{ inputs.pull_requests }}"
-          REPOSITORIES: "${{ inputs.repositories }}"
-          EXCLUDE_REPOS: "${{ inputs.exclude_repos }}"
+          PULL_REQUESTS: "${{ steps.pulls.outputs.csv }}"
+          REPOSITORIES: "${{ steps.repositories.outputs.csv }}"
+          EXCLUDE_REPOS: "${{ steps.exclusions.outputs.csv }}"
           MAX_PRS: "${{ inputs.max_pull_requests }}"
           BOT_SLUG: "${{ steps.app-token.outputs.app-slug }}"
         run: |

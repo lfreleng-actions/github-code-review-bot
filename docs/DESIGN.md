@@ -573,7 +573,7 @@ working: a typed `needs-human` result and exit 0.
 | `approve_tiers`         | `trivial,low-risk`                        | Tiers the run may approve: `trivial,low-risk`, `trivial` or `none`                |
 | `pull_requests`         | `''`                                      | Pull requests to review instead of scanning (§9.4)                                |
 | `repositories`          | `''`                                      | Repository names to scan; commas and/or spaces                                    |
-| `exclude_repos`         | `''`                                      | Repository names to skip; overrides the bundled list                              |
+| `exclude_repos`         | `''`                                      | Repository names to skip; commas and/or spaces; overrides the bundled list        |
 | `max_pull_requests`     | `20`                                      | Cap after ordering; `0` lifts it to 256                                           |
 | `max_concurrent_agents` | `5`                                       | Review sessions at once, 1-30                                                     |
 | `max_runtime_minutes`   | `20`                                      | Wall-clock budget per session, 1-120                                              |
@@ -597,10 +597,18 @@ working: a typed `needs-human` result and exit 0.
 <!-- markdownlint-enable MD013 -->
 
 The select job validates every numeric and enumerated input before
-any token mints, and fails a live run that lacks a client id. It
-also derives the repository scope of the read token: the named
-repositories, or the repositories of the named pull requests, or
-empty for an organisation-wide token when scanning.
+any token mints, and fails a live run that lacks a client id. The
+`pull_requests`, `repositories` and `exclude_repos` lists go to
+[`list-splitter-action`](https://github.com/lfreleng-actions/list-splitter-action),
+which splits each on commas and whitespace, drops repeats without
+regard to case, and refuses anything but a pull request reference or
+a bare repository name of `org`, reporting every bad item before the
+run fails. It works offline and takes no token, and every split runs
+before the read mint. The mint's repository scope comes from its
+outputs: the repositories of the named pull requests, or the named
+repositories, or empty for an organisation-wide token when scanning.
+The selection receives the split lists, pull requests in their
+canonical `owner/repo#N` form, never the raw inputs.
 
 ### 9.2 Scheduled caller (`code-review-cron.yaml`)
 
