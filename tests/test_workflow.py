@@ -179,14 +179,11 @@ class TopLevelContracts(ReusableWorkflowCase):
 class SelectContracts(ReusableWorkflowCase):
     """The trusted select job: scoped reads, ledger, evidence and matrix."""
 
-    def test_read_token_is_read_only_and_scoped_to_named_targets(self) -> None:
-        """The scan token reads alone; naming targets narrows its repositories."""
+    def test_read_token_is_read_only(self) -> None:
+        """The scan token reads alone; ListInputContracts pins its scope."""
         mint = self.action("select", APP_TOKEN)
         grants = {k: v for k, v in mint["with"].items() if k.startswith("permission-")}
         self.assertEqual(set(grants.values()), {"read"})
-        self.assertEqual(
-            mint["with"]["repositories"], "${{ steps.budget.outputs.repositories }}"
-        )
 
     def test_live_runs_require_the_app(self) -> None:
         """Without a client id the workflow refuses to leave dry-run."""
@@ -342,10 +339,6 @@ class MintProvenanceContracts(ReusableWorkflowCase):
         """The only write token names a single matrix repository, never a list."""
         mint = self.action("apply", APP_TOKEN)
         self.assertEqual(mint["with"]["repositories"], "${{ matrix.repo_name }}")
-        read = self.action("select", APP_TOKEN)
-        self.assertEqual(
-            read["with"]["repositories"], "${{ steps.budget.outputs.repositories }}"
-        )
 
 
 class ReviewContracts(ReusableWorkflowCase):
@@ -550,7 +543,6 @@ class ListInputContracts(ReusableWorkflowCase):
         "pull_requests": ("pulls", "pull-request"),
     }
 
-    @unittest.expectedFailure
     def test_each_list_is_split_as_objects_of_the_org(self) -> None:
         """Names and references of the trusted owner, offline, with no token."""
         self.assertEqual(len(self.actions("select", SPLITTER)), len(self.LISTS))
@@ -564,7 +556,6 @@ class ListInputContracts(ReusableWorkflowCase):
                 self.assertEqual(split["with"]["token"], "")
                 self.assertNotIn("verify", split["with"])
 
-    @unittest.expectedFailure
     def test_lists_are_split_before_the_read_mint(self) -> None:
         """A bad name or reference fails the run before the App key is used."""
         mint = self.position("select", "app-token")
@@ -572,7 +563,6 @@ class ListInputContracts(ReusableWorkflowCase):
             with self.subTest(step=identity):
                 self.assertLess(self.position("select", identity), mint)
 
-    @unittest.expectedFailure
     def test_read_mint_scope_follows_the_named_targets(self) -> None:
         """Named pull requests win, then named repositories; blank scans."""
         mint = self.action("select", APP_TOKEN)
@@ -583,7 +573,6 @@ class ListInputContracts(ReusableWorkflowCase):
             " || steps.repositories.outputs.repositories }}",
         )
 
-    @unittest.expectedFailure
     def test_selection_reads_the_split_lists(self) -> None:
         """The raw inputs reach the splitters and nothing else."""
         env = self.step("select", "Select pull requests")["env"]
