@@ -29,9 +29,17 @@ from bot_evidence import MAX_EVIDENCE_BYTES, read_regular
 from review_policy import defuse
 
 SCHEMA = 1
-# The verdicts that make a head a skip next run; see ledger.record.
-RECORDED_VERDICTS = frozenset({"approved", "would-approve", "needs-human"})
-VERDICTS = ("approved", "would-approve", "needs-human", "failed")
+# Per mode: the verdicts a result may carry, and those that make a head
+# a skip next run (see ledger.record). A refused antagonistic review is
+# looked at again, as is any failure.
+VERDICTS_BY_MODE = {
+    "approve": ("approved", "would-approve", "needs-human", "failed"),
+    "antagonistic": ("commented", "would-comment", "refused", "failed"),
+}
+RECORDED_BY_MODE = {
+    "approve": frozenset({"approved", "would-approve", "needs-human"}),
+    "antagonistic": frozenset({"commented", "would-comment"}),
+}
 MAX_RESULT_BYTES = 1024 * 1024
 LINE_LIMIT = 120
 # C0 and C1 controls plus the Unicode line separators: any of them
@@ -73,7 +81,15 @@ def pull_label(data: dict[str, Any]) -> str:
     return f"{data.get('repository', '?')}#{data.get('number', '?')}"
 
 
-def check_result(raw: Any) -> dict[str, Any]:
+def mode_of(selection: dict[str, Any]) -> str:
+    """The mode the trusted selection recorded, refusing an unknown one."""
+    mode = selection.get("mode")
+    if not isinstance(mode, str) or mode not in VERDICTS_BY_MODE:
+        raise ValueError("selection names no known mode")
+    return mode
+
+
+def check_result(raw: Any, verdicts: tuple[str, ...]) -> dict[str, Any]:
     """Validate one result file's shape, raising ValueError when it is off."""
     if not isinstance(raw, dict):
         raise ValueError("result is not an object")
@@ -84,8 +100,8 @@ def check_result(raw: Any) -> dict[str, Any]:
     key = result.get("key")
     if result.get("schema") != SCHEMA:
         raise ValueError(f"result schema is not {SCHEMA}")
-    if result.get("verdict") not in VERDICTS:
-        raise ValueError("result verdict is not one of the four values")
+    if result.get("verdict") not in verdicts:
+        raise ValueError("result verdict is not one this mode produces")
     if (
         not isinstance(key, str)
         or not key
@@ -116,7 +132,9 @@ def result_files(directory: Path) -> list[Path]:
     return [path for path in found if path.is_file()]
 
 
-def load_results(directory: Path) -> tuple[list[dict[str, Any]], list[str]]:
+def load_results(
+    directory: Path, verdicts: tuple[str, ...]
+) -> tuple[list[dict[str, Any]], list[str]]:
     """Read every result file, ordered by key, naming the ones left out."""
     results: list[dict[str, Any]] = []
     unreadable: list[str] = []
@@ -125,7 +143,7 @@ def load_results(directory: Path) -> tuple[list[dict[str, Any]], list[str]]:
     for path in result_files(directory):
         try:
             content = read_regular(path, MAX_RESULT_BYTES)
-            results.append(check_result(json.loads(content)))
+            results.append(check_result(json.loads(content), verdicts))
         except (OSError, ValueError, RecursionError):
             unreadable.append(path.parent.name)
     results.sort(key=lambda result: str(result["key"]))
@@ -170,7 +188,7 @@ def count_verdicts(
     selection: dict[str, Any], results: list[dict[str, Any]]
 ) -> dict[str, int]:
     """Verdict counts, plus the selection's skips and candidates seen."""
-    counts: dict[str, int] = dict.fromkeys(VERDICTS, 0)
+    counts: dict[str, int] = dict.fromkeys(VERDICTS_BY_MODE[mode_of(selection)], 0)
     for result in results:
         counts[str(result["verdict"])] += 1
     seen = selection.get("candidates_seen")
@@ -200,11 +218,11 @@ def spend(results: list[dict[str, Any]]) -> tuple[float, int]:
 
 
 def build_ledger(
-    prior: dict[str, Any], results: list[dict[str, Any]], run_id: int
+    prior: dict[str, Any], results: list[dict[str, Any]], run_id: int, mode: str
 ) -> dict[str, Any]:
     """The prior ledger plus this run's assessments."""
     for result in results:
-        ledger.record(prior, result, run_id=run_id, recorded=RECORDED_VERDICTS)
+        ledger.record(prior, result, run_id=run_id, recorded=RECORDED_BY_MODE[mode])
     return prior
 
 
@@ -217,6 +235,7 @@ def build_report(
     premium_requests, agent_seconds = spend(results)
     return {
         "schema": SCHEMA,
+        "mode": mode_of(selection),
         "dry_run": selection.get("dry_run") is True,
         "counts": count_verdicts(selection, results),
         "results": results,
@@ -236,6 +255,14 @@ def detail_of(result: dict[str, Any]) -> str:
     if isinstance(reasons, list) and cast("list[Any]", reasons):
         return one_line(cast("list[Any]", reasons)[0])
     return one_line(result.get("summary"))
+
+
+def assessment_of(result: dict[str, Any], mode: str) -> str:
+    """The approve mode's tier, or the antagonistic mode's comment count."""
+    if mode == "approve":
+        return one_line(result.get("tier") or "?")
+    count = result.get("comment_count")
+    return str(count) if type(count) is int and count >= 0 else "?"
 
 
 def table(headers: list[str], rows: list[list[str]]) -> list[str]:
@@ -260,10 +287,11 @@ def render_markdown(
         if isinstance(entry.get("key"), str)
     }
     counts = cast("dict[str, int]", report["counts"])
+    mode = str(report["mode"])
     lines = [
         "# Code review run",
         "",
-        f"Dry run: {'yes' if report['dry_run'] else 'no'}",
+        f"Mode: {mode}; dry run: {'yes' if report['dry_run'] else 'no'}",
         "",
         ", ".join(
             f"{name.replace('_', ' ')}: {count}" for name, count in counts.items()
@@ -277,7 +305,7 @@ def render_markdown(
             link(pull_label(result), result.get("url")),
             one_line(result.get("title")),
             one_line(authors.get(result["key"]) or "?"),
-            one_line(result.get("tier") or "?"),
+            assessment_of(result, mode),
             one_line(result["verdict"]),
             detail_of(result),
         ]
@@ -292,8 +320,9 @@ def render_markdown(
         for row in cast("list[dict[str, Any]]", report["skipped"])
     ]
     lines.extend(["", "## Results", ""])
+    assessment = "Tier" if mode == "approve" else "Comments"
     lines.extend(
-        table(["PR", "Title", "Author", "Tier", "Verdict", "Detail"], result_rows)
+        table(["PR", "Title", "Author", assessment, "Verdict", "Detail"], result_rows)
     )
     lines.extend(["", "## Skipped", ""])
     lines.extend(table(["PR", "Title", "Reason"], skipped))
@@ -334,9 +363,10 @@ def main(argv: list[str] | None = None) -> None:
         parser.error("--run-id must be a positive integer")
     try:
         selection = load_selection(args.selection)
+        mode = mode_of(selection)
         prior = ledger.load_ledger(args.ledger)
-        results, unreadable = load_results(args.results)
-        new_ledger = build_ledger(prior, results, run_id)
+        results, unreadable = load_results(args.results, VERDICTS_BY_MODE[mode])
+        new_ledger = build_ledger(prior, results, run_id, mode)
         report = build_report(selection, results, len(new_ledger["entries"]))
         write_json(args.output_json, report)
         write_json(args.output_ledger, new_ledger)

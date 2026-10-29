@@ -1,11 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: 2026 The Linux Foundation
 
-"""The changed files and commits of one pull request, bounded.
+"""The changed files, commits and full review history of one pull request.
 
 Split from ``pull_reads`` so the state reads the skip rules depend
-on stay apart from the diff reads, which are the costly part and run
-for survivors alone.
+on stay apart from the paginated reads, which are the costly part and
+run for the candidates that need them alone.
 """
 
 from __future__ import annotations
@@ -91,3 +91,32 @@ def pull_commits(repository: str, number: int) -> list[dict[str, Any]]:
             }
         )
     return commits
+
+
+def pull_reviews(repository: str, number: int) -> list[dict[str, Any]]:
+    """Every review of the pull request, oldest first, however many there are.
+
+    The state query reads the last 100. A rule that must know whether a
+    reviewer ever reviewed a head, rather than recently, reads them all.
+    Each entry has the ``author``, ``state`` and ``commit`` keys of the
+    the state query's reviews, plus ``is_bot``; a deleted account leaves
+    the author null.
+    """
+    context = f"{repository}#{number} review"
+    reviews: list[dict[str, Any]] = []
+    for entry in github.api_list(
+        f"repos/{repository}/pulls/{number}/reviews?per_page=100"
+    ):
+        user = entry.get("user")
+        data = cast("dict[str, Any]", user) if isinstance(user, dict) else {}
+        login = data.get("login")
+        commit = entry.get("commit_id")
+        reviews.append(
+            {
+                "author": login if isinstance(login, str) else None,
+                "is_bot": data.get("type") == "Bot",
+                "state": github.require_str(entry, "state", context),
+                "commit": commit if isinstance(commit, str) else None,
+            }
+        )
+    return reviews

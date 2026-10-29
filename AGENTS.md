@@ -33,24 +33,32 @@ a pull request, not the full set:
 
 ## Repository specifics
 
-A reusable GitHub workflow that reviews open, human-authored pull
-requests across the organisation with one Copilot CLI session per
-pull request, approves the trivial and low-risk ones through a
-trusted job, and reports the rest. `docs/DESIGN.md` is the
-architecture and trust model; read it before changing how the jobs
-hand data to each other.
+A reusable GitHub workflow that reviews open pull requests across
+the organisation with one Copilot CLI session per pull request, in
+one of two modes. The **approve** mode reviews human-authored pull
+requests, approves the trivial and low-risk ones through a trusted
+job, and reports the rest. The **antagonistic** mode reviews pull
+requests from listed coding bots and posts its findings as one
+comment review, never an approval. `docs/DESIGN.md` is the
+architecture and trust model (§19 for the antagonistic mode); read
+it before changing how the jobs hand data to each other.
 
 - `.github/workflows/code-review.yaml`: the reusable workflow (select,
   review, apply, report); `code-review-cron.yaml` schedules and
-  dispatches it; `testing.yaml` runs the suite and PR plumbing.
+  dispatches the approve mode; `code-review-antagonistic.yaml`
+  dispatches the antagonistic mode; `testing.yaml` runs the suite
+  and PR plumbing.
 - `scripts/`: the Python the jobs run; `tests/`: its offline suite.
   Every bot carries five shared modules, copied verbatim from
   `lfreleng-actions/bots-template`: `bot_github.py`, `bot_evidence.py`,
   `artifact_fetch.py`, `preflight.py`, `ledger.py`. Fix them in the
   template first, then copy; never patch a copy alone.
-- `prompt/review.md`: the agent's task and the three tiers. The
-  trusted side of each tier lives in `scripts/review_vetoes.py`;
+- `prompt/review.md`: the approve mode's task and the three tiers.
+  The trusted side of each tier lives in `scripts/review_vetoes.py`;
   change the two together.
+- `prompt/antagonistic.md`: the antagonistic mode's task and its
+  comment contract. The trusted side lives in
+  `scripts/review_comments.py`; change the two together.
 
 Before pushing, run:
 
@@ -61,9 +69,11 @@ zizmor --persona auditor .github/workflows/   # zero findings
 ```
 
 Nothing about the review job earns trust: never give it a credential
-that can write to a repository, and never let it hold the App key.
-This pipeline makes one write, an APPROVE review from the apply
-job; never add a comment, a label or a request-changes review.
-The contract tests in `tests/test_workflow.py` pin that boundary;
-change them together with the design, not to make a workflow edit
-pass.
+that can write to a repository, and never let it hold an App key.
+Each mode makes one write from the apply job, under its own App: the
+approve mode an APPROVE review, the antagonistic mode a COMMENT
+review with inline comments. Never add a label or a request-changes
+review, never let the antagonistic path approve, and never let the
+approve mode comment. The contract tests in `tests/test_workflow.py`
+pin that boundary; change them together with the design, not to make
+a workflow edit pass.

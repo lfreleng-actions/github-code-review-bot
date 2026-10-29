@@ -1,0 +1,13 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Linux Foundation
+
+# Bot identities whose pull requests the antagonistic mode reviews, one
+# login per line. Logins compare without case and without the "[bot]"
+# suffix that REST and search add to an App's login, so either form
+# matches. Every other author, human or bot, is skipped in that mode.
+
+# Code Monkey: lfreleng-actions/github-code-monkey-bot
+lf-releng-code-monkey-bot
+
+# Copilot coding agent
+Copilot

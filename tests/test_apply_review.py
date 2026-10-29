@@ -51,6 +51,7 @@ def selection(**overrides: Any) -> dict[str, Any]:
     """A selection.json object holding the entry."""
     data: dict[str, Any] = {
         "schema": 1,
+        "mode": "approve",
         "dry_run": False,
         "model": "claude-opus-5.5",
         "approve_tiers": ["low-risk", "trivial"],
@@ -193,9 +194,12 @@ class ApplyCommandTests(unittest.TestCase):
         self.root = Path(self.tmp.name)
         (self.root / "selection.json").write_text(json.dumps(selection()))
         verdict = policy.extract_verdict(verdict_text())
-        self.check = policy.check(
-            entry(), verdict, approve_tiers=frozenset({"trivial", "low-risk"})
-        )
+        self.check = {
+            "mode": "approve",
+            **policy.check(
+                entry(), verdict, approve_tiers=frozenset({"trivial", "low-risk"})
+            ),
+        }
         self.write_check()
 
     def tearDown(self) -> None:
@@ -399,6 +403,28 @@ class ApplyCommandTests(unittest.TestCase):
         """A tampered or inconsistent check.json cannot drive an approval."""
         self.check["tier"] = "needs-human"
         self.write_check()
+        with (
+            patch.object(apply_review.github, "api_write") as write,
+            self.assertRaises(SystemExit),
+        ):
+            self.apply()
+        write.assert_not_called()
+
+    def test_antagonistic_files_cannot_drive_an_approval(self) -> None:
+        """A check or a selection from the antagonistic mode is refused outright."""
+        self.check["mode"] = "antagonistic"
+        self.write_check()
+        with (
+            patch.object(apply_review.github, "api_write") as write,
+            self.assertRaises(SystemExit),
+        ):
+            self.apply()
+        write.assert_not_called()
+        self.check["mode"] = "approve"
+        self.write_check()
+        (self.root / "selection.json").write_text(
+            json.dumps(selection(mode="antagonistic"))
+        )
         with (
             patch.object(apply_review.github, "api_write") as write,
             self.assertRaises(SystemExit),

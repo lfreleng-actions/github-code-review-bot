@@ -22,6 +22,7 @@ ledger = import_module("ledger")
 
 SHA = "a" * 40
 URL = "https://github.com/lfreleng-actions/repo/pull/157"
+APPROVE = report.VERDICTS_BY_MODE["approve"]
 
 
 def make_result(**overrides: Any) -> dict[str, Any]:
@@ -54,6 +55,7 @@ def make_selection(**overrides: Any) -> dict[str, Any]:
     """A selection with one pull request and two skips."""
     selection: dict[str, Any] = {
         "schema": 1,
+        "mode": "approve",
         "dry_run": False,
         "candidates_seen": 13,
         "skipped": [
@@ -112,7 +114,7 @@ class CheckResultTest(unittest.TestCase):
     def test_valid_result_returned(self) -> None:
         """A conforming result comes back unchanged."""
         result = make_result()
-        self.assertIs(report.check_result(result), result)
+        self.assertIs(report.check_result(result, APPROVE), result)
 
     def test_invalid_shapes_rejected(self) -> None:
         """Each contract field is checked."""
@@ -128,9 +130,9 @@ class CheckResultTest(unittest.TestCase):
         ]
         for overrides in bad:
             with self.subTest(overrides=overrides), self.assertRaises(ValueError):
-                report.check_result(make_result(**overrides))
+                report.check_result(make_result(**overrides), APPROVE)
         with self.assertRaises(ValueError):
-            report.check_result(["not", "an", "object"])
+            report.check_result(["not", "an", "object"], APPROVE)
 
 
 class LoadResultsTest(unittest.TestCase):
@@ -154,7 +156,7 @@ class LoadResultsTest(unittest.TestCase):
         """Directory names do not decide the order; keys do."""
         self.place("z-dir", json.dumps(make_result(key="alpha-1")).encode())
         self.place("a-dir", json.dumps(make_result(key="beta-2")).encode())
-        results, unreadable = report.load_results(self.root)
+        results, unreadable = report.load_results(self.root, APPROVE)
         self.assertEqual([r["key"] for r in results], ["alpha-1", "beta-2"])
         self.assertEqual(unreadable, [])
 
@@ -168,19 +170,19 @@ class LoadResultsTest(unittest.TestCase):
         (self.root / "linked" / "result.json").symlink_to(
             self.root / "good" / "result.json"
         )
-        results, unreadable = report.load_results(self.root)
+        results, unreadable = report.load_results(self.root, APPROVE)
         self.assertEqual(len(results), 1)
         self.assertEqual(unreadable, ["big", "garbage", "linked", "shape"])
 
     def test_missing_directory_is_empty(self) -> None:
         """No results dir means no results, not a failure."""
-        self.assertEqual(report.load_results(self.root / "absent"), ([], []))
+        self.assertEqual(report.load_results(self.root / "absent", APPROVE), ([], []))
 
     def test_single_artifact_extracted_flat_is_read(self) -> None:
         """download-artifact writes one match straight into the path."""
         (self.root / "result.json").write_bytes(json.dumps(make_result()).encode())
         (self.root / "check.json").write_text("{}")
-        results, unreadable = report.load_results(self.root)
+        results, unreadable = report.load_results(self.root, APPROVE)
         self.assertEqual([r["key"] for r in results], ["repo-157"])
         self.assertEqual(unreadable, [])
 
@@ -188,7 +190,7 @@ class LoadResultsTest(unittest.TestCase):
         """Only ``*/result.json`` counts; other files are not results."""
         (self.root / "other").mkdir()
         (self.root / "other" / "check.json").write_text("{}")
-        self.assertEqual(report.load_results(self.root), ([], []))
+        self.assertEqual(report.load_results(self.root, APPROVE), ([], []))
 
 
 class ReportShapeTest(unittest.TestCase):
@@ -247,7 +249,7 @@ class ReportShapeTest(unittest.TestCase):
             report.build_report(selection, results, 1), selection, ["dir-x"]
         )
         self.assertIn("# Code review run", rendered)
-        self.assertIn("Dry run: yes", rendered)
+        self.assertIn("Mode: approve; dry run: yes", rendered)
         self.assertIn("1 result file(s) unreadable: dir-x", rendered)
         self.assertIn(
             f"| [lfreleng-actions/repo#\u200b157]({URL}) | Fix: Correct the thing"
@@ -271,7 +273,55 @@ class ReportShapeTest(unittest.TestCase):
             report.build_report(selection, [], 0), selection, []
         )
         self.assertEqual(rendered.count("None."), 2)
-        self.assertIn("Dry run: no", rendered)
+        self.assertIn("Mode: approve; dry run: no", rendered)
+
+
+class AntagonisticReportTest(unittest.TestCase):
+    """The antagonistic mode counts its own verdicts and remembers posted reviews."""
+
+    def test_verdicts_ledger_and_comment_column(self) -> None:
+        """commented and would-comment are remembered; refused and failed are not."""
+        selection = make_selection(mode="antagonistic")
+        results = [
+            make_result(key="a-1", number=1, verdict="commented", comment_count=3),
+            make_result(key="b-2", number=2, verdict="would-comment", comment_count=0),
+            make_result(key="c-3", number=3, verdict="refused", review_url=None),
+            make_result(key="d-4", number=4, verdict="failed", review_url=None),
+        ]
+        built = report.build_report(selection, results, 0)
+        self.assertEqual(built["mode"], "antagonistic")
+        self.assertEqual(
+            {k: built["counts"][k] for k in report.VERDICTS_BY_MODE["antagonistic"]},
+            {"commented": 1, "would-comment": 1, "refused": 1, "failed": 1},
+        )
+        ledger_after = report.build_ledger(
+            ledger.empty_ledger(), results, 42, "antagonistic"
+        )
+        self.assertEqual(
+            [entry["verdict"] for entry in ledger_after["entries"]],
+            ["commented", "would-comment"],
+        )
+        rendered = report.render_markdown(built, selection, [])
+        self.assertIn("Mode: antagonistic; dry run: no", rendered)
+        self.assertIn("| Author | Comments | Verdict |", rendered)
+        self.assertIn("| ? | 3 | commented |", rendered)
+        self.assertIn("| ? | ? | refused |", rendered)
+
+    def test_each_mode_refuses_the_other_modes_verdicts(self) -> None:
+        """An approval cannot hide in an antagonistic report, nor the reverse."""
+        with self.assertRaises(ValueError):
+            report.check_result(
+                make_result(verdict="approved"),
+                report.VERDICTS_BY_MODE["antagonistic"],
+            )
+        with self.assertRaises(ValueError):
+            report.check_result(make_result(verdict="commented"), APPROVE)
+
+    def test_a_selection_without_a_known_mode_is_refused(self) -> None:
+        """The report cannot guess which verdicts and ledger apply."""
+        for mode in (None, "approve-all"):
+            with self.subTest(mode=mode), self.assertRaises(ValueError):
+                report.mode_of(make_selection(mode=mode))
 
 
 class MainTest(unittest.TestCase):
@@ -290,7 +340,7 @@ class MainTest(unittest.TestCase):
             prior,
             make_result(key="old-1", number=1, head_sha="b" * 40),
             run_id=1,
-            recorded=report.RECORDED_VERDICTS,
+            recorded=report.RECORDED_BY_MODE["approve"],
         )
         self.prior.write_text(json.dumps(prior))
         self.results = self.root / "results"
