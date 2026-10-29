@@ -231,6 +231,20 @@ class DefuseTests(unittest.TestCase):
         once = policy.defuse(text)
         self.assertEqual(policy.defuse(once), once)
 
+    def test_emails_code_spans_and_commit_references(self) -> None:
+        """An email's ``@`` and a code span's contents are defused like any
+        other text: telling a code span from stray backticks needs paragraph
+        structure, so the one-line sanitiser does not try. A bare commit SHA
+        is left alone: GitHub links it within the repository but notifies
+        nobody and leaves no cross-reference.
+        """
+        self.assertEqual(policy.defuse("a@b.com"), f"a@{ZWSP}b.com")
+        self.assertEqual(
+            policy.defuse("`@dataclass #12`"), f"`@{ZWSP}dataclass #{ZWSP}12`"
+        )
+        sha = "6f625e6d5f0f2d7b9f3e4d6f2b8b8f0c1a2b3c4d"
+        self.assertEqual(policy.defuse(f"fixed in {sha}"), f"fixed in {sha}")
+
 
 class DisarmTests(unittest.TestCase):
     """Raw HTML and links leave the agent's text inert outside the organisation.

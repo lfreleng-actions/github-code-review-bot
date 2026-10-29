@@ -11,12 +11,19 @@ SPDX-FileCopyrightText: 2026 The Linux Foundation
 <!-- prettier-ignore-end -->
 
 Scheduled AI review of pull requests across the `lfreleng-actions`
-organisation. A reusable workflow selects open, human-authored,
-non-draft pull requests with green CI, runs one Copilot CLI review
-session per pull request, and approves the changes that are trivial
-or that a code review finds low risk. It posts nothing else: a pull
-request it cannot approve appears in the run report for a human, and
-the pull request itself stays untouched.
+organisation, in two modes:
+
+- **Approve.** A reusable workflow selects open, human-authored,
+  non-draft pull requests with green CI, runs one Copilot CLI review
+  session per pull request, and approves the changes that are
+  trivial or that a code review finds low risk. It posts nothing
+  else: a pull request it cannot approve appears in the run report
+  for a human, and the pull request itself stays untouched.
+- **Antagonistic.** On dispatch, the same pipeline reads pull
+  requests opened by coding bots (Code Monkey, the Copilot coding
+  agent) as a hostile reviewer would, and posts its findings as one
+  comment review with each finding on its line. It never approves:
+  a maintainer still reviews and approves every pull request.
 
 ## 📚 Documentation
 
@@ -56,6 +63,12 @@ select (trusted)       review (untrusted, matrix)      apply (trusted, matrix)
 4. **Report** gathers every result into a run report and publishes the
    next run's ledger.
 
+In the antagonistic mode, Select keeps the listed bots' pull
+requests instead of humans', the agent emits findings anchored to
+diff lines rather than a tier, and Apply checks each anchor against
+the diff and posts one `COMMENT` review under a second App that
+never approves. See [`docs/DESIGN.md` §19](docs/DESIGN.md).
+
 ## Schedule and dispatch
 
 `code-review-cron.yaml` runs every three hours on weekdays and twice
@@ -67,6 +80,15 @@ pull requests to review:
 ```text
 pypi-version-check-action/pull/157, pypi-version-check-action/pull/158
 pypi-version-check-action#157 lfreleng-actions/pypi-version-check-action#158
+```
+
+`code-review-antagonistic.yaml` runs on dispatch alone, defaulting
+to GPT-6 Astra and a dry run; Code Monkey dispatches it for its own
+pull requests once their Copilot review is clean:
+
+```bash
+gh workflow run code-review-antagonistic.yaml \
+  -f dry_run=false -f pull_requests='repo#12'
 ```
 
 ## Reusable workflow
@@ -86,6 +108,7 @@ jobs:
     uses: lfreleng-actions/github-code-review-bot/.github/workflows/code-review.yaml@<commit-sha>  # vX.Y.Z
     with:
       org: 'your-org'
+      mode: 'approve'  # or 'antagonistic' with approve_tiers: 'none'
       dry_run: true
       approve_tiers: 'trivial,low-risk'
       egress_allow_config: '@<allow-list commit sha>'
@@ -98,8 +121,9 @@ jobs:
 <!-- markdownlint-enable MD013 -->
 
 Live runs need a GitHub App installed on the organisation with the
-permissions in the setup guide and a personal fine-grained PAT
-carrying Copilot Requests and no repository grants.
+permissions in the setup guide, a second App for the antagonistic
+mode, and a personal fine-grained PAT carrying Copilot Requests and
+no repository grants.
 
 ## Development
 

@@ -2,11 +2,21 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: 2026 The Linux Foundation
 
-# Reusable workflow: select open, human-authored pull requests across
-# an organisation, run one Copilot CLI review session per pull request
-# against an offline packet and a read-only checkout, and let a trusted
-# job approve the ones that are trivial or reviewed low risk. Nothing
-# else is ever written to a pull request.
+# Reusable workflow: select open pull requests across an organisation,
+# run one Copilot CLI review session per pull request against an offline
+# packet and a read-only checkout, and let a trusted job act on the
+# verdict. Two modes share the pipeline and differ in whose pull
+# requests they read and in their one write:
+#
+#   approve       human-authored pull requests; the trusted job approves
+#                 the trivial and low-risk ones and writes nothing else
+#   antagonistic  pull requests by the bots config/antagonistic-authors.txt
+#                 lists; the trusted job posts one COMMENT review with
+#                 the findings inline, and never approves
+#
+# Each mode runs under its own App (config/bot.json and
+# config/antagonistic-bot.json), which the pre-flight identity checks
+# enforce, so neither mode's key can act for the other.
 #
 # Trust boundary (docs/DESIGN.md sections 4 and 5): the review job
 # holds no repository credential and never sees the App key. It emits
@@ -23,8 +33,14 @@ on:
         description: 'Target owner; live runs require an organisation App'
         required: true
         type: string
+      mode:
+        description: >-
+          approve (human pull requests, may approve) or antagonistic
+          (listed bots' pull requests, may comment, never approves)
+        type: string
+        default: 'approve'
       dry_run:
-        description: 'Run the agent and the checks; approve nothing'
+        description: 'Run the agent and the checks; write nothing'
         type: boolean
         default: true
       model:
@@ -34,7 +50,8 @@ on:
       approve_tiers:
         description: >-
           Tiers the run may approve: trivial,low-risk (default),
-          trivial, or none for a report-only run
+          trivial, or none for a report-only run; the antagonistic
+          mode requires none
         type: string
         default: 'trivial,low-risk'
       pull_requests:
@@ -105,13 +122,18 @@ on:
 
 permissions: {}
 
-# Live runs hold one lock per caller repository and owner across the
-# whole pipeline. Dry runs write nothing, so they lock within their
-# own caller run and never cancel or wait on a live run.
+# Live approve runs hold one lock per caller repository and owner
+# across the whole pipeline. Dry runs write nothing, so they lock
+# within their own caller run and never cancel or wait on a live run.
+# Antagonistic runs are dispatched per batch of bot pull requests, so
+# they too lock within their own run rather than evict each other; the
+# apply job's live re-read refuses a head the bot already reviewed.
 concurrency:
   group: >-
     ${{ inputs.dry_run
     && format('code-review-dry-run-{0}-{1}', github.run_id, inputs.org)
+    || inputs.mode == 'antagonistic'
+    && format('code-review-antagonistic-{0}-{1}', github.run_id, inputs.org)
     || format('code-review-{0}-{1}', github.repository, inputs.org) }}
   cancel-in-progress: false
 
@@ -130,6 +152,8 @@ jobs:
       evidence_id: "${{ steps.evidence.outputs.artifact-id }}"
       selection_sha256: "${{ steps.digests.outputs.selection }}"
       ledger_sha256: "${{ steps.digests.outputs.ledger }}"
+      bot_config: "${{ steps.budget.outputs.bot_config }}"
+      ledger_name: "${{ steps.budget.outputs.ledger_name }}"
       count: "${{ steps.chosen.outputs.count }}"
       matrix: "${{ steps.chosen.outputs.matrix }}"
       run_agent: "${{ steps.chosen.outputs.run_agent }}"
@@ -174,6 +198,7 @@ jobs:
           MAX_RUNTIME: "${{ inputs.max_runtime_minutes }}"
           MAX_AGENTS: "${{ inputs.max_concurrent_agents }}"
           MODEL: "${{ inputs.model }}"
+          MODE: "${{ inputs.mode }}"
           APPROVE_TIERS: "${{ inputs.approve_tiers }}"
         run: |
           [[ "$MAX_PRS" =~ ^[0-9]+$ ]] || {
@@ -191,12 +216,31 @@ jobs:
             *) echo '::error::approve_tiers must name trivial, low-risk or none'
                exit 1 ;;
           esac
+          # Each mode names the App it must run under and keeps its own
+          # memory. The antagonistic mode can never approve, so a tier
+          # passed to it is a misconfigured caller, refused here.
+          case "$MODE" in
+            approve)
+              bot_config='config/bot.json'
+              ledger_name='code-review-ledger' ;;
+            antagonistic)
+              case "$APPROVE_TIERS" in
+                'none'|'') ;;
+                *) echo '::error::the antagonistic mode approves nothing'
+                   exit 1 ;;
+              esac
+              bot_config='config/antagonistic-bot.json'
+              ledger_name='code-review-antagonistic-ledger' ;;
+            *) echo '::error::mode must be approve or antagonistic'; exit 1 ;;
+          esac
           # Expressions cannot add, so the job budget (session plus
           # toolchain setup and upload) is computed here.
           {
             echo "agent_timeout=$MAX_RUNTIME"
             echo "review_timeout=$((MAX_RUNTIME + 15))"
             echo "max_parallel=$MAX_AGENTS"
+            echo "bot_config=$bot_config"
+            echo "ledger_name=$ledger_name"
           } >> "$GITHUB_OUTPUT"
 
       # Operator lists: commas, spaces or newlines between items of
@@ -298,6 +342,7 @@ jobs:
           EGRESS_POLICY: "${{ inputs.egress_policy }}"
           EGRESS_ALLOW_CONFIG: "${{ inputs.egress_allow_config }}"
           DRY_RUN: "${{ inputs.dry_run }}"
+          BOT_CONFIG: "${{ steps.budget.outputs.bot_config }}"
           # yamllint disable-line rule:line-length
           JOB_WORKFLOW_SHA: "${{ job.workflow_sha || github.job_workflow_sha }}"
           ASSETS_SHA: "${{ steps.pinned.outputs.sha }}"
@@ -305,7 +350,7 @@ jobs:
           extra=()
           if [ "$DRY_RUN" = true ]; then extra+=(--dry-run); fi
           python3 review-assets/scripts/preflight.py config \
-            --config review-assets/config/bot.json \
+            --config "review-assets/$BOT_CONFIG" \
             --egress-policy "$EGRESS_POLICY" \
             --egress-allow-config "$EGRESS_ALLOW_CONFIG" \
             --workflow-sha "$JOB_WORKFLOW_SHA" \
@@ -341,28 +386,33 @@ jobs:
         env:
           GH_TOKEN: "${{ steps.app-token.outputs.token }}"
           MINTED_SLUG: "${{ steps.app-token.outputs.app-slug }}"
+          BOT_CONFIG: "${{ steps.budget.outputs.bot_config }}"
           REPOSITORY: "${{ github.repository }}"
         run: |
           python3 review-assets/scripts/preflight.py identity \
-            --config review-assets/config/bot.json --minted-slug "$MINTED_SLUG"
+            --config "review-assets/$BOT_CONFIG" --minted-slug "$MINTED_SLUG"
           python3 review-assets/scripts/preflight.py token \
             --repository "$REPOSITORY"
 
       # The ledger lives in this repository's own artifacts, so the
-      # native token reads it; the App token has no grant here.
+      # native token reads it; the App token has no grant here. Each
+      # mode keeps its own: an approve assessment says nothing about
+      # an antagonistic review of the same head, nor the reverse.
       - name: 'Fetch prior ledger'
         env:
           GH_TOKEN: "${{ github.token }}"
           REPOSITORY: "${{ github.repository }}"
+          LEDGER_NAME: "${{ steps.budget.outputs.ledger_name }}"
         run: |
           python3 review-assets/scripts/ledger.py fetch \
             --repository "$REPOSITORY" --output artefacts/ledger.json \
-            --artifact-name code-review-ledger
+            --artifact-name "$LEDGER_NAME"
 
       - name: 'Select pull requests'
         env:
           GH_TOKEN: "${{ steps.app-token.outputs.token || github.token }}"
           ORG: "${{ inputs.org }}"
+          MODE: "${{ inputs.mode }}"
           MODEL: "${{ inputs.model }}"
           DRY_RUN: "${{ inputs.dry_run }}"
           REASSESS: "${{ inputs.reassess }}"
@@ -377,13 +427,14 @@ jobs:
           if [ "$DRY_RUN" = true ]; then extra+=(--dry-run); fi
           if [ "$REASSESS" = true ]; then extra+=(--reassess); fi
           python3 review-assets/scripts/select_pulls.py \
-            --org "$ORG" --output-dir artefacts \
+            --org "$ORG" --mode "$MODE" --output-dir artefacts \
             --model "$MODEL" --approve-tiers "$APPROVE_TIERS" \
             --ledger artefacts/ledger.json \
             --pull-requests "$PULL_REQUESTS" \
             --repositories "$REPOSITORIES" \
             --exclude-file review-assets/config/excluded-repos.txt \
             --exclude-repos "$EXCLUDE_REPOS" \
+            --bot-authors-file review-assets/config/antagonistic-authors.txt \
             --max-pull-requests "$MAX_PRS" \
             --bot-slug "$BOT_SLUG" "${extra[@]}"
           cat artefacts/selection-summary.md >> "$GITHUB_STEP_SUMMARY"
@@ -532,6 +583,7 @@ jobs:
         env:
           KEY: "${{ matrix.key }}"
           HEAD_SHA: "${{ matrix.head_sha }}"
+          MODE: "${{ inputs.mode }}"
           DRY_RUN: "${{ inputs.dry_run }}"
           APPROVE_TIERS: "${{ inputs.approve_tiers }}"
         run: |
@@ -544,15 +596,24 @@ jobs:
           [[ "$number" =~ ^[1-9][0-9]*$ ]]
           [ "$(jq -r '.head_sha' artefacts/pull.json)" = "$HEAD_SHA" ]
           [ "$(git -C workspace rev-parse HEAD)" = "$HEAD_SHA" ]
+          case "$MODE" in
+            approve)
+              task='review-assets/prompt/review.md'
+              power="approvable tiers: \`${APPROVE_TIERS:-none}\`" ;;
+            antagonistic)
+              task='review-assets/prompt/antagonistic.md'
+              power='the trusted job may comment, never approve' ;;
+            *) echo '::error::unknown mode'; exit 1 ;;
+          esac
           # shellcheck disable=SC2016  # literal backticks for markdown
           {
-            cat review-assets/prompt/review.md
+            cat "$task"
             printf '\n## Runtime context\n\n'
             printf -- '- repository: `%s`\n' "$repository"
             printf -- '- pull_request: `%s`\n' "$number"
             printf -- '- head_sha: `%s`\n' "$HEAD_SHA"
-            printf -- '- dry run: `%s`; approvable tiers: `%s`\n' \
-              "$DRY_RUN" "${APPROVE_TIERS:-none}"
+            printf -- '- mode: `%s`; dry run: `%s`; %s\n' \
+              "$MODE" "$DRY_RUN" "$power"
             printf -- '- packet: `artefacts/pull.json`\n'
             printf -- '- checkout of the head commit: `workspace/`\n'
           } > artefacts/prompt.md
@@ -648,6 +709,25 @@ jobs:
     if: >-
       !cancelled() && needs.select.result == 'success' &&
       needs.select.outputs.run_agent == 'true'
+    # Live antagonistic runs each lock within their own run (see the
+    # workflow group), so two dispatches naming one pull request could
+    # both read it before either posts. This lock spans runs, one per
+    # pull request whatever the head, so the live re-read and the post
+    # are one step: the next applier's re-read sees the review, and
+    # refuses the head it covers.
+    # queue: max keeps every waiting job, so a late job for an older
+    # head waits its turn rather than evicting the current head's.
+    # Every other path keeps a group of its own per leg: the approve
+    # mode's live runs already serialise above.
+    concurrency:
+      group: >-
+        ${{ inputs.mode == 'antagonistic' && !inputs.dry_run
+        && format('code-review-antagonistic-apply-{0}-{1}',
+        matrix.repository, matrix.number)
+        || format('code-review-apply-{0}-{1}-{2}',
+        github.run_id, github.run_attempt, matrix.key) }}
+      cancel-in-progress: false
+      queue: max
     runs-on: 'ubuntu-latest'
     timeout-minutes: 15
     strategy:
@@ -744,29 +824,44 @@ jobs:
         id: check
         env:
           KEY: "${{ matrix.key }}"
+          MODE: "${{ inputs.mode }}"
           APPROVE_TIERS: "${{ inputs.approve_tiers }}"
           FAILURE: "${{ steps.fetch.outputs.failure }}"
         run: |
           extra=()
           if [ -n "$FAILURE" ]; then extra+=(--failure "$FAILURE"); fi
           mkdir -p accepted artefacts
-          python3 review-assets/scripts/apply_review.py check \
-            --selection evidence/selection.json --key "$KEY" \
-            --session-dir accepted --approve-tiers "$APPROVE_TIERS" \
-            --output artefacts/check.json \
-            --summary artefacts/check-summary.md "${extra[@]}" \
-            >> "$GITHUB_OUTPUT"
+          case "$MODE" in
+            approve)
+              python3 review-assets/scripts/apply_review.py check \
+                --selection evidence/selection.json --key "$KEY" \
+                --session-dir accepted --approve-tiers "$APPROVE_TIERS" \
+                --output artefacts/check.json \
+                --summary artefacts/check-summary.md "${extra[@]}" \
+                >> "$GITHUB_OUTPUT" ;;
+            antagonistic)
+              python3 review-assets/scripts/comment_review.py check \
+                --selection evidence/selection.json --key "$KEY" \
+                --session-dir accepted \
+                --output artefacts/check.json \
+                --summary artefacts/check-summary.md "${extra[@]}" \
+                >> "$GITHUB_OUTPUT" ;;
+            *) echo '::error::unknown mode'; exit 1 ;;
+          esac
           cat artefacts/check-summary.md >> "$GITHUB_STEP_SUMMARY"
 
       # The one write this pipeline makes. Minted for one repository,
       # only on the live path, only once the offline check accepted
-      # the verdict. Every other path re-reads with the native token,
-      # which cannot approve anything.
+      # the verdict for the run's mode. Every other path re-reads with
+      # the native token, which cannot write anything.
       - name: 'Mint pull request write token'
         id: write-token
         if: >-
-          !inputs.dry_run && steps.check.outputs.approvable == 'true' &&
-          inputs.github_app_client_id != ''
+          !inputs.dry_run && inputs.github_app_client_id != '' && (
+          (inputs.mode == 'approve'
+          && steps.check.outputs.approvable == 'true') ||
+          (inputs.mode == 'antagonistic'
+          && steps.check.outputs.commentable == 'true'))
         # yamllint disable-line rule:line-length
         uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
         with:
@@ -788,14 +883,18 @@ jobs:
         if: steps.write-token.outcome == 'success'
         env:
           MINTED_SLUG: "${{ steps.write-token.outputs.app-slug }}"
+          BOT_CONFIG: "${{ needs.select.outputs.bot_config }}"
         run: |
           python3 review-assets/scripts/preflight.py identity \
-            --config review-assets/config/bot.json --minted-slug "$MINTED_SLUG"
+            --config "review-assets/$BOT_CONFIG" --minted-slug "$MINTED_SLUG"
 
+      # approve submits at most an APPROVE; antagonistic at most a
+      # COMMENT review. Each script refuses the other mode's files.
       - name: 'Apply verdict'
         id: apply
         env:
           GH_TOKEN: "${{ steps.write-token.outputs.token || github.token }}"
+          MODE: "${{ inputs.mode }}"
           DRY_RUN: "${{ inputs.dry_run }}"
           RUN_ATTEMPT: "${{ github.run_attempt }}"
           # yamllint disable-line rule:line-length
@@ -803,7 +902,12 @@ jobs:
         run: |
           extra=()
           if [ "$DRY_RUN" = true ]; then extra+=(--dry-run); fi
-          python3 review-assets/scripts/apply_review.py apply \
+          case "$MODE" in
+            approve) command=(apply_review.py apply) ;;
+            antagonistic) command=(comment_review.py comment) ;;
+            *) echo '::error::unknown mode'; exit 1 ;;
+          esac
+          python3 "review-assets/scripts/${command[0]}" "${command[1]}" \
             --check artefacts/check.json \
             --selection evidence/selection.json \
             --output artefacts/result.json \
@@ -965,13 +1069,13 @@ jobs:
           if-no-files-found: 'warn'
 
       # The next run's select job fetches the newest few of these by
-      # name and merges them (scripts/ledger.py). A fixed name is
-      # unique within a run, which is all the upload requires.
+      # name and merges them (scripts/ledger.py). A fixed name per mode
+      # is unique within a run, which is all the upload requires.
       - name: 'Publish ledger'
         # yamllint disable-line rule:line-length
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: 'code-review-ledger'
+          name: "${{ needs.select.outputs.ledger_name }}"
           path: 'ledger/'
           retention-days: 90
           if-no-files-found: 'error'

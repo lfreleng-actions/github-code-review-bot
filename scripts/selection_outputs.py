@@ -45,7 +45,8 @@ def summary_markdown(selection: dict[str, Any]) -> str:
     lines = [
         "## Pull request selection",
         "",
-        f"Dry run `{selection['dry_run']}`, model `{selection['model']}`, "
+        f"Mode `{selection['mode']}`, dry run `{selection['dry_run']}`, "
+        f"model `{selection['model']}`, "
         f"approve tiers `{tiers}`. Candidates seen: {selection['candidates_seen']}; "
         f"selected: {len(chosen)}; skipped: {sum(counts.values())}.",
         "",

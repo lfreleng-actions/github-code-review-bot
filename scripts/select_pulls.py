@@ -10,6 +10,12 @@ oldest-updated first and caps the list. For each survivor it records
 the head SHA the review job will check out, the reviews and checks
 the apply job will re-verify, and the bounded diff the agent reads.
 
+The mode decides whose pull requests qualify. ``approve`` reviews
+human authors alone and skips every bot. ``antagonistic`` inverts
+that: it reviews the bots the author file lists and skips humans and
+every other bot. CI state gates the approve mode alone, since only an
+approval relies on it.
+
 Named pull requests bypass the exclusion list and the search alone;
 every other rule still applies to them. When both pull requests and
 repositories are named, the pull requests win and the repository
@@ -35,13 +41,16 @@ import pull_changes as changes
 import pull_reads as reads
 from pull_reads import SelectionError
 from selection_inputs import (
+    load_bot_authors,
     load_exclusions,
     parse_approve_tiers,
     parse_max_pull_requests,
+    parse_mode,
     parse_pull_requests,
     parse_repositories,
 )
 from selection_outputs import write_outputs
+from selection_rules import Rules, Skips, author_skip, first_skip
 
 SCHEMA = 1
 # GitHub expands at most 256 jobs from one matrix; a larger selection
@@ -52,45 +61,6 @@ MATRIX_LIMIT = 256
 # exceed that, so the cumulative serialised size stops the selection
 # first, with headroom for the header fields and indentation.
 MAX_SELECTION_BYTES = 12 * 1024 * 1024
-SKIP_REASONS = (
-    "repository",
-    "bot_author",
-    "closed",
-    "draft",
-    "conflicting",
-    "changes_requested",
-    "already_approved",
-    "copilot_pending",
-    "copilot_feedback",
-    "ci_pending",
-    "ci_failing",
-    "ci_none",
-    "already_assessed",
-    "too_large",
-    "cap",
-)
-
-
-class Skips:
-    """The pull requests a run left out: a count per reason and one row each."""
-
-    def __init__(self) -> None:
-        """Start every reason at zero so the output names them all."""
-        self.counts: dict[str, int] = dict.fromkeys(SKIP_REASONS, 0)
-        self.rows: list[dict[str, Any]] = []
-
-    def add(self, candidate: dict[str, Any], reason: str) -> None:
-        """Record one skipped pull request."""
-        self.counts[reason] += 1
-        self.rows.append(
-            {
-                "repository": candidate["repository"],
-                "number": candidate["number"],
-                "url": candidate["url"],
-                "title": candidate.get("title"),
-                "reason": reason,
-            }
-        )
 
 
 def named_candidates(org: str, targets: list[tuple[str, int]]) -> list[dict[str, Any]]:
@@ -111,6 +81,7 @@ def searched_candidates(
     repositories: list[str],
     *,
     exclusions: set[str],
+    rules: Rules,
     skips: Skips,
 ) -> tuple[list[dict[str, Any]], int]:
     """Search the organisation and apply the rules the payload alone answers.
@@ -133,54 +104,18 @@ def searched_candidates(
             skips.add(candidate, "repository")
             continue
         author = pull.get("author")
-        if reads.is_bot_author(
+        reason = author_skip(
             reads.require_object(author, "search author")
             if author is not None
-            else None
-        ):
-            skips.add(candidate, "bot_author")
+            else None,
+            mode=rules.mode,
+            bot_authors=rules.bot_authors,
+        )
+        if reason is not None:
+            skips.add(candidate, reason)
             continue
         kept.append(candidate)
     return kept, len(pulls)
-
-
-def first_skip(
-    state: dict[str, Any],
-    *,
-    prior: dict[str, Any],
-    dry_run: bool,
-    reassess: bool,
-) -> str | None:
-    """The first skip rule the pull request's state trips, in table order."""
-    if state["repository_archived"] or state["head_repository"] is None:
-        return "repository"
-    if reads.is_bot_author(state["author"]):
-        return "bot_author"
-    if state["state"] != "OPEN":
-        return "closed"
-    if state["is_draft"]:
-        return "draft"
-    if state["mergeable"] == "CONFLICTING":
-        return "conflicting"
-    if state["changes_requested"]:
-        return "changes_requested"
-    if state["approved_by"]:
-        return "already_approved"
-    if any(reads.is_copilot(login) for login in state["review_requests"]):
-        return "copilot_pending"
-    if state["unresolved_copilot_threads"]:
-        return "copilot_feedback"
-    if state["ci"] == "pending":
-        return "ci_pending"
-    if state["ci"] == "failure":
-        return "ci_failing"
-    if state["ci"] == "none":
-        return "ci_none"
-    if not reassess and ledger.already_assessed(
-        prior, state["repository"], state["number"], state["head_sha"], dry_run=dry_run
-    ):
-        return "already_assessed"
-    return None
 
 
 def read_state(candidate: dict[str, Any], *, named: bool) -> dict[str, Any]:
@@ -200,9 +135,7 @@ def assess(
     candidates: list[dict[str, Any]],
     *,
     named: bool,
-    prior: dict[str, Any],
-    dry_run: bool,
-    reassess: bool,
+    rules: Rules,
     skips: Skips,
 ) -> list[dict[str, Any]]:
     """Read each candidate and keep the ones no skip rule catches.
@@ -214,7 +147,7 @@ def assess(
     for candidate in candidates:
         state = read_state(candidate, named=named)
         current = {**candidate, **{k: state[k] for k in ("repository", "url", "title")}}
-        reason = first_skip(state, prior=prior, dry_run=dry_run, reassess=reassess)
+        reason = first_skip(state, rules)
         if reason is not None:
             skips.add(current, reason)
             continue
@@ -292,36 +225,58 @@ def choose(
 
 def build_selection(args: argparse.Namespace) -> dict[str, Any]:
     """Run the whole selection and return it."""
+    mode = parse_mode(args.mode)
     targets = parse_pull_requests(args.pull_requests, args.org)
     explicit = parse_repositories(args.repositories)
     exclusions = set(load_exclusions(args.exclude_file, args.exclude_repos))
     max_pull_requests = parse_max_pull_requests(args.max_pull_requests)
     approve_tiers = parse_approve_tiers(args.approve_tiers)
-    prior = ledger.load_ledger(args.ledger)
+    bot_authors: list[str] = []
+    if mode == "antagonistic":
+        # The antagonistic mode can never approve: a tier here is a
+        # misconfigured caller, refused rather than ignored.
+        if approve_tiers:
+            raise SelectionError("the antagonistic mode approves nothing; pass none")
+        bot_authors = load_bot_authors(args.bot_authors_file)
+        if not bot_authors:
+            raise SelectionError("the antagonistic mode needs a bot author list")
+    histories: dict[tuple[str, int], list[dict[str, Any]]] = {}
+
+    def history(repository: str, number: int) -> list[dict[str, Any]]:
+        """The full review history, read once per pull request."""
+        key = (repository, number)
+        if key not in histories:
+            histories[key] = changes.pull_reviews(repository, number)
+        return histories[key]
+
+    rules = Rules(
+        mode=mode,
+        bot_authors=bot_authors,
+        prior=ledger.load_ledger(args.ledger),
+        dry_run=bool(args.dry_run),
+        reassess=bool(args.reassess),
+        bot_login=reads.bot_login(args.bot_slug),
+        history=history if mode == "antagonistic" else None,
+    )
     skips = Skips()
     if targets:
         candidates = named_candidates(args.org, targets)
         seen = len(candidates)
     else:
         candidates, seen = searched_candidates(
-            args.org, explicit, exclusions=exclusions, skips=skips
+            args.org, explicit, exclusions=exclusions, rules=rules, skips=skips
         )
-    survivors = assess(
-        candidates,
-        named=bool(targets),
-        prior=prior,
-        dry_run=bool(args.dry_run),
-        reassess=bool(args.reassess),
-        skips=skips,
-    )
+    survivors = assess(candidates, named=bool(targets), rules=rules, skips=skips)
     chosen = choose(survivors, max_pull_requests=max_pull_requests, skips=skips)
     return {
         "schema": SCHEMA,
         "org": args.org,
+        "mode": mode,
         "generated_at": datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "dry_run": bool(args.dry_run),
         "model": args.model,
         "approve_tiers": approve_tiers,
+        "bot_authors": bot_authors,
         "bot_login": reads.bot_login(args.bot_slug),
         "explicit_pull_requests": [
             f"{args.org}/{name}#{number}" for name, number in targets
@@ -339,6 +294,7 @@ def build_parser() -> argparse.ArgumentParser:
     """Describe the command line."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--org", required=True)
+    parser.add_argument("--mode", default="approve")
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--model", required=True)
     parser.add_argument("--approve-tiers", required=True)
@@ -349,6 +305,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--repositories", default="")
     parser.add_argument("--exclude-file", type=Path)
     parser.add_argument("--exclude-repos", default="")
+    parser.add_argument("--bot-authors-file", type=Path)
     parser.add_argument("--max-pull-requests", default="10")
     parser.add_argument("--bot-slug", default="")
     return parser

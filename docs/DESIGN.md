@@ -9,7 +9,8 @@ Status: **implemented, in dry-run rollout** (§15). The workflow,
 scripts and offline tests exist. The schedule runs with
 `dry_run: true` until the rollout steps clear live operation, at
 which point one pull request flips the expression in
-`code-review-cron.yaml`.
+`code-review-cron.yaml`. The antagonistic mode (§19) shares the
+pipeline and has its own caller, App and rollout (§19.8).
 
 This document reuses the architecture, vocabulary and lessons of
 [`github-issues-triage`](https://github.com/lfreleng-actions/github-issues-triage)
@@ -40,7 +41,18 @@ every pass.
 
 ## 2. Goal
 
-Review open, human-authored, non-draft pull requests across the
+The pipeline runs in one of two modes, chosen by the caller. They
+share every job and every trust property, and differ in whose pull
+requests they read and in their one write:
+
+- **approve**: human-authored pull requests; the trusted job may
+  approve. This document describes it throughout, except §19.
+- **antagonistic**: pull requests opened by the bots
+  `config/antagonistic-authors.txt` lists; the trusted job may post
+  one comment review, and never approves (§19).
+
+In the approve mode, review open, human-authored, non-draft pull
+requests across the
 organisation with a Copilot CLI agent every three hours on weekdays
 and twice a day at weekends. Approve the ones a deterministic check
 confirms as trivial and the ones a full review finds low risk.
@@ -65,14 +77,17 @@ weigh.
 
 ### Non-goals
 
-- **Feedback on the pull request.** The workflow never comments,
-  never requests changes and never dismisses a review. A
+- **Feedback on human pull requests.** The approve mode never
+  comments, never requests changes and never dismisses a review. A
   `needs-human` verdict reaches people through the run report and
-  nowhere else.
-- **Bot-authored pull requests.** Dependabot, pre-commit.ci and Code
-  Monkey pull requests stay out. `dependamerge` and human review
-  handle them, and an App approving another App's work would defeat
-  the ruleset's purpose.
+  nowhere else. The antagonistic mode comments on bot pull requests
+  alone (§19).
+- **Approving bot-authored pull requests.** Dependabot,
+  pre-commit.ci and Code Monkey pull requests stay out of the approve
+  mode. `dependamerge` and human review handle them, and an App
+  approving another App's work would defeat the ruleset's purpose.
+  The antagonistic mode reviews some of them and still approves
+  none.
 - **Notification issues.** The manual procedure's "Review needed"
   issues have no successor. The ledger (§6) replaces them as memory; a
   supplemental channel is a later capability (§16).
@@ -150,8 +165,9 @@ The **apply** job runs once per matrix entry after the review job
 settles, including after a failed entry. It verifies the evidence
 again, fetches the session through a bounded extractor, runs the
 offline check, and on the live path mints a `pull-requests: write`
-token for that one repository and submits the approval. Every path
-ends in a typed `result.json`.
+token for that one repository and submits the approval, or in the
+antagonistic mode the comment review (§19.5). Every path ends in a
+typed `result.json`.
 
 The **report** job gathers every result, renders the step summary,
 writes `report.json` and `report.md`, and publishes the new ledger.
@@ -214,17 +230,17 @@ run closed.
 
 <!-- markdownlint-disable MD013 -->
 
-| Stage                | Check                                                                                            | Drift it refuses                                                                                                                                                                                               |
-| -------------------- | ------------------------------------------------------------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Before the read mint | Re-run `tests/test_workflow.py` against the checked-out workflow files                           | An App key or mint in the review job, an unpinned action, a write mint no longer gated on `!dry_run` and the check outcome, a download by name where the design demands an ID, `persist-credentials` turned on |
-| Before the read mint | `zizmor --persona auditor` on the checked-out workflows: zero findings                           | Expression injection, `pull_request_target`, cache poisoning, anything the contract tests do not name                                                                                                          |
-| Before the read mint | `config/bot.json` is a small object naming one lower-case slug                                   | A config edit that points identity checks at a different App                                                                                                                                                   |
-| Before the read mint | Credential shapes: client id pattern, PEM markers and plausible key length, `github_pat_` prefix | The wrong secret under the right name; values are never printed                                                                                                                                                |
-| Before the read mint | Block mode has a commit-pinned allow-list coordinate and a loaded list                           | An allow-list absent without an error, or pinned to a moving branch                                                                                                                                            |
-| Before the read mint | A live run's `assets_sha` equals `job.workflow_sha`                                              | A reviewed workflow executing unreviewed scripts through `assets_ref`                                                                                                                                          |
-| After the read mint  | The `app-slug` the mint returns equals `config/bot.json`                                         | Another App's private key wired into this workflow                                                                                                                                                             |
-| After the read mint  | `GET /repos/{this}` with the token shows no `push`, `maintain` or `admin`                        | A read mint that obtained more than it asked for                                                                                                                                                               |
-| Before the write     | The write mint's `app-slug` equals `config/bot.json`                                             | The same, on the one token that can approve                                                                                                                                                                    |
+| Stage                | Check                                                                                                                    | Drift it refuses                                                                                                                                                                                               |
+| -------------------- | ------------------------------------------------------------------------------------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Before the read mint | Re-run `tests/test_workflow.py` against the checked-out workflow files                                                   | An App key or mint in the review job, an unpinned action, a write mint no longer gated on `!dry_run` and the check outcome, a download by name where the design demands an ID, `persist-credentials` turned on |
+| Before the read mint | `zizmor --persona auditor` on the checked-out workflows: zero findings                                                   | Expression injection, `pull_request_target`, cache poisoning, anything the contract tests do not name                                                                                                          |
+| Before the read mint | The mode's App config (`config/bot.json` or `config/antagonistic-bot.json`) is a small object naming one lower-case slug | A config edit that points identity checks at a different App                                                                                                                                                   |
+| Before the read mint | Credential shapes: client id pattern, PEM markers and plausible key length, `github_pat_` prefix                         | The wrong secret under the right name; values are never printed                                                                                                                                                |
+| Before the read mint | Block mode has a commit-pinned allow-list coordinate and a loaded list                                                   | An allow-list absent without an error, or pinned to a moving branch                                                                                                                                            |
+| Before the read mint | A live run's `assets_sha` equals `job.workflow_sha`                                                                      | A reviewed workflow executing unreviewed scripts through `assets_ref`                                                                                                                                          |
+| After the read mint  | The `app-slug` the mint returns equals the mode's App config                                                             | Another App's private key wired into this workflow, the other mode's included                                                                                                                                  |
+| After the read mint  | `GET /repos/{this}` with the token shows no `push`, `maintain` or `admin`                                                | A read mint that obtained more than it asked for                                                                                                                                                               |
+| Before the write     | The write mint's `app-slug` equals the mode's App config                                                                 | The same, on the one token that can write                                                                                                                                                                      |
 
 <!-- markdownlint-enable MD013 -->
 
@@ -255,29 +271,32 @@ records a count for every reason, zero included:
 
 <!-- markdownlint-disable MD013 -->
 
-| Reason              | Meaning                                                                                           |
-| ------------------- | ------------------------------------------------------------------------------------------------- |
-| `repository`        | Excluded by `config/excluded-repos.txt` or `exclude_repos`, archived, or outside the organisation |
-| `bot_author`        | Author is a Bot or App: `is_bot`, typename `Bot`, login ending `[bot]`, or no author at all       |
-| `closed`            | Not `OPEN` at read time                                                                           |
-| `draft`             | `isDraft`                                                                                         |
-| `conflicting`       | `mergeable == CONFLICTING`; `UNKNOWN` does not skip                                               |
-| `changes_requested` | Some reviewer's latest review is `CHANGES_REQUESTED`                                              |
-| `already_approved`  | Some reviewer's latest review is `APPROVED` on the current head                                   |
-| `copilot_pending`   | Copilot is a requested reviewer whose review has not arrived                                      |
-| `copilot_feedback`  | Unresolved review threads opened by Copilot                                                       |
-| `ci_pending`        | Status check rollup `PENDING` or `EXPECTED`                                                       |
-| `ci_failing`        | Rollup `FAILURE` or `ERROR`                                                                       |
-| `ci_none`           | No status check rollup at all                                                                     |
-| `already_assessed`  | The ledger holds this head (§6); `reassess` bypasses                                              |
-| `too_large`         | More than 200 files or more than 512 KiB of patch                                                 |
-| `cap`               | Over `max_pull_requests`, oldest `updated_at` first                                               |
+| Reason               | Meaning                                                                                                                                                            |
+| -------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `repository`         | Excluded by `config/excluded-repos.txt` or `exclude_repos`, archived, or outside the organisation                                                                  |
+| `bot_author`         | Approve mode: author is a Bot or App (`is_bot`, typename `Bot`, login ending `[bot]`) or absent. Antagonistic mode: a bot the author list does not name, or absent |
+| `human_author`       | Antagonistic mode alone: the author is a human                                                                                                                     |
+| `closed`             | Not `OPEN` at read time                                                                                                                                            |
+| `draft`              | `isDraft`                                                                                                                                                          |
+| `conflicting`        | `mergeable == CONFLICTING`; `UNKNOWN` does not skip                                                                                                                |
+| `changes_requested`  | Some reviewer's latest review is `CHANGES_REQUESTED`                                                                                                               |
+| `already_approved`   | Some reviewer's latest review is `APPROVED` on the current head                                                                                                    |
+| `copilot_pending`    | Copilot is a requested reviewer whose review has not arrived                                                                                                       |
+| `copilot_feedback`   | Unresolved review threads opened by Copilot                                                                                                                        |
+| `already_reviewed`   | Antagonistic mode alone: this App has a submitted review of the head (§19.2)                                                                                       |
+| `copilot_unreviewed` | Antagonistic mode alone: no submitted Copilot review of the head itself (§19.2)                                                                                    |
+| `ci_pending`         | Status check rollup `PENDING` or `EXPECTED`; approve mode alone                                                                                                    |
+| `ci_failing`         | Rollup `FAILURE` or `ERROR`; approve mode alone                                                                                                                    |
+| `ci_none`            | No status check rollup at all; approve mode alone                                                                                                                  |
+| `already_assessed`   | The ledger holds this head (§6); `reassess` bypasses                                                                                                               |
+| `too_large`          | More than 200 files or more than 512 KiB of patch                                                                                                                  |
+| `cap`                | Over `max_pull_requests`, oldest `updated_at` first                                                                                                                |
 
 <!-- markdownlint-enable MD013 -->
 
-The `repository` and `bot_author` rules run on the search result
+The `repository` and author rules run on the search result
 before any further read. One GraphQL query per survivor then
-supplies the state the next ten rules inspect; the diff and commit
+supplies the state the remaining rules inspect; the diff and commit
 reads, which cost the most, run for survivors alone. The default cap
 is 20 pull requests; `0` lifts it to the matrix limit of 256.
 
@@ -302,7 +321,9 @@ run assessed. Without it an unchanged pull request would cost one
 agent session every three hours.
 
 Each run's report job uploads `ledger.json` as the artifact
-`code-review-ledger` with 90-day retention. The next run's select
+`code-review-ledger` with 90-day retention; the antagonistic mode
+keeps its own, `code-review-antagonistic-ledger` (§19.6). The next
+run's select
 job fetches the newest five of those artifacts through the bounded
 `ledger` profile of `artifact_fetch.py`, merges them keeping the
 newest assessment per `(repository, number, head_sha)` and dropping
@@ -339,9 +360,11 @@ else.
   with `persist-credentials: false`. The job-native token has no
   grant on a fork; the checkout succeeds because the estate is
   public.
-- `artefacts/prompt.md`: `prompt/review.md` followed by a runtime
+- `artefacts/prompt.md`: the mode's task, `prompt/review.md` or
+  `prompt/antagonistic.md` (§19.4), followed by a runtime
   context block naming the repository, pull request number, head
-  SHA, dry-run flag, approvable tiers, and the two paths above.
+  SHA, mode, dry-run flag, what the trusted job may write, and the
+  two paths above.
 
 The Copilot CLI installs from the committed lockfile under
 `tools/copilot-cli` with `npm ci --ignore-scripts`, into
@@ -426,6 +449,14 @@ nothing a block could protect beyond the model credential. §16
 records the switch to block mode as a later capability.
 
 ## 8. The Apply Job
+
+This section describes the approve mode, whose applier is
+`apply_review.py`. The antagonistic mode shares the fetch and the
+fallback result, and replaces the check and the write with
+`comment_review.py` (§19.5). Each applier refuses a selection or a
+`check.json` whose `mode` is not its own, and the workflow picks one
+by the trusted `mode` input, so neither can act on the other's
+verdict.
 
 ### 8.1 Fetch
 
@@ -596,25 +627,26 @@ working: a typed `needs-human` result and exit 0.
 
 <!-- markdownlint-disable MD013 -->
 
-| Input                   | Default                                   | Meaning                                                                           |
-| ----------------------- | ----------------------------------------- | --------------------------------------------------------------------------------- |
-| `org`                   | required                                  | Target owner; live runs require an organisation App                               |
-| `dry_run`               | `true`                                    | Run the agent and the checks; approve nothing                                     |
-| `model`                 | `claude-opus-5.5`                         | Copilot CLI model identifier, `^[a-z0-9.-]+$`                                     |
-| `approve_tiers`         | `trivial,low-risk`                        | Tiers the run may approve: `trivial,low-risk`, `trivial` or `none`                |
-| `pull_requests`         | `''`                                      | Pull requests to review instead of scanning (§9.4)                                |
-| `repositories`          | `''`                                      | Repository names to scan; commas and/or spaces                                    |
-| `exclude_repos`         | `''`                                      | Repository names to skip; commas and/or spaces; overrides the bundled list        |
-| `max_pull_requests`     | `20`                                      | Cap after ordering; `0` lifts it to 256                                           |
-| `max_concurrent_agents` | `5`                                       | Review sessions at once, 1-30                                                     |
-| `max_runtime_minutes`   | `20`                                      | Wall-clock budget per session, 1-120                                              |
-| `reassess`              | `false`                                   | Review heads the ledger already records                                           |
-| `skip_agent`            | `false`                                   | Plumbing test: select and report without sessions                                 |
-| `egress_policy`         | `block`                                   | harden-runner policy for trusted jobs: `audit` or `block`                         |
-| `egress_allow_config`   | `''`                                      | `harden-runner-block-action` config coordinate                                    |
-| `github_app_client_id`  | `''`                                      | App client id; empty limits runs to dry-run                                       |
-| `assets_repository`     | `lfreleng-actions/github-code-review-bot` | Trusted source of prompt and scripts                                              |
-| `assets_ref`            | `''`                                      | Commit, tag or branch of the assets; empty resolves the calling workflow's commit |
+| Input                   | Default                                   | Meaning                                                                                                   |
+| ----------------------- | ----------------------------------------- | --------------------------------------------------------------------------------------------------------- |
+| `org`                   | required                                  | Target owner; live runs require an organisation App                                                       |
+| `mode`                  | `approve`                                 | `approve` or `antagonistic` (§19); picks the App config, prompt, applier and ledger                       |
+| `dry_run`               | `true`                                    | Run the agent and the checks; write nothing                                                               |
+| `model`                 | `claude-opus-5.5`                         | Copilot CLI model identifier, `^[a-z0-9.-]+$`                                                             |
+| `approve_tiers`         | `trivial,low-risk`                        | Tiers the run may approve: `trivial,low-risk`, `trivial` or `none`; the antagonistic mode requires `none` |
+| `pull_requests`         | `''`                                      | Pull requests to review instead of scanning (§9.4)                                                        |
+| `repositories`          | `''`                                      | Repository names to scan; commas and/or spaces                                                            |
+| `exclude_repos`         | `''`                                      | Repository names to skip; commas and/or spaces; overrides the bundled list                                |
+| `max_pull_requests`     | `20`                                      | Cap after ordering; `0` lifts it to 256                                                                   |
+| `max_concurrent_agents` | `5`                                       | Review sessions at once, 1-30                                                                             |
+| `max_runtime_minutes`   | `20`                                      | Wall-clock budget per session, 1-120                                                                      |
+| `reassess`              | `false`                                   | Review heads the ledger already records                                                                   |
+| `skip_agent`            | `false`                                   | Plumbing test: select and report without sessions                                                         |
+| `egress_policy`         | `block`                                   | harden-runner policy for trusted jobs: `audit` or `block`                                                 |
+| `egress_allow_config`   | `''`                                      | `harden-runner-block-action` config coordinate                                                            |
+| `github_app_client_id`  | `''`                                      | App client id; empty limits runs to dry-run                                                               |
+| `assets_repository`     | `lfreleng-actions/github-code-review-bot` | Trusted source of prompt and scripts                                                                      |
+| `assets_ref`            | `''`                                      | Commit, tag or branch of the assets; empty resolves the calling workflow's commit                         |
 
 <!-- markdownlint-enable MD013 -->
 
@@ -648,15 +680,16 @@ The `workflow_dispatch` form offers `dry_run` (default `true`), a
 model choice, `approve_tiers`, `pull_requests`, `repositories`,
 `max_pull_requests`, `max_concurrent_agents` and `reassess`.
 
-An `options` job maps the display name to the identifier the CLI
+The `options` job maps the display name to the identifier the CLI
 accepts: Claude Opus 5.5 to `claude-opus-5.5`, Claude Fable 5.1 to
 `claude-fable-5.1`, Claude Sonnet 5.5 to `claude-sonnet-5.5`, GPT-6
-Astra to `gpt-6-astra`. The caller passes
+Astra to `gpt-6-astra`. The caller passes `mode: approve` and
 `org: github.repository_owner`, so a fork's scheduled runs stay
 inside the fork; pins the assets to `github.sha`; runs trusted jobs
 in block mode with the organisation allow-list; and hands
 `vars.BOT_APP_CLIENT_ID`, `secrets.BOT_APP_PRIVATE_KEY`
-and `secrets.COPILOT_CLI_TOKEN` to the reusable workflow.
+and `secrets.COPILOT_CLI_TOKEN` to the reusable workflow. The
+antagonistic App's names never appear in it.
 
 Scheduled runs take `dry_run` from the expression
 `github.event_name != 'workflow_dispatch' || inputs.dry_run`: dry
@@ -669,19 +702,19 @@ kill switch.
 Pull request runs are secretless by design: a same-repository pull
 request can change the reusable workflow and the scripts, so a check
 holding the model credential would hand it to the code under
-review. Two `plumbing` legs run with `dry_run: true`,
-`skip_agent: true`, the pull request head as assets, block-mode
-egress and a cap of three; two legs prove invocation namespaces
-never collide. A `regression` job runs the offline suite with
-`uv run --locked`, and a `docs` job builds the site with
-`mkdocs build --strict` without any Pages permission.
+review. Two `plumbing` legs, one per mode, run with
+`dry_run: true`, `skip_agent: true`, the pull request head as
+assets, block-mode egress and a cap of three; their namespaces
+also prove invocations never collide. A `regression` job runs the
+offline suite with `uv run --locked`, and a `docs` job builds the
+site with `mkdocs build --strict` without any Pages permission.
 
 The full agent session runs from `workflow_dispatch` alone: a
-maintainer dispatches `testing.yaml` against a chosen ref with
-optional `pull_requests`, `repositories` and `max_pull_requests`
-(default 2), two concurrent agents, `dry_run: true` and the
-`COPILOT_CLI_TOKEN` secret. No App credential reaches this path, so
-it can report but never approve.
+maintainer dispatches `testing.yaml` against a chosen ref with a
+`mode`, optional `pull_requests`, `repositories` and
+`max_pull_requests` (default 2), two concurrent agents,
+`dry_run: true` and the `COPILOT_CLI_TOKEN` secret. No App
+credential reaches this path, so it can report but never write.
 
 ### 9.4 Targeted runs
 
@@ -701,6 +734,8 @@ applies, and the read token scopes to their repositories.
 | Schedule, before the flip        | `true`            | yes | yes               | none; `would-approve` recorded           |
 | Schedule, after the flip         | `false`           | yes | yes               | one approval per approvable pull request |
 | Cron dispatch                    | operator's choice | yes | yes               | as above                                 |
+| Antagonistic dispatch, dry       | `true`            | yes | yes               | none; `would-comment` recorded           |
+| Antagonistic dispatch, live      | `false`           | yes | yes               | one comment review per commentable head  |
 | `testing.yaml` on a pull request | `true`            | no  | no (`skip_agent`) | none                                     |
 | `testing.yaml` dispatch          | `true`            | no  | yes               | none                                     |
 
@@ -755,6 +790,28 @@ The ledger lives in this repository's own artifacts, so the select
 job reads it with the job-native token under `actions: read`; the
 App has no grant here and needs none.
 
+### 10.1.1 A second App for the antagonistic mode
+
+The antagonistic mode runs as **LF/RelEng Antagonistic Review Bot**,
+whose slug lives in `config/antagonistic-bot.json`, under the names
+`vars.ANTAGONISTIC_APP_CLIENT_ID` and
+`secrets.ANTAGONISTIC_APP_PRIVATE_KEY`. Its permission table is the
+one above: `pull-requests: write` is what posting a review needs,
+whatever its event. The split is the lesson of §10.1 applied again:
+
+- **The approving identity stays the approving identity.** A ruleset
+  that counts or exempts the review App never sees the antagonistic
+  one. Leave the antagonistic App out of every ruleset bypass list.
+- **Neither key can stand in for the other.** Each mode checks every
+  minted token against its own config file, so a run handed the
+  other App's key fails at the first mint (§4.4).
+- **No App permission withholds approval.** GitHub grants approval with
+  `pull-requests: write`. What keeps this App from approving is the
+  code: `comment_review.post`, the applier's one write, refuses any
+  event but `COMMENT` at the call, and its tests assert `COMMENT` on
+  every write they see (§19.5). Leaving the App out of every ruleset
+  that honours approvals is the second line, should that code change.
+
 ### 10.2 The model credential
 
 The organisation secret `COPILOT_CLI_TOKEN` holds a personal
@@ -770,7 +827,8 @@ whose reason names a missing session.
 
 The default model is `claude-opus-5.5`. The dispatch form offers
 Claude Opus 5.5, Claude Fable 5.1, Claude Sonnet 5.5 and GPT-6
-Astra (§9.2). The selection records the model, the approval body
+Astra (§9.2). The antagonistic caller defaults to GPT-6 Astra
+(§19.7). The selection records the model, the review body
 names it from the selection, and `usage.json` supplies premium
 request cost and API seconds per session, which the report sums.
 
@@ -780,11 +838,13 @@ request cost and API seconds per session, which the report sums.
   Nothing upstream gates this schedule: a pull request becomes
   eligible when its CI is green and no review blocks it, whenever
   that happens.
-- Reusable workflow group: live runs lock on
+- Reusable workflow group: live approve runs lock on
   `code-review-<caller repository>-<org>` across the whole
   pipeline; dry runs lock on `code-review-dry-run-<run id>-<org>`,
   a group of their own, so they neither wait on nor cancel a live
-  run. `cancel-in-progress: false` throughout.
+  run. Live antagonistic runs lock on
+  `code-review-antagonistic-<run id>-<org>` for the same reason
+  (§19.7). `cancel-in-progress: false` throughout.
 - Scheduled caller group: `code-review` for schedules and live
   dispatches, a per-run group for dry dispatches. A group holds one
   pending run and a newcomer replaces it, so this is not a FIFO
@@ -808,7 +868,8 @@ request cost and API seconds per session, which the report sums.
 | `code-review-session-<ns>-<key>`          | review   | `session-summary.md`, `usage.json`, `prompt.md`, `copilot-logs/`                             | 7 days    |
 | `code-review-result-<ns>-<key>-<attempt>` | apply    | `check.json`, `check-summary.md`, `result.json`                                              | 90 days   |
 | `code-review-<ns>-<attempt>`              | report   | `report.md`, `report.json`                                                                   | 90 days   |
-| `code-review-ledger`                      | report   | `ledger.json`                                                                                | 90 days   |
+| `code-review-ledger`                      | report   | `ledger.json`, approve mode                                                                  | 90 days   |
+| `code-review-antagonistic-ledger`         | report   | `ledger.json`, antagonistic mode                                                             | 90 days   |
 
 <!-- markdownlint-enable MD013 -->
 
@@ -826,35 +887,44 @@ requires; the next select job fetches the newest five by that name.
 
 <!-- markdownlint-disable MD013 -->
 
-| Failure                                                  | Effect                                     | Mitigation                                                                                        |
-| -------------------------------------------------------- | ------------------------------------------ | ------------------------------------------------------------------------------------------------- |
-| Session times out or the CLI fails                       | Summary missing or without a verdict block | Apply writes a typed `needs-human` result with the reason; `reassess` retries the head            |
-| Session artifact missing or refused by the bounded fetch | Exit 3 or 4 from the fetch                 | `--failure` text becomes the reason; typed `needs-human`, no job failure                          |
-| Session download gets no reply or a transient `5xx`      | `gh` exits 1 in the fetch                  | Retried within the fetch deadline; if it persists, the `failed` fallback and a retry next run     |
-| Verdict names another repository, number or head         | Target mismatch                            | Offline check refuses; `needs-human` with the reason                                              |
-| Agent claims `trivial` on a code change                  | Classifier disagrees                       | Tier drops to `needs-human`; non-trivial paths listed                                             |
-| Head moves between select and apply                      | Live re-read sees a new SHA                | `needs-human` with "head moved"; the new head is a new key next run                               |
-| Human approves or requests changes during the run        | Live re-read sees it                       | `needs-human`; no duplicate or conflicting review                                                 |
-| App token mint fails                                     | Apply step skipped                         | Fallback writes a `failed` result, a report row, no ledger entry; next run retries                |
-| GitHub unreachable during the write                      | `apply` exits 1                            | Same fallback; the run shows the failed entry                                                     |
-| Ledger artifact unreadable                               | Prior memory incomplete                    | Reported and left out of the merge; heads re-assessed                                             |
-| Model PAT expired                                        | Every session fails at start               | Prefix guard cannot detect; rotation owner (§10.2); report shows uniform failures                 |
-| Search hits the 1,000 ceiling                            | Selection fails before filtering           | Restrict `repositories` rather than review a subset                                               |
-| Two live runs overlap                                    | Possible second approval                   | Caller and reusable concurrency groups; `already_approved` gate on re-read                        |
-| Runaway spend                                            | Long sessions in parallel                  | `max_runtime_minutes` times `max_concurrent_agents` bounds wall-clock; usage in the report        |
-| Prompt injection in a pull request                       | Agent misled                               | No credential to misuse; corroboration, vetoes and live gates; `injection_attempts` in the report |
+| Failure                                                  | Effect                                     | Mitigation                                                                                                         |
+| -------------------------------------------------------- | ------------------------------------------ | ------------------------------------------------------------------------------------------------------------------ |
+| Session times out or the CLI fails                       | Summary missing or without a verdict block | Apply writes a typed `needs-human` result with the reason; `reassess` retries the head                             |
+| Session artifact missing or refused by the bounded fetch | Exit 3 or 4 from the fetch                 | `--failure` text becomes the reason; typed `needs-human`, no job failure                                           |
+| Session download gets no reply or a transient `5xx`      | `gh` exits 1 in the fetch                  | Retried within the fetch deadline; if it persists, the `failed` fallback and a retry next run                      |
+| Verdict names another repository, number or head         | Target mismatch                            | Offline check refuses; `needs-human` with the reason                                                               |
+| Agent claims `trivial` on a code change                  | Classifier disagrees                       | Tier drops to `needs-human`; non-trivial paths listed                                                              |
+| Head moves between select and apply                      | Live re-read sees a new SHA                | `needs-human` with "head moved"; the new head is a new key next run                                                |
+| Human approves or requests changes during the run        | Live re-read sees it                       | `needs-human`; no duplicate or conflicting review                                                                  |
+| App token mint fails                                     | Apply step skipped                         | Fallback writes a `failed` result, a report row, no ledger entry; next run retries                                 |
+| GitHub unreachable during the write                      | `apply` exits 1                            | Same fallback; the run shows the failed entry                                                                      |
+| Ledger artifact unreadable                               | Prior memory incomplete                    | Reported and left out of the merge; heads re-assessed                                                              |
+| Model PAT expired                                        | Every session fails at start               | Prefix guard cannot detect; rotation owner (§10.2); report shows uniform failures                                  |
+| Search hits the 1,000 ceiling                            | Selection fails before filtering           | Restrict `repositories` rather than review a subset                                                                |
+| Two live runs overlap                                    | Possible second approval                   | Caller and reusable concurrency groups; `already_approved` gate on re-read                                         |
+| Runaway spend                                            | Long sessions in parallel                  | `max_runtime_minutes` times `max_concurrent_agents` bounds wall-clock; usage in the report                         |
+| Prompt injection in a pull request                       | Agent misled                               | No credential to misuse; corroboration, vetoes and live gates; `injection_attempts` in the report                  |
+| Antagonistic comment off the diff                        | GitHub would refuse the whole review       | Offline anchor check lists it in the review body with its reason; a 422 regardless posts every finding in the body |
+| Antagonistic App key wired into the approving caller     | Token from the wrong App                   | Identity check against the mode's config fails the run before any read (§4.4)                                      |
+| Two antagonistic dispatches name one pull request        | Possible second comment review             | Apply locks per pull request across live runs and queues the rest; each re-read sees the review before it          |
 
 <!-- markdownlint-enable MD013 -->
 
 ## 14. Repository Layout
 
 ```text
-.github/workflows/code-review.yaml       reusable workflow
-.github/workflows/code-review-cron.yaml  schedule and dispatch caller
+.github/workflows/code-review.yaml       reusable workflow, both modes
+.github/workflows/code-review-cron.yaml  approve schedule and dispatch
+.github/workflows/code-review-antagonistic.yaml
+                                         antagonistic dispatch (§19)
 .github/workflows/testing.yaml           PR plumbing, manual dry-run,
                                          regression, docs build
 .github/workflows/documentation.yaml     mkdocs to GitHub Pages
-prompt/review.md                         agent task (§7.3)
+prompt/review.md                         approve task (§7.3)
+prompt/antagonistic.md                   antagonistic task (§19.4)
+config/bot.json                          approving App slug
+config/antagonistic-bot.json             antagonistic App slug
+config/antagonistic-authors.txt          bots the antagonistic mode reviews
 config/excluded-repos.txt                repositories the scan skips
 tools/copilot-cli/                       pinned CLI lockfile
 scripts/bot_github.py                    gh wrapper, REST and GraphQL
@@ -863,12 +933,16 @@ scripts/artifact_fetch.py                bounded artifact extraction
 scripts/ledger.py                        run-to-run memory (§6)
 scripts/pull_reads.py                    GitHub reads for selection
 scripts/pull_changes.py                  bounded files and commits
-scripts/select_pulls.py                  selection policy (§5)
+scripts/select_pulls.py                  selection flow (§5)
+scripts/selection_rules.py               skip rules, both modes (§5)
 scripts/selection_inputs.py              input parsing contract
 scripts/selection_outputs.py             selection files and summary
 scripts/review_policy.py                 verdict extraction, check
 scripts/review_vetoes.py                 classifier and vetoes (§8.2)
-scripts/apply_review.py                  check and apply (§8)
+scripts/review_files.py                  apply job file I/O, both modes
+scripts/apply_review.py                  check and approve (§8)
+scripts/review_comments.py               comment extraction, anchors (§19.5)
+scripts/comment_review.py                check and comment (§19.5)
 scripts/review_report.py                 report and new ledger
 tests/test_<module>.py                   offline unittest suite
 tests/test_workflow.py                   workflow contract tests
@@ -885,11 +959,13 @@ for their test files.
 
 The suite holds one test file per script module that owns a
 contract (`apply_review`, `artifact_fetch`, `bot_evidence`,
-`bot_github`, `ledger`, `preflight`, `pull_reads`, `review_policy`,
-`review_report`, `select_pulls`) plus `test_workflow.py`, which
+`bot_github`, `comment_review`, `ledger`, `preflight`, `pull_reads`,
+`review_comments`, `review_policy`, `review_report`, `select_pulls`)
+plus `test_workflow.py`, which
 pins the workflow facts the scripts rely on: which job holds which
-credential, which step gates the write token, and the artifact
-names. The helpers split from `select_pulls` and `review_policy`
+credential, which step gates the write token, the artifact
+names, and that the comment path holds no approval event. The
+helpers split from `select_pulls`, `review_policy` and the appliers
 take their coverage through their parents. Linting runs through `prek`
 hooks including gitleaks, gitlint, ruff, mypy, basedpyright,
 actionlint, reuse, markdownlint, write-good, codespell and `aislop`
@@ -898,7 +974,8 @@ at threshold 100.
 ## 15. Rollout
 
 1. **Secretless plumbing.** Every pull request to this repository
-   runs the two `plumbing` legs and the regression suite. They
+   runs the two `plumbing` legs, one per mode, and the regression
+   suite. They
    prove selection, evidence upload, ledger fetch and the report
    from the pull request head with no secret in reach.
 2. **Manual agent dry-run.** A maintainer dispatches `testing.yaml`
@@ -947,10 +1024,12 @@ at threshold 100.
 
 Decided:
 
-- **Approve, never comment.** A bot comment on a pull request is
-  noise a human has to dismiss; a bot approval is a decision a
-  human can rely on or revert. Everything short of an approval
-  goes to the report.
+- **Approve, never comment, on human pull requests.** A bot comment
+  on a human's pull request is noise a human has to dismiss; a bot
+  approval is a decision a human can rely on or revert. Everything
+  short of an approval goes to the report. Bot pull requests are
+  the opposite case (§19.1): an approval there saves nobody a context
+  switch, and the authoring bot acts on comments.
 - **Deterministic corroboration of `trivial`.** The agent's tier is
   a claim. The classifier reads the same patches the agent read
   and must agree before an approval goes out under that tier.
@@ -964,9 +1043,10 @@ Decided:
   `trivial,low-risk` as the default rather than a staged widening,
   on the ground that the dry-run period exercises both tiers and
   the knob stays available.
-- **One App for triage and review.** A second App would add
-  inventory for no isolation gain: both workflows run in trusted
-  jobs under the same organisation.
+- **One App per kind of write.** The approving App approves and the
+  antagonistic App comments; neither labels issues or pushes code
+  (§10.1, §10.1.1). A permission or ruleset exception granted for
+  one never reaches the other.
 - **Dry-run entries in the ledger.** Without them the dry-run
   period would re-review every open pull request every three
   hours; with them, the first live run must still act, which the
@@ -993,10 +1073,12 @@ against the trusted `selection.json`.
 {
   "schema": 1,
   "org": "lfreleng-actions",
+  "mode": "approve",
   "generated_at": "2026-10-05T10:00:00Z",
   "dry_run": true,
   "model": "claude-opus-5.5",
   "approve_tiers": ["low-risk", "trivial"],
+  "bot_authors": [],
   "bot_login": "lf-releng-code-review-bot[bot]",
   "explicit_pull_requests": ["lfreleng-actions/repo#157"],
   "explicit_repositories": ["repo"],
@@ -1046,7 +1128,9 @@ against the trusted `selection.json`.
 ```
 
 `bot_login` is `null` without an App slug. `approve_tiers` holds a
-sorted list. `skip_counts` carries every reason from §5. `skipped` has
+sorted list, always empty in the antagonistic mode. `bot_authors`
+holds the folded logins that mode reviews, and is empty in the
+approve mode. `skip_counts` carries every reason from §5. `skipped` has
 one row per skipped pull request; `title` may be `null` when the
 skip happened before a read. Entries sort by repository and number.
 `files` comes from REST `pulls/{n}/files`; a file GitHub returns
@@ -1105,11 +1189,31 @@ bounds the summary to 600 characters, findings to 20 of 400
 characters each, and injection attempts to 20; it refuses an
 unterminated fence or any shape problem.
 
+The antagonistic mode's verdict (§19.4) carries no `tier` and no
+`findings`:
+
+```json
+{
+  "schema": 1,
+  "repository": "lfreleng-actions/repo",
+  "pull_request": 157,
+  "head_sha": "<40 hex>",
+  "summary": "One line, at most 600 characters.",
+  "comments": [{"path": "scripts/x.py", "start_line": 40, "line": 44,
+                "severity": "blocker", "body": "Markdown, 2000 characters"}],
+  "injection_attempts": ["..."]
+}
+```
+
+`severity` is `blocker`, `major`, `minor` or `nit`; `start_line` is
+optional and ignored unless below `line`. The extractor reads the
+first 25 comments; a malformed one costs itself alone (§19.5).
+
 ### 18.5 `check.json` (apply, offline; trusted)
 
 ```json
 {
-  "schema": 1, "key": "repo-157",
+  "schema": 1, "mode": "approve", "key": "repo-157",
   "repository": "lfreleng-actions/repo", "number": 157,
   "head_sha": "<40 hex>", "url": "...", "title": "...",
   "agent_tier": "trivial",
@@ -1130,6 +1234,31 @@ unterminated fence or any shape problem.
 the check could read no verdict; `tier` is then `needs-human` and `reasons`
 says why. `premium_requests` and `agent_seconds` come from
 `usage.json` when present and finite.
+
+The antagonistic `check.json` has no `tier` and no `approvable`:
+
+```json
+{
+  "schema": 1, "mode": "antagonistic", "key": "repo-157",
+  "repository": "lfreleng-actions/repo", "number": 157,
+  "head_sha": "<40 hex>", "url": "...", "title": "...",
+  "commentable": true, "reasons": [],
+  "summary": "sanitised, bounded",
+  "comments": [{"path": "...", "line": 44, "start_line": 40,
+                "severity": "blocker", "body": "sanitised"}],
+  "unplaced": [{"path": "...", "line": 9, "severity": "minor",
+                "body": "sanitised", "reason": "not a line the diff shows"}],
+  "dropped": ["comment 3: severity must be one of ..."],
+  "capped": 0,
+  "injection_attempts": [],
+  "premium_requests": 1.5, "agent_seconds": 42
+}
+```
+
+`comments` go inline, `unplaced` into the review body; `dropped` holds
+one reason per malformed comment and `capped` counts those past the
+cap. `commentable` is false with no usable verdict, a verdict about
+another target, or one whose every comment read failed validation.
 
 ### 18.6 `result.json` (apply, per pull request; trusted)
 
@@ -1152,10 +1281,27 @@ says why. `premium_requests` and `agent_seconds` come from
 keys when apply never produced a result; `tier` is then `null` and
 `reasons` names the step outcomes.
 
+An antagonistic `result.json` has the same identity, `reasons`,
+`summary`, `injection_attempts`, `review_url`, `dry_run`,
+`run_attempt` and spend keys, `tier: null` and `findings: []`, and:
+
+```json
+{
+  "verdict": "commented",
+  "comment_count": 3, "dropped_count": 1, "capped_count": 0,
+  "inline": true
+}
+```
+
+`verdict` is `commented`, `would-comment`, `refused` or `failed`.
+`comment_count` counts inline and unplaced findings together;
+`inline` is `true` when GitHub placed the comments, `false` when they
+went into the body, and `null` when nothing posted.
+
 ### 18.7 `report.json` and `report.md` (report; trusted)
 
 ```json
-{"schema": 1, "dry_run": true,
+{"schema": 1, "mode": "approve", "dry_run": true,
  "counts": {"approved": 0, "would-approve": 2, "needs-human": 1,
             "failed": 0, "skipped": 9, "candidates_seen": 13},
  "results": ["...result.json objects sorted by key..."],
@@ -1164,10 +1310,257 @@ keys when apply never produced a result; `tier` is then `null` and
  "ledger_entries": 42}
 ```
 
-`report.md` carries a heading, a one-line count summary, a table of
-results (pull request link, title, author, tier, verdict, review
-link or first reason), a table of skipped pull requests grouped by
+`counts` names the verdicts of the selection's mode, so an
+antagonistic report counts `commented`, `would-comment`, `refused`
+and `failed`, and the report leaves out a result carrying the other
+mode's verdict as unreadable. `report.md` carries a heading with the
+mode, a one-line count summary, a table of
+results (pull request link, title, author, tier or comment count,
+verdict, review link or first reason), a table of skipped pull
+requests grouped by
 reason, and the spend line. Summaries and reasons pass through the
 same one-line sanitiser as the approval body. A result file that is
 unreadable or malformed stays out, with a note, so one broken
 matrix leg cannot hide every other verdict or stop the ledger.
+
+## 19. The Antagonistic Mode
+
+### 19.1 Purpose
+
+Automated coding agents open pull requests in this organisation:
+[Code Monkey](https://github.com/lfreleng-actions/github-code-monkey-bot)
+and the Copilot coding agent. Copilot's own review reads each one,
+and a maintainer must still read and approve it. Between the two sits
+a gap: the maintainer is the first reader who doubts the change.
+
+The antagonistic mode fills that gap with a second model's hostile
+read of the diff. It posts its findings on the pull request as one
+review whose event is `COMMENT`, with each finding on the line it
+concerns, where the authoring bot can revise against them and the
+maintainer sees them before deciding. It never approves and never
+requests changes: every pull request in the organisation still goes
+through human review, and nothing this mode does can meet or
+block that rule.
+
+### 19.2 Selection
+
+`config/antagonistic-authors.txt` lists the bots whose pull requests
+the mode reviews, one login per line, compared without case and
+without the `[bot]` suffix REST and search add. The author rule of
+§5 inverts: a human author skips as `human_author`, any bot the list
+does not name as `bot_author`. Named pull requests obey it too, so a
+dispatch cannot point the mode at a human's work.
+
+The CI rules (`ci_pending`, `ci_failing`, `ci_none`) do not apply.
+They exist because an approval relies on green CI; a comment does
+not, and a bot pull request from a fork whose workflows await a
+maintainer's approval may show pending or partial CI for days.
+
+Two rules apply to this mode alone, after the Copilot rules. Both
+read the pull request's full review history, a paginated read the
+selection makes for this mode's candidates alone: the state query's
+last 100 reviews could miss an old review of the head. Neither counts
+a review unless GitHub marks its author as a bot: logins compare
+without the `[bot]` suffix, and a human account named like the App or
+like Copilot must stand in for neither.
+
+- `already_reviewed`: this App has submitted a review of the head.
+  GitHub keeps that review, so the review itself records which
+  heads the mode has read: a ledger snapshot lost when more runs
+  overlap than the ledger fetch reads back costs no second session.
+- `copilot_unreviewed`: no submitted Copilot review of the head
+  itself. An empty request list is not enough, and neither is a
+  review of an earlier push. With `copilot_pending` and
+  `copilot_feedback`, the mode reads a head once Copilot has
+  reviewed that head and nobody has left its threads open.
+
+`approve_tiers`
+must be `none`; the select job and the selection script both refuse
+anything else, so no caller can configure this mode to approve.
+
+### 19.3 The review session
+
+The review job does not change: the same packet, the same
+credential-free checkout, the same confined CLI with the model
+credential alone. The
+runtime context names the mode and says the trusted job may comment
+and never approve.
+
+### 19.4 The task
+
+`prompt/antagonistic.md` asks the agent to read the change as a
+sceptical senior reviewer reads a stranger's code, under six heads:
+correctness, the description against the diff, tests, security,
+CI/CD and compatibility, and maintainability. It asks for honesty
+over volume: every finding must point at something real, and an
+empty list is the right answer for a sound change.
+
+Its verdict block carries `schema`, `repository`, `pull_request`,
+`head_sha`, `summary`, `comments` and `injection_attempts`, and no
+tier. Each comment names a `path`, a `line` in the new file, an
+optional `start_line` in the same hunk, a `severity` of `blocker`,
+`major`, `minor` or `nit`, and a Markdown `body`. The prompt
+explains how to count new-file lines from a hunk header and how to
+confirm one with `grep -n` in the checkout.
+
+### 19.5 The apply job
+
+`comment_review.py check` reads the verdict through
+`review_comments.extract_verdict`. A shape problem outside the
+comments refuses the verdict; a malformed comment costs itself
+alone, and the check records its reason as dropped. Comments past
+the cap of 25 go unread and count apart, as `capped`, so a long
+list never passes for a malformed one. `anchor` then places a
+comment inline when its path
+is a file the pull request changes with a patch, its line is a line
+that patch shows on the right side (added or context), and a range
+stays in one hunk, since GitHub refuses a review whose comment it
+cannot place. A well-formed comment that fails those tests is still
+a finding (a caller the change forgot, say): it stays as
+`unplaced`, with the reason, and the review body lists it under its
+file and line. A verdict whose proposed findings all failed
+validation is not commentable: posted, it would read as a clean
+review and its review would stop the next run (§19.2) looking
+again.
+The check sanitises every body once. Control characters fold, and a
+`suggestion` fence becomes a plain code block wherever it opens, at
+the top level or in a blockquote or a list item, so no finding
+offers a one-click commit; the same text quoted inside a fenced
+block is code, and stays as written. A fenced block GitHub is sure
+to render as code (fences at column 0, the closer matching) stays
+as written: GitHub links nothing there, and code left alone
+pastes cleanly. Everywhere else `review_policy.defuse` (§8.3) disarms
+mentions and references, a zero-width space after `<` leaves raw
+HTML as text, and a fence the scanner did not pair (indented, quoted,
+listed or unclosed) becomes text, so GitHub pairs no fence the
+scanner did not, and never renders as prose what the scanner left
+as code. Inline code spans are not exempt: telling one from stray
+backticks needs paragraph structure, and a wrong guess would leave a
+mention live. A body left with an open fence, as written or once cut
+to 2000 characters, gets a closing fence. Each of these passes reads
+a body once, in time linear in its length: a fence opener finds out
+from the longest closer still ahead whether one will close it, and the
+suggestion pattern starts at the beginning of a line and takes a
+fence run whole.
+A session built to make a scan backtrack, a body of unclosed fences
+or a long run of backticks, costs the trusted job one pass. At post
+time, with the
+organisation known,
+`review_policy.contain_links` turns every link outside it into text
+(§8.3), fenced code aside. The check writes `check.json` with
+`mode: antagonistic` and `commentable`, and the outputs
+`commentable=` and `comments=`; its step summary names each finding
+left out of the inline set and why.
+
+The write token mints on the same terms as §8.3, gated on
+`commentable` and the mode. `comment_review.py comment` re-reads the
+pull request and refuses, with a reason each, unless the pull request
+is `OPEN`, not a draft, at the same head, still by a listed bot, and
+carries no review from this App on that head, reading the full
+review history as the selection does. The apply job holds one lock
+per pull request across live antagonistic runs
+(`code-review-antagonistic-apply-<repository>-<number>`), whatever
+the head, so a second dispatch naming the pull request reaches that
+re-read once the first has posted, and reads the first's
+review: on the same head it refuses. The group sets `queue: max`. A
+group otherwise keeps one pending job and a newcomer replaces it, so
+a late job for an older head could evict a pending one for the
+current head, and the old head's job would then refuse as moved,
+leaving the current head unreviewed; queued, each job waits its
+turn. Then it posts
+one review:
+
+```text
+POST repos/{owner}/{repo}/pulls/{number}/reviews
+{"commit_id": "<head_sha>", "event": "COMMENT", "body": "<body>",
+ "comments": [{"path", "line", "side": "RIGHT",
+               "start_line", "start_side", "body": "**<severity>**: ..."}]}
+```
+
+The body opens with "🤖 Antagonistic review by agent" and the
+finding count. With no finding on a line it claims nothing: it
+sends the reader to the summary, which may name a whole-change
+blocker, or says "no findings on this head" when the summary is
+empty too. It carries the
+summary and the unplaced findings, gives the count of proposed
+findings that failed validation and, apart, of those past the cap,
+and ends with the reviewer, the model,
+the run link and a
+statement that this is not a human review and never an approval. A
+verdict with no findings still posts that body, so the head shows
+the review happened. Should GitHub refuse the inline placement anyway
+(HTTP 422, which creates nothing), the review goes once more with
+every finding listed in the body. Any other failure is operational:
+exit 1 and the `failed` fallback.
+
+`COMMENT` is the applier's one event, and `comment_review.post`, the
+one place it writes, refuses any other at the call. The tests check
+that behaviour: every write the applier makes in
+`test_comment_review.py` goes through one fake that asserts
+`COMMENT`. `test_workflow.py` adds a lexical tripwire, no guarantee:
+it finds `APPROVE` or `REQUEST_CHANGES` written as a string literal in
+`comment_review.py`, `review_comments.py` or `review_files.py`, or an
+import of `apply_review` from them, and misses a computed string or
+the other modules the applier loads. `apply_review.py` and
+`comment_review.py` each refuse a selection or check whose `mode` is
+not their own.
+
+### 19.6 Report and ledger
+
+The report counts `commented`, `would-comment`, `refused` and
+`failed`, and shows `comment_count` (§18.6) where the approve mode
+shows a tier. The ledger is `code-review-antagonistic-ledger` and records
+`commented` and `would-comment`: the next run looks again at a
+refused or failed head. Keeping it apart from the approve ledger
+means neither mode's memory can skip a head for the other. For live
+runs the ledger is a cache in front of `already_reviewed`, which
+reads the posted review itself; dry runs post nothing, so they rely
+on the ledger alone.
+
+### 19.7 The caller
+
+`code-review-antagonistic.yaml` runs on `workflow_dispatch` alone.
+Its form offers `dry_run` (default `true`), a model choice defaulting
+to GPT-6 Astra, so the second read comes from a different model
+family from the Claude default that writes Code Monkey's changes,
+`pull_requests`, `repositories`, `max_pull_requests` (default 10),
+`max_concurrent_agents` (default 5) and `reassess`. It passes
+`mode: antagonistic` and `approve_tiers: none` as literals, and the
+antagonistic App's credentials (§10.1.1); the approving App's names
+appear nowhere in it, nor the antagonistic App's in the approve
+caller.
+
+Each dispatch locks within its own run, in the caller and in the
+reusable workflow. Code Monkey dispatches a batch per run, and a
+shared group would let a newer dispatch cancel a pending batch. The
+apply job's lock per pull request (§19.5) serialises the one write
+across runs instead, and the live re-read and the ledger stop a head
+from taking two reviews.
+
+A dispatcher needs `actions: write` on this repository and nothing
+else. Code Monkey dispatches with its own credential, sending the
+pull requests whose Copilot review of the current head is clean:
+
+```bash
+gh workflow run code-review-antagonistic.yaml \
+  --repo lfreleng-actions/github-code-review-bot \
+  -f dry_run=false -f model='GPT-6 Astra' \
+  -f pull_requests='repo#12 other-repo#34'
+```
+
+### 19.8 Rollout
+
+1. Create the App (`docs/setup/README.md`), install it on the
+   organisation with the §10.1 permissions, keep it out of every
+   ruleset bypass list, and set `ANTAGONISTIC_APP_CLIENT_ID` and
+   `ANTAGONISTIC_APP_PRIVATE_KEY`. If its slug differs from
+   `lf-releng-antagonistic-review-bot`, change
+   `config/antagonistic-bot.json` to match.
+2. Dispatch `testing.yaml` with `mode: antagonistic` against three
+   or four open Code Monkey pull requests, and read the dropped
+   comments in the check summaries: a high drop rate is a prompt
+   problem to fix before any comment posts.
+3. Dispatch the antagonistic caller with `dry_run: true`, then live
+   against one pull request; confirm the review lands as `COMMENT`
+   on the right lines, under the antagonistic App's name.
+4. Enable Code Monkey's dispatch.

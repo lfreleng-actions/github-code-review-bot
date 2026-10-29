@@ -13,6 +13,11 @@ that are trivial or that a code review finds low risk. The bot posts
 nothing else: a pull request it cannot approve appears in the run
 report for a human, and the pull request itself stays untouched.
 
+A second, antagonistic mode reviews pull requests opened by coding
+bots instead, and posts its findings on them as one comment review
+under a separate App that never approves. The
+[design](DESIGN.md#19-the-antagonistic-mode) covers it.
+
 ## How a run works
 
 ```text

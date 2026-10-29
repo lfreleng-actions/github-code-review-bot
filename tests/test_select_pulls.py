@@ -23,6 +23,7 @@ ledger = import_module("ledger")
 reads = import_module("pull_reads")
 changes = import_module("pull_changes")
 select = import_module("select_pulls")
+rules = import_module("selection_rules")
 outputs = import_module("selection_outputs")
 
 HEAD = "a" * 40
@@ -30,7 +31,7 @@ BASE = "b" * 40
 OTHER = "c" * 40
 PATCH = "@@ -1 +1 @@\n-a\n+b"
 REST_PATH_RE = re.compile(
-    r"repos/([^/]+/[^/]+)/pulls/(\d+)/(files|commits)\?per_page=100"
+    r"repos/([^/]+/[^/]+)/pulls/(\d+)/(files|commits|reviews)\?per_page=100"
 )
 
 
@@ -159,6 +160,7 @@ class FakeGitHub:
         self.archived: set[str] = set()
         self.files: dict[tuple[str, int], list[dict[str, Any]]] = {}
         self.commits: dict[tuple[str, int], list[dict[str, Any]]] = {}
+        self.reviews: dict[tuple[str, int], list[dict[str, Any]]] = {}
         self.calls: list[list[str]] = []
 
     def add(self, repo: str, number: int, **overrides: Any) -> None:
@@ -193,7 +195,24 @@ class FakeGitHub:
         key = (found.group(1), int(found.group(2)))
         if found.group(3) == "files":
             return json.dumps([self.files.get(key, [rest_file()])])
+        if found.group(3) == "reviews":
+            return json.dumps([self.reviews.get(key, self.rest_reviews(key))])
         return json.dumps([self.commits.get(key, [rest_commit()])])
+
+    def rest_reviews(self, key: tuple[str, int]) -> list[dict[str, Any]]:
+        """The REST form of the reviews the GraphQL node carries."""
+        nodes = self.pulls[key]["reviews"]["nodes"]
+        return [
+            {
+                "user": {
+                    "login": node["author"]["login"],
+                    "type": node["author"]["__typename"],
+                },
+                "state": node["state"],
+                "commit_id": node["commit"]["oid"],
+            }
+            for node in nodes
+        ]
 
 
 class SelectionCase(unittest.TestCase):
@@ -699,6 +718,8 @@ class OutputsTest(SelectionCase):
         )
         self.assertEqual(selection["schema"], select.SCHEMA)
         self.assertEqual(selection["org"], "org")
+        self.assertEqual(selection["mode"], "approve")
+        self.assertEqual(selection["bot_authors"], [])
         self.assertRegex(
             selection["generated_at"], r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$"
         )
@@ -710,7 +731,7 @@ class OutputsTest(SelectionCase):
         self.assertEqual(selection["explicit_repositories"], [])
         self.assertEqual(selection["exclusions"], ["gamma", "zeta"])
         self.assertEqual(selection["candidates_seen"], 3)
-        self.assertEqual(list(selection["skip_counts"]), list(select.SKIP_REASONS))
+        self.assertEqual(list(selection["skip_counts"]), list(rules.SKIP_REASONS))
         self.assertEqual(
             selection["skipped"],
             [
@@ -857,6 +878,258 @@ class FailureTest(SelectionCase):
             self.run_main("--max-pull-requests", "lots")
         self.assertEqual(caught.exception.code, 1)
         self.assertIn("max_pull_requests must be", self.stderr.getvalue())
+
+
+MONKEY = {"__typename": "Bot", "login": "lf-releng-code-monkey-bot"}
+MONKEY_SEARCH = {"login": "lf-releng-code-monkey-bot[bot]", "is_bot": True}
+
+
+def bot_review(login: str, commit: str = HEAD) -> dict[str, Any]:
+    """One review node from a bot, Copilot by default in the callers."""
+    return {
+        "author": {"__typename": "Bot", "login": login},
+        "state": "COMMENTED",
+        "submittedAt": "2026-02-01T00:00:00Z",
+        "commit": {"oid": commit},
+    }
+
+
+COPILOT_ON_HEAD = {"nodes": [bot_review("copilot-pull-request-reviewer")]}
+
+
+class LoadBotAuthorsTest(unittest.TestCase):
+    """``load_bot_authors`` reads one folded login per line."""
+
+    def test_comments_suffixes_case_and_repeats(self) -> None:
+        """Comments go, ``[bot]`` and case fold away, repeats collapse in order."""
+        with tempfile.TemporaryDirectory() as tmp:
+            file = Path(tmp) / "authors.txt"
+            file.write_text(
+                "# heading\nCopilot  # agent\n\nmonkey[bot]\ncopilot\n",
+                encoding="utf-8",
+            )
+            self.assertEqual(select.load_bot_authors(file), ["copilot", "monkey"])
+
+    def test_bad_logins_and_missing_files(self) -> None:
+        """A login with a slash or space, or an absent file, is refused."""
+        self.assertEqual(select.load_bot_authors(None), [])
+        with tempfile.TemporaryDirectory() as tmp:
+            file = Path(tmp) / "authors.txt"
+            for bad in ("org/bot\n", "two words\n", "-dash\n"):
+                file.write_text(bad, encoding="utf-8")
+                with self.subTest(bad=bad), self.assertRaises(reads.SelectionError):
+                    select.load_bot_authors(file)
+            with self.assertRaises(reads.SelectionError):
+                select.load_bot_authors(Path(tmp) / "absent")
+
+
+class AntagonisticSelectionTest(SelectionCase):
+    """The antagonistic mode reviews the listed bots and nobody else."""
+
+    def setUp(self) -> None:
+        """Write a bot author list naming Code Monkey and Copilot."""
+        super().setUp()
+        holder = tempfile.TemporaryDirectory()
+        self.addCleanup(holder.cleanup)
+        self.authors = Path(holder.name) / "authors.txt"
+        self.authors.write_text(
+            "lf-releng-code-monkey-bot\nCopilot\n", encoding="utf-8"
+        )
+
+    def add_bot(self, repo: str, number: int, **overrides: Any) -> None:
+        """Register a Code Monkey pull request Copilot has reviewed at its head."""
+        self.gh.search.append(search_pull(repo, number, author=MONKEY_SEARCH))
+        node: dict[str, Any] = {"author": MONKEY, "reviews": COPILOT_ON_HEAD}
+        node.update(overrides)
+        self.gh.pulls[(f"org/{repo}", number)] = pull_node(repo, number, **node)
+
+    def run_antagonistic(self, *extra: str) -> dict[str, Any]:
+        """Run the selection in the antagonistic mode; return selection.json."""
+        selection, _, _ = self.run_main(
+            "--mode",
+            "antagonistic",
+            "--approve-tiers",
+            "none",
+            "--bot-authors-file",
+            str(self.authors),
+            *extra,
+        )
+        return selection
+
+    def test_listed_bots_kept_humans_and_other_bots_skipped(self) -> None:
+        """Search applies the author rule with the inverse sense of approve."""
+        self.add_bot("alpha", 1)
+        self.gh.add("beta", 2)
+        self.gh.search.append(
+            search_pull("gamma", 3, author={"login": "dependabot[bot]", "is_bot": True})
+        )
+        selection = self.run_antagonistic()
+        self.assertEqual(selection["mode"], "antagonistic")
+        self.assertEqual(
+            selection["bot_authors"], ["lf-releng-code-monkey-bot", "copilot"]
+        )
+        self.assertEqual(selection["approve_tiers"], [])
+        self.assertEqual([e["key"] for e in selection["pull_requests"]], ["alpha-1"])
+        self.assertEqual(
+            selection["pull_requests"][0]["author"], "lf-releng-code-monkey-bot"
+        )
+        self.assertEqual(selection["skip_counts"]["human_author"], 1)
+        self.assertEqual(selection["skip_counts"]["bot_author"], 1)
+
+    def test_named_pull_requests_obey_the_author_rule(self) -> None:
+        """Naming a human's pull request does not put it in front of this mode."""
+        self.gh.add("alpha", 1)
+        selection = self.run_antagonistic("--pull-requests", "alpha#1")
+        self.assert_only_skip(selection, "human_author")
+
+    def test_ci_never_gates_but_copilot_review_does(self) -> None:
+        """Red or absent CI is reviewed; a pending Copilot review waits."""
+        self.add_bot(
+            "alpha",
+            1,
+            commits={
+                "totalCount": 1,
+                "nodes": [{"commit": {"statusCheckRollup": rollup("FAILURE")}}],
+            },
+        )
+        self.add_bot(
+            "beta",
+            2,
+            reviewRequests={
+                "nodes": [
+                    {
+                        "requestedReviewer": {
+                            "__typename": "Bot",
+                            "login": "copilot-pull-request-reviewer",
+                        }
+                    }
+                ]
+            },
+        )
+        selection = self.run_antagonistic()
+        self.assertEqual([e["key"] for e in selection["pull_requests"]], ["alpha-1"])
+        self.assertEqual(selection["skip_counts"]["copilot_pending"], 1)
+        self.assertEqual(selection["skip_counts"]["ci_failing"], 0)
+
+    def test_a_copilot_review_of_this_head_is_required(self) -> None:
+        """No Copilot review, or one of an earlier push, waits for the next."""
+        self.add_bot("alpha", 1, reviews={"nodes": []})
+        self.add_bot(
+            "beta",
+            2,
+            reviews={"nodes": [bot_review("copilot-pull-request-reviewer", OTHER)]},
+        )
+        self.add_bot("gamma", 3)
+        selection = self.run_antagonistic()
+        self.assertEqual([e["key"] for e in selection["pull_requests"]], ["gamma-3"])
+        self.assertEqual(selection["skip_counts"]["copilot_unreviewed"], 2)
+
+    def test_a_head_this_app_reviewed_costs_no_session(self) -> None:
+        """GitHub keeps the review, so it outlives any ledger that loses it."""
+        own = bot_review("lf-releng-antagonistic-review-bot")
+        self.add_bot("alpha", 1, reviews={"nodes": [*COPILOT_ON_HEAD["nodes"], own]})
+        older = bot_review("lf-releng-antagonistic-review-bot", OTHER)
+        self.add_bot("beta", 2, reviews={"nodes": [*COPILOT_ON_HEAD["nodes"], older]})
+        selection = self.run_antagonistic(
+            "--bot-slug", "lf-releng-antagonistic-review-bot"
+        )
+        self.assertEqual([e["key"] for e in selection["pull_requests"]], ["beta-2"])
+        self.assertEqual(selection["skip_counts"]["already_reviewed"], 1)
+
+    def test_an_old_review_beyond_the_state_window_still_counts(self) -> None:
+        """The full history decides, not the state query's last 100 reviews."""
+        self.add_bot("alpha", 1)
+        noise = [
+            {
+                "user": {"login": "alice", "type": "User"},
+                "state": "COMMENTED",
+                "commit_id": OTHER,
+            }
+        ] * 120
+        own = {
+            "user": {"login": "lf-releng-antagonistic-review-bot[bot]", "type": "Bot"},
+            "state": "COMMENTED",
+            "commit_id": HEAD,
+        }
+        copilot = {
+            "user": {"login": "copilot-pull-request-reviewer[bot]", "type": "Bot"},
+            "state": "COMMENTED",
+            "commit_id": HEAD,
+        }
+        self.gh.reviews[("org/alpha", 1)] = [copilot, own, *noise]
+        selection = self.run_antagonistic(
+            "--bot-slug", "lf-releng-antagonistic-review-bot"
+        )
+        self.assert_only_skip(selection, "already_reviewed")
+
+    def test_a_human_named_like_a_bot_stands_in_for_neither(self) -> None:
+        """Folding drops ``[bot]``, so the account type decides: a human whose
+        login matches the App or Copilot neither blocks nor satisfies a rule.
+        """
+        self.add_bot("alpha", 1)
+        lookalikes = [
+            {
+                "user": {"login": name, "type": "User"},
+                "state": "COMMENTED",
+                "commit_id": HEAD,
+            }
+            for name in ("lf-releng-antagonistic-review-bot", "copilot")
+        ]
+        real_copilot = {
+            "user": {"login": "copilot-pull-request-reviewer[bot]", "type": "Bot"},
+            "state": "COMMENTED",
+            "commit_id": HEAD,
+        }
+        self.gh.reviews[("org/alpha", 1)] = lookalikes
+        selection = self.run_antagonistic(
+            "--bot-slug", "lf-releng-antagonistic-review-bot"
+        )
+        self.assert_only_skip(selection, "copilot_unreviewed")
+        self.gh.reviews[("org/alpha", 1)] = [*lookalikes, real_copilot]
+        selection = self.run_antagonistic(
+            "--bot-slug", "lf-releng-antagonistic-review-bot"
+        )
+        self.assertEqual([e["key"] for e in selection["pull_requests"]], ["alpha-1"])
+
+    def test_approve_mode_reads_no_review_history(self) -> None:
+        """The extra paginated read is the antagonistic mode's alone."""
+        self.gh.add("alpha", 1)
+        self.run_main()
+        self.assertFalse(any("/reviews?" in " ".join(c) for c in self.gh.calls))
+
+    def test_a_pull_request_skipped_early_costs_no_history_read(self) -> None:
+        """Closed or draft, a named bot pull request never walks its reviews."""
+        self.add_bot("alpha", 1, state="CLOSED")
+        self.add_bot("beta", 2, isDraft=True)
+        self.run_antagonistic("--pull-requests", "alpha#1 beta#2")
+        self.assertFalse(any("/reviews?" in " ".join(c) for c in self.gh.calls))
+
+    def test_an_approve_tier_is_refused(self) -> None:
+        """The mode approves nothing, so asking it to is an error."""
+        with self.assertRaises(SystemExit) as caught:
+            self.run_antagonistic("--approve-tiers", "trivial")
+        self.assertEqual(caught.exception.code, 1)
+        self.assertIn("approves nothing", self.stderr.getvalue())
+
+    def test_an_empty_author_list_is_refused(self) -> None:
+        """With no listed bot the mode would review nothing; it says so."""
+        self.authors.write_text("# nobody\n", encoding="utf-8")
+        with self.assertRaises(SystemExit):
+            self.run_antagonistic()
+        self.assertIn("needs a bot author list", self.stderr.getvalue())
+
+    def test_unknown_mode_is_refused(self) -> None:
+        """Only the two modes are accepted."""
+        with self.assertRaises(SystemExit) as caught:
+            self.run_main("--mode", "approve-all")
+        self.assertEqual(caught.exception.code, 1)
+        self.assertIn("mode must be one of", self.stderr.getvalue())
+
+    def test_approve_mode_still_skips_every_bot(self) -> None:
+        """A listed bot is no exception in the approve mode."""
+        self.add_bot("alpha", 1)
+        selection, _, _ = self.run_main("--bot-authors-file", str(self.authors))
+        self.assert_only_skip(selection, "bot_author")
 
 
 if __name__ == "__main__":

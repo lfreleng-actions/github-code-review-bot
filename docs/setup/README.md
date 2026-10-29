@@ -11,9 +11,16 @@ trusted **Report**. Select builds an offline packet for each eligible
 pull request; Review runs Copilot CLI against the packet and a
 credential-free checkout; Apply corroborates the verdict, re-reads
 the live
-pull request and submits the one approval; Report writes the run
+pull request and makes the one write; Report writes the run
 summary and the ledger. [`../DESIGN.md`](../DESIGN.md) explains why
 each job holds what it holds.
+
+Two modes share the pipeline. The **approve** mode reviews human
+pull requests and may approve them; the **antagonistic** mode
+reviews pull requests from the bots in
+`config/antagonistic-authors.txt` and may post one comment review,
+never an approval ([`DESIGN.md` §19](../DESIGN.md)). Each runs
+under its own App.
 
 This guide covers what an operator configures and checks.
 
@@ -59,6 +66,37 @@ Apply mints `pull-requests: write` for one repository, on the live
 path alone, after the offline check accepted the verdict.
 Review receives neither the App key nor any App token.
 
+## The antagonistic App
+
+The antagonistic mode runs as a second App, **LF/RelEng Antagonistic
+Review Bot**, whose slug `config/antagonistic-bot.json` names
+(`lf-releng-antagonistic-review-bot`; change the file if GitHub
+assigns another). Create it with the same five permissions as the
+table above: posting a review of any kind needs Pull requests: Read
+and write. Then:
+
+- Install it on the organisation with "all repositories", like the
+  approving App, and accept the permission request.
+- Keep it out of every ruleset bypass list and every list of
+  reviewers whose approval counts. GitHub cannot grant a permission
+  that comments but cannot approve, so what keeps this App from
+  approving is the code (`DESIGN.md` §10.1.1) together with a
+  ruleset that would not honour its approval.
+- Disable its webhook; nothing listens.
+
+The pre-flight gate refuses a token from either App in the other
+mode, so a key wired to the wrong caller fails the run at the first
+mint.
+
+**Copilot code review is a prerequisite.** The antagonistic mode
+reads a head after Copilot has reviewed that same head, and skips it
+as `copilot_unreviewed` until then. A repository with Copilot code
+review turned off never gets an antagonistic review. When a dispatch
+selects nothing, read `skipped[]` in the evidence artifact's
+`selection.json` for that reason, and for `already_reviewed`: the
+mode reviews a head once, and `reassess` cannot override that, so a
+prompt or model change reaches a pull request at its next push.
+
 ## Variables and secrets
 
 Every bot repository in this organisation uses the same names, so
@@ -68,18 +106,28 @@ repository that runs the scheduled caller:
 
 <!-- markdownlint-disable MD013 -->
 
-| Name                  | Kind                | Value                                                 |
-| --------------------- | ------------------- | ----------------------------------------------------- |
-| `BOT_APP_CLIENT_ID`   | Repository variable | The App's client id; empty limits runs to dry-run     |
-| `BOT_APP_PRIVATE_KEY` | Repository secret   | The App's private key (PEM)                           |
-| `COPILOT_CLI_TOKEN`   | Organisation secret | Fine-grained PAT with Copilot Requests (next section) |
+| Name                           | Kind                | Value                                                     |
+| ------------------------------ | ------------------- | --------------------------------------------------------- |
+| `BOT_APP_CLIENT_ID`            | Repository variable | The approving App's client id; empty limits it to dry-run |
+| `BOT_APP_PRIVATE_KEY`          | Repository secret   | The approving App's private key (PEM)                     |
+| `ANTAGONISTIC_APP_CLIENT_ID`   | Repository variable | The antagonistic App's client id                          |
+| `ANTAGONISTIC_APP_PRIVATE_KEY` | Repository secret   | The antagonistic App's private key (PEM)                  |
+| `COPILOT_CLI_TOKEN`            | Organisation secret | Fine-grained PAT with Copilot Requests (next section)     |
 
 <!-- markdownlint-enable MD013 -->
 
-The reusable workflow sees nothing but the values handed to its
+The approve caller reads the `BOT_APP_*` pair and the antagonistic
+caller the `ANTAGONISTIC_APP_*` pair; neither names the other's. The
+reusable workflow sees nothing but the values handed to its
 named inputs, so another caller may hold them under other names.
 Keep the App key out of any job that runs an agent; the bundled
 callers do.
+
+A workflow elsewhere that dispatches the antagonistic caller, Code
+Monkey's for one, needs a credential with Actions: Read and write on
+this repository alone: a fine-grained PAT or an App installation
+scoped to `github-code-review-bot`. It needs no access to the
+repositories under review.
 
 ## The model credential
 
@@ -118,9 +166,9 @@ holds which credential and which step gates the write token. Expect
 zero findings from zizmor.
 
 Every pull request to this repository runs the secretless plumbing
-legs: Select and Report with the pull request head as assets,
-`skip_agent: true` and no secret in reach. They prove selection,
-evidence upload, the ledger fetch and the report.
+legs, one per mode: Select and Report with the pull request head as
+assets, `skip_agent: true` and no secret in reach. They prove
+selection, evidence upload, the ledger fetch and the report.
 
 Run the agent itself from a manual dispatch of the testing
 workflow, against a ref you have reviewed:
@@ -128,14 +176,18 @@ workflow, against a ref you have reviewed:
 ```bash
 gh workflow run testing.yaml \
   -f pull_requests='repo/pull/157, other-repo#42'
+gh workflow run testing.yaml -f mode=antagonistic \
+  -f pull_requests='repo#12'
 ```
 
 `pull_requests` and `repositories` are optional; without them the
 dispatch scans the organisation with a cap of two. This path is
 always dry-run and passes no App credential, so it reports and
-never approves. Read the step summary of the Report job and the
+never writes. Read the step summary of the Report job and the
 session artifacts (next section) to judge whether each tier landed
-where a reviewer would put it.
+where a reviewer would put it or, in the antagonistic mode, whether
+the findings are real and what share of comments the anchor check
+dropped.
 
 ## Reading the artifacts
 
@@ -245,3 +297,5 @@ deploy nothing.
   skip rules, the classifier and vetoes, and the data contracts.
 - [`prompt/review.md`](https://github.com/lfreleng-actions/github-code-review-bot/blob/main/prompt/review.md):
   the agent's task and the three tiers as it reads them.
+- [`prompt/antagonistic.md`](https://github.com/lfreleng-actions/github-code-review-bot/blob/main/prompt/antagonistic.md):
+  the antagonistic mode's task and its comment contract.

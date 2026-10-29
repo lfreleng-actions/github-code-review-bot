@@ -11,10 +11,16 @@ by hand on every change: which job holds which credential, that
 downloads go by producer artifact ID, that every action is pinned to
 a commit, and that the one write is minted for one repository on the
 live path alone.
+
+Two modes share the pipeline. The approve mode's caller holds the
+approving App and the antagonistic mode's caller a second App; each
+mode checks minted tokens against its own configured slug, and the
+antagonistic path carries no approval event at all.
 """
 
 from __future__ import annotations
 
+import ast
 import json
 import re
 import unittest
@@ -23,9 +29,12 @@ from typing import Any, ClassVar, cast
 
 import yaml  # pyright: ignore[reportMissingModuleSource]
 
-WORKFLOWS = Path(__file__).resolve().parents[1] / ".github" / "workflows"
+ROOT = Path(__file__).resolve().parents[1]
+WORKFLOWS = ROOT / ".github" / "workflows"
+SCRIPTS = ROOT / "scripts"
 REUSABLE = WORKFLOWS / "code-review.yaml"
 CRON = WORKFLOWS / "code-review-cron.yaml"
+ANTAGONISTIC = WORKFLOWS / "code-review-antagonistic.yaml"
 TESTING = WORKFLOWS / "testing.yaml"
 
 # PyYAML reads the bare mapping key ``on`` as the boolean ``True``.
@@ -40,6 +49,12 @@ DOWNLOAD = "actions/download-artifact"
 UPLOAD = "actions/upload-artifact"
 REUSABLE_CALL = "$/.github/workflows/code-review.yaml"
 TRUSTED_JOBS = ("select", "apply", "report")
+# Review events GitHub accepts besides COMMENT; the antagonistic path
+# must never be able to send either.
+FORBIDDEN_EVENTS = frozenset({"APPROVE", "REQUEST_CHANGES"})
+# The modules the antagonistic apply path loads; apply_review, which
+# approves, must not be among them.
+COMMENT_PATH = ("comment_review", "review_comments", "review_files")
 
 COMMIT_PIN = re.compile(r"^[^@\s]+@[0-9a-f]{40}$")
 SECRET_REFERENCE = re.compile(r"secrets\.[A-Za-z0-9_]+")
@@ -69,6 +84,31 @@ def is_action(step: dict[str, Any], action: str) -> bool:
 def dumped(node: object) -> str:
     """Serialise a YAML subtree so a regex can scan every value in it."""
     return json.dumps(node, sort_keys=True)
+
+
+def module_tree(name: str) -> ast.Module:
+    """Parse one script module from the assets checkout."""
+    return ast.parse((SCRIPTS / f"{name}.py").read_text(encoding="utf-8"))
+
+
+def string_constants(tree: ast.Module) -> set[str]:
+    """Every string literal a module holds, docstrings included."""
+    return {
+        node.value
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Constant) and isinstance(node.value, str)
+    }
+
+
+def imported_modules(tree: ast.Module) -> set[str]:
+    """The top-level names of every module a module imports."""
+    names: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            names.update(alias.name.split(".")[0] for alias in node.names)
+        elif isinstance(node, ast.ImportFrom) and node.module:
+            names.add(node.module.split(".")[0])
+    return names
 
 
 class WorkflowCase(unittest.TestCase):
@@ -137,10 +177,12 @@ class TopLevelContracts(ReusableWorkflowCase):
         self.assertEqual(self.workflow["permissions"], {})
 
     def test_concurrency_separates_dry_runs_from_live_runs(self) -> None:
-        """Live runs lock per caller and owner; dry runs lock within their run."""
+        """Live approve runs lock per caller and owner; dry and antagonistic per run."""
         group = squash(str(self.workflow["concurrency"]["group"]))
         self.assertIn("inputs.dry_run", group)
         self.assertIn("code-review-dry-run-{0}-{1}', github.run_id", group)
+        self.assertIn("inputs.mode == 'antagonistic'", group)
+        self.assertIn("code-review-antagonistic-{0}-{1}', github.run_id", group)
         self.assertIn("code-review-{0}-{1}', github.repository", group)
         self.assertFalse(self.workflow["concurrency"]["cancel-in-progress"])
 
@@ -196,7 +238,10 @@ class SelectContracts(ReusableWorkflowCase):
         ledger = self.step("select", "Fetch prior ledger")
         self.assertEqual(ledger["env"]["GH_TOKEN"], "${{ github.token }}")
         self.assertIn("ledger.py fetch", flatten(ledger["run"]))
-        self.assertIn("--artifact-name code-review-ledger", flatten(ledger["run"]))
+        self.assertIn('--artifact-name "$LEDGER_NAME"', flatten(ledger["run"]))
+        self.assertEqual(
+            ledger["env"]["LEDGER_NAME"], "${{ steps.budget.outputs.ledger_name }}"
+        )
         self.assertLess(
             self.position("select", "Fetch prior ledger"),
             self.position("select", "Select pull requests"),
@@ -209,10 +254,44 @@ class SelectContracts(ReusableWorkflowCase):
         )
         self.assertEqual(self.jobs["select"]["permissions"]["actions"], "read")
 
+    def test_each_mode_names_its_app_and_its_ledger(self) -> None:
+        """The mode, checked before any token, picks the App config and ledger.
+
+        An unknown mode fails, and the antagonistic mode refuses any
+        approve tier, so no caller can configure it to approve.
+        """
+        step = self.step("select", "Check inputs")
+        self.assertEqual(step["env"]["MODE"], "${{ inputs.mode }}")
+        run = flatten(step["run"])
+        self.assertIn(
+            "approve) bot_config='config/bot.json' ledger_name='code-review-ledger' ;;",
+            run,
+        )
+        self.assertIn(
+            "bot_config='config/antagonistic-bot.json'"
+            " ledger_name='code-review-antagonistic-ledger' ;;",
+            run,
+        )
+        self.assertIn("echo '::error::the antagonistic mode approves nothing'", run)
+        self.assertIn("*) echo '::error::mode must be approve or antagonistic'", run)
+        self.assertLess(
+            self.position("select", "Check inputs"),
+            self.position("select", "Mint read-only App token"),
+        )
+        outputs = self.jobs["select"]["outputs"]
+        self.assertEqual(
+            outputs["bot_config"], "${{ steps.budget.outputs.bot_config }}"
+        )
+        self.assertEqual(
+            outputs["ledger_name"], "${{ steps.budget.outputs.ledger_name }}"
+        )
+
     def test_selection_forwards_every_scoping_input(self) -> None:
-        """Named pull requests, repositories, tiers and the cap reach the script."""
+        """Mode, named pull requests, repositories, tiers and the cap reach the script."""
         run = flatten(self.step("select", "Select pull requests")["run"])
         for flag in (
+            '--mode "$MODE"',
+            "--bot-authors-file review-assets/config/antagonistic-authors.txt",
             '--pull-requests "$PULL_REQUESTS"',
             '--repositories "$REPOSITORIES"',
             '--approve-tiers "$APPROVE_TIERS"',
@@ -279,13 +358,16 @@ class PreflightContracts(ReusableWorkflowCase):
             step["env"]["COPILOT_GITHUB_TOKEN"], "${{ secrets.copilot_token }}"
         )
         run = flatten(step["run"])
-        self.assertIn("--config review-assets/config/bot.json", run)
+        self.assertIn('--config "review-assets/$BOT_CONFIG"', run)
+        self.assertEqual(
+            step["env"]["BOT_CONFIG"], "${{ steps.budget.outputs.bot_config }}"
+        )
         self.assertIn(
             '--workflow-sha "$JOB_WORKFLOW_SHA" --assets-sha "$ASSETS_SHA"', run
         )
 
     def test_minted_tokens_are_checked_for_identity(self) -> None:
-        """Both mints hand their app-slug to the identity check before use."""
+        """Both mints hand their app-slug to the mode's identity check before use."""
         read = self.step("select", "Pre-flight: App identity and token grants")
         self.assertEqual(
             read["env"]["MINTED_SLUG"], "${{ steps.app-token.outputs.app-slug }}"
@@ -294,6 +376,10 @@ class PreflightContracts(ReusableWorkflowCase):
             read["env"]["GH_TOKEN"], "${{ steps.app-token.outputs.token }}"
         )
         self.assertIn("preflight.py token", flatten(read["run"]))
+        self.assertEqual(
+            read["env"]["BOT_CONFIG"], "${{ steps.budget.outputs.bot_config }}"
+        )
+        self.assertIn('--config "review-assets/$BOT_CONFIG"', flatten(read["run"]))
         self.assertLess(
             self.position("select", "Pre-flight: App identity and token grants"),
             self.position("select", "Fetch prior ledger"),
@@ -302,6 +388,10 @@ class PreflightContracts(ReusableWorkflowCase):
         self.assertEqual(
             write["env"]["MINTED_SLUG"], "${{ steps.write-token.outputs.app-slug }}"
         )
+        self.assertEqual(
+            write["env"]["BOT_CONFIG"], "${{ needs.select.outputs.bot_config }}"
+        )
+        self.assertIn('--config "review-assets/$BOT_CONFIG"', flatten(write["run"]))
         self.assertLess(
             self.position("apply", "Pre-flight: write token identity"),
             self.position("apply", "Apply verdict"),
@@ -393,6 +483,18 @@ class ReviewContracts(ReusableWorkflowCase):
         packet = flatten(self.step("review", "Prepare packet and prompt")["run"])
         self.assertIn('[ "$(git -C workspace rev-parse HEAD)" = "$HEAD_SHA" ]', packet)
 
+    def test_each_mode_reads_its_own_task(self) -> None:
+        """The prompt comes from the trusted assets, chosen by the trusted mode."""
+        step = self.step("review", "Prepare packet and prompt")
+        self.assertEqual(step["env"]["MODE"], "${{ inputs.mode }}")
+        packet = flatten(step["run"])
+        self.assertIn("approve) task='review-assets/prompt/review.md'", packet)
+        self.assertIn(
+            "antagonistic) task='review-assets/prompt/antagonistic.md'", packet
+        )
+        self.assertIn("*) echo '::error::unknown mode'; exit 1 ;;", packet)
+        self.assertIn('cat "$task"', packet)
+
     def test_agent_invocation_is_confined(self) -> None:
         """Read-only tools, denied gh/git/write, redacted PAT, typed outputs."""
         run = flatten(self.step("review", "Run review agent (Copilot)")["run"])
@@ -444,6 +546,24 @@ class ApplyContracts(ReusableWorkflowCase):
         self.assertIn("needs.select.result == 'success'", condition)
         self.assertEqual(job["permissions"], {"actions": "read", "contents": "read"})
 
+    def test_live_antagonistic_writes_serialise_per_pull_request(self) -> None:
+        """Across runs, one live antagonistic applier per pull request at a
+        time, whatever its head, so the round count and the post are one
+        step; waiting jobs queue rather than evict each other, and every
+        other leg locks on a group of its own and never waits.
+        """
+        concurrency = self.jobs["apply"]["concurrency"]
+        self.assertEqual(
+            squash(str(concurrency["group"])),
+            "${{ inputs.mode == 'antagonistic' && !inputs.dry_run"
+            " && format('code-review-antagonistic-apply-{0}-{1}',"
+            " matrix.repository, matrix.number)"
+            " || format('code-review-apply-{0}-{1}-{2}',"
+            " github.run_id, github.run_attempt, matrix.key) }}",
+        )
+        self.assertIs(concurrency["cancel-in-progress"], False)
+        self.assertEqual(concurrency["queue"], "max")
+
     def test_evidence_is_verified_before_the_session_is_fetched(self) -> None:
         """Trusted evidence first; the untrusted session arrives through the bounded fetch."""
         self.assertLess(
@@ -465,12 +585,17 @@ class ApplyContracts(ReusableWorkflowCase):
         )
 
     def test_write_token_is_minted_for_one_repository_on_the_live_path(self) -> None:
-        """pull-requests: write for matrix.repo_name, only when approvable and live."""
+        """pull-requests: write for matrix.repo_name, live, and accepted by
+        the offline check of the run's own mode.
+        """
         mint = self.action("apply", APP_TOKEN)
-        condition = squash(str(mint["if"]))
-        self.assertIn("!inputs.dry_run", condition)
-        self.assertIn("steps.check.outputs.approvable == 'true'", condition)
-        self.assertIn("inputs.github_app_client_id != ''", condition)
+        self.assertEqual(
+            squash(str(mint["if"])),
+            "!inputs.dry_run && inputs.github_app_client_id != '' && ("
+            " (inputs.mode == 'approve' && steps.check.outputs.approvable == 'true') ||"
+            " (inputs.mode == 'antagonistic'"
+            " && steps.check.outputs.commentable == 'true'))",
+        )
         self.assertEqual(mint["with"]["repositories"], "${{ matrix.repo_name }}")
         self.assertEqual(mint["with"]["permission-pull-requests"], "write")
         for grant, level in mint["with"].items():
@@ -490,7 +615,28 @@ class ApplyContracts(ReusableWorkflowCase):
         )
         run = flatten(apply["run"])
         self.assertIn('if [ "$DRY_RUN" = true ]; then extra+=(--dry-run); fi', run)
-        self.assertIn("apply_review.py apply", run)
+        self.assertIn('python3 "review-assets/scripts/${command[0]}"', run)
+
+    def test_each_mode_checks_and_applies_with_its_own_script(self) -> None:
+        """approve uses apply_review; antagonistic uses comment_review, which
+        cannot approve. An unknown mode fails both steps.
+        """
+        check = self.step("apply", "Check verdict offline")
+        self.assertEqual(check["env"]["MODE"], "${{ inputs.mode }}")
+        run = flatten(check["run"])
+        self.assertIn(
+            "approve) python3 review-assets/scripts/apply_review.py check", run
+        )
+        self.assertIn(
+            "antagonistic) python3 review-assets/scripts/comment_review.py check", run
+        )
+        self.assertIn("*) echo '::error::unknown mode'; exit 1 ;;", run)
+        apply = self.step("apply", "Apply verdict")
+        self.assertEqual(apply["env"]["MODE"], "${{ inputs.mode }}")
+        run = flatten(apply["run"])
+        self.assertIn("approve) command=(apply_review.py apply) ;;", run)
+        self.assertIn("antagonistic) command=(comment_review.py comment) ;;", run)
+        self.assertIn("*) echo '::error::unknown mode'; exit 1 ;;", run)
 
     def test_every_entry_uploads_a_typed_result(self) -> None:
         """A missing result becomes a failed verdict so the report has a row."""
@@ -524,9 +670,11 @@ class ReportContracts(ReusableWorkflowCase):
         self.assertIn("--output-ledger ledger/ledger.json", run)
 
     def test_ledger_artifact_has_a_fixed_name_and_long_retention(self) -> None:
-        """The next select job finds the ledger by name across runs."""
+        """The next select job finds the mode's ledger by name across runs."""
         ledger = self.step("report", "Publish ledger")
-        self.assertEqual(ledger["with"]["name"], "code-review-ledger")
+        self.assertEqual(
+            ledger["with"]["name"], "${{ needs.select.outputs.ledger_name }}"
+        )
         self.assertEqual(ledger["with"]["retention-days"], 90)
         self.assertEqual(ledger["with"]["if-no-files-found"], "error")
         report = self.step("report", "Attach run report")
@@ -600,6 +748,7 @@ class InputContracts(ReusableWorkflowCase):
             set(call["inputs"]),
             {
                 "org",
+                "mode",
                 "dry_run",
                 "model",
                 "approve_tiers",
@@ -623,8 +772,9 @@ class InputContracts(ReusableWorkflowCase):
         )
 
     def test_input_defaults(self) -> None:
-        """Dry-run by default, both tiers approvable, block egress on trusted jobs."""
+        """Approve mode and dry-run by default, both tiers, block egress."""
         inputs = self.triggers["workflow_call"]["inputs"]
+        self.assertEqual(inputs["mode"]["default"], "approve")
         self.assertTrue(inputs["dry_run"]["default"])
         self.assertEqual(inputs["model"]["default"], "claude-opus-5.5")
         self.assertEqual(inputs["approve_tiers"]["default"], "trivial,low-risk")
@@ -648,6 +798,7 @@ class CronContracts(WorkflowCase):
         """Scheduled runs pass dry_run true; a dispatch takes the operator's choice."""
         call = self.jobs["code-review"]
         self.assertEqual(call["uses"], REUSABLE_CALL)
+        self.assertEqual(call["with"]["mode"], "approve")
         self.assertEqual(
             squash(str(call["with"]["dry_run"])),
             "${{ github.event_name != 'workflow_dispatch' || inputs.dry_run }}",
@@ -774,7 +925,12 @@ class TestingContracts(WorkflowCase):
             plumbing["with"]["assets_ref"], "${{ github.event.pull_request.head.sha }}"
         )
         self.assertEqual(
-            plumbing["strategy"]["matrix"]["invocation"], ["first", "second"]
+            plumbing["strategy"]["matrix"]["mode"], ["approve", "antagonistic"]
+        )
+        self.assertEqual(plumbing["with"]["mode"], "${{ matrix.mode }}")
+        self.assertEqual(
+            squash(str(plumbing["with"]["approve_tiers"])),
+            "${{ matrix.mode == 'antagonistic' && 'none' || 'trivial,low-risk' }}",
         )
 
     def test_manual_dry_run_holds_the_model_credential_alone(self) -> None:
@@ -800,6 +956,150 @@ class TestingContracts(WorkflowCase):
     def test_caller_steps_are_pinned(self) -> None:
         """Runner steps name commits."""
         self.assert_pinned_steps()
+
+
+class AntagonisticCallerContracts(WorkflowCase):
+    """The antagonistic caller: dispatch only, its own App, never an approval."""
+
+    WORKFLOW = ANTAGONISTIC
+
+    def test_dispatch_only_with_gpt_by_default(self) -> None:
+        """No schedule; the form defaults to a dry run on GPT-6 Astra."""
+        self.assertEqual(set(self.triggers), {"workflow_dispatch"})
+        inputs = self.triggers["workflow_dispatch"]["inputs"]
+        self.assertEqual(
+            set(inputs),
+            {
+                "dry_run",
+                "model",
+                "pull_requests",
+                "repositories",
+                "max_pull_requests",
+                "max_concurrent_agents",
+                "reassess",
+            },
+        )
+        self.assertTrue(inputs["dry_run"]["default"])
+        self.assertEqual(inputs["model"]["default"], "GPT-6 Astra")
+        self.assertNotIn("approve_tiers", inputs)
+
+    def test_model_display_names_map_to_identifiers(self) -> None:
+        """Every choice in the form has a case arm mapping it to a CLI identifier."""
+        options = self.triggers["workflow_dispatch"]["inputs"]["model"]["options"]
+        run = self.step("options", "Map display name to identifier")["run"]
+        for name in options:
+            self.assertIn(f"'{name}') id='", run)
+        self.assertIn("'GPT-6 Astra') id='gpt-6-astra' ;;", run)
+
+    def test_runs_the_antagonistic_mode_and_never_approves(self) -> None:
+        """The mode and an empty tier set are literals the dispatch cannot change."""
+        call = self.jobs["code-review"]
+        self.assertEqual(call["uses"], REUSABLE_CALL)
+        self.assertEqual(call["with"]["mode"], "antagonistic")
+        self.assertEqual(call["with"]["approve_tiers"], "none")
+        self.assertEqual(call["with"]["model"], "${{ needs.options.outputs.model }}")
+        self.assertEqual(call["with"]["dry_run"], "${{ inputs.dry_run }}")
+
+    def test_holds_the_antagonistic_app_alone(self) -> None:
+        """The approving App's names appear nowhere in this caller."""
+        call = self.jobs["code-review"]
+        self.assertEqual(
+            call["with"]["github_app_client_id"],
+            "${{ vars.ANTAGONISTIC_APP_CLIENT_ID || '' }}",
+        )
+        self.assertEqual(
+            call["secrets"],
+            {
+                "copilot_token": "${{ secrets.COPILOT_CLI_TOKEN }}",
+                "github_app_private_key": "${{ secrets.ANTAGONISTIC_APP_PRIVATE_KEY }}",
+            },
+        )
+        text = dumped(self.jobs)
+        self.assertNotIn("BOT_APP_CLIENT_ID", text)
+        self.assertNotIn("BOT_APP_PRIVATE_KEY", text)
+        self.assertEqual(call["with"]["assets_repository"], "${{ github.repository }}")
+        self.assertEqual(call["with"]["assets_ref"], "${{ github.sha }}")
+        self.assertEqual(call["with"]["egress_policy"], "block")
+        self.assertRegex(call["with"]["egress_allow_config"], ALLOW_CONFIG)
+        self.assertEqual(
+            call["permissions"],
+            {"pull-requests": "read", "contents": "read", "actions": "read"},
+        )
+
+    def test_each_dispatch_locks_within_its_own_run(self) -> None:
+        """A newer dispatch never cancels a pending batch."""
+        group = squash(str(self.workflow["concurrency"]["group"]))
+        self.assertIn("code-review-antagonistic-{0}', github.run_id", group)
+        self.assertFalse(self.workflow["concurrency"]["cancel-in-progress"])
+        self.assertEqual(self.workflow["permissions"], {})
+
+    def test_options_job_blocks_egress_with_the_allow_list(self) -> None:
+        """The options job loads the caller's allow-list, then blocks with it."""
+        self.assertEqual(self.jobs["options"]["permissions"], {})
+        loader = self.action("options", BLOCK_ACTION)
+        self.assertEqual(
+            loader["with"]["config"],
+            self.jobs["code-review"]["with"]["egress_allow_config"],
+        )
+        harden = self.action("options", HARDEN_RUNNER)
+        self.assertEqual(harden["with"]["egress-policy"], "block")
+
+    def test_caller_steps_are_pinned(self) -> None:
+        """The options job's actions name commits."""
+        self.assert_pinned_steps()
+
+
+class ApprovingCallerContracts(WorkflowCase):
+    """The approving caller never holds the antagonistic App's names."""
+
+    WORKFLOW = CRON
+
+    def test_holds_the_approving_app_alone(self) -> None:
+        """Neither of the antagonistic App's names appears in the cron caller."""
+        text = dumped(self.jobs)
+        self.assertNotIn("ANTAGONISTIC_APP", text)
+
+
+class CommentPathContracts(unittest.TestCase):
+    """A lexical tripwire over the antagonistic apply path.
+
+    It scans the string literals of the three modules the path owns for
+    the two review events it must never send, and their imports for the
+    approving applier. It catches an honest mistake, not a determined
+    one: a split or computed string passes, and the other modules the
+    applier loads are not scanned. The enforcement is behavioural: the
+    applier's ``post`` refuses any event but COMMENT at the call, and
+    ``test_comment_review`` asserts COMMENT on every write it sees.
+    """
+
+    def test_no_other_review_event_in_the_comment_path(self) -> None:
+        """Neither APPROVE nor REQUEST_CHANGES is a string in those modules."""
+        for name in COMMENT_PATH:
+            constants = string_constants(module_tree(name))
+            for event in FORBIDDEN_EVENTS:
+                with self.subTest(module=name, event=event):
+                    self.assertFalse(any(event in text for text in constants))
+
+    def test_the_comment_path_never_imports_the_approver(self) -> None:
+        """apply_review, which approves, stays out of the comment path."""
+        for name in COMMENT_PATH:
+            with self.subTest(module=name):
+                self.assertNotIn("apply_review", imported_modules(module_tree(name)))
+
+    def test_the_one_event_is_comment(self) -> None:
+        """comment_review names COMMENT as its event and posts no other."""
+        tree = module_tree("comment_review")
+        events = [
+            node.value.value
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Assign)
+            and any(
+                isinstance(target, ast.Name) and target.id == "EVENT"
+                for target in node.targets
+            )
+            and isinstance(node.value, ast.Constant)
+        ]
+        self.assertEqual(events, ["COMMENT"])
 
 
 if __name__ == "__main__":
