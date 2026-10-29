@@ -85,7 +85,6 @@ class OneLineTest(unittest.TestCase):
         """Newlines, tabs and C1 controls become single spaces."""
         self.assertEqual(report.one_line("a\nb\t\tc\x85d  e"), "a b c d e")
 
-    @unittest.expectedFailure
     def test_workflow_commands_and_mentions_escaped(self) -> None:
         """Nothing that a log or GitHub would act on survives."""
         self.assertEqual(report.one_line("::warning::x"), ": :warning: :x")
@@ -227,7 +226,6 @@ class ReportShapeTest(unittest.TestCase):
             [row["reason"] for row in built["skipped"]], ["ci_failing", "draft"]
         )
 
-    @unittest.expectedFailure
     def test_markdown_rows(self) -> None:
         """Each result row carries link, author, tier, verdict and detail."""
         results = [

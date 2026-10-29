@@ -411,7 +411,6 @@ class LoadExclusionsTest(unittest.TestCase):
 class SummaryTextTest(unittest.TestCase):
     """``summary_text`` renders public text safely on one line."""
 
-    @unittest.expectedFailure
     def test_folds_escapes_and_bounds(self) -> None:
         """Control characters fold, markers escape, mentions vanish, length is capped."""
         text = "Hi\n@alice ::set-output ##[cmd] <b>x</b> | [y]"
@@ -785,7 +784,6 @@ class OutputsTest(SelectionCase):
         self.assertIsNone(selection["bot_login"])
         self.assertEqual(selection["pull_requests"], [])
 
-    @unittest.expectedFailure
     def test_matrix_excluded_and_summary(self) -> None:
         """matrix.json, excluded-repos.txt and the summary reflect the selection."""
         self.gh.add("alpha", 1, title="Ping @alice\n## not a heading | x")

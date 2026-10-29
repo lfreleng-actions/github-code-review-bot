@@ -135,7 +135,6 @@ class CheckCommandTests(unittest.TestCase):
             *extra,
         ]
 
-    @unittest.expectedFailure
     def test_valid_verdict_is_approvable(self) -> None:
         """A corroborated trivial verdict yields approvable outputs and files."""
         (self.session / "session-summary.md").write_text(verdict_text())
@@ -288,7 +287,6 @@ class ApplyCommandTests(unittest.TestCase):
         self.assertTrue(result["dry_run"])
         self.assertIsNone(result["review_url"])
 
-    @unittest.expectedFailure
     def test_live_run_posts_one_approval(self) -> None:
         """The approval targets the checked head and carries provenance."""
         reply = {"html_url": "https://github.com/x/pull/157#pullrequestreview-1"}

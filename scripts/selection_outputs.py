@@ -9,6 +9,8 @@ import json
 from pathlib import Path
 from typing import Any, cast
 
+from review_policy import defuse
+
 MAX_SUMMARY_TITLE_CHARS = 120
 
 
@@ -16,14 +18,13 @@ def summary_text(text: object, limit: int = MAX_SUMMARY_TITLE_CHARS) -> str:
     """Render public text for one line of the step summary.
 
     Control characters are folded, workflow command markers and
-    Markdown structure are escaped, and ``@`` is encoded so a title
-    can never mention anyone.
+    Markdown structure are escaped, and mentions and references are
+    defused so a title can never mention or cross-reference anything.
     """
     folded = "".join(ch if ch.isprintable() else " " for ch in str(text))
     collapsed = " ".join(folded.split())
-    escaped = collapsed.replace("::", ": :").replace("##[", "# #[")
+    escaped = defuse(collapsed.replace("::", ": :").replace("##[", "# #["))
     for raw, safe in (
-        ("@", "&#64;"),
         ("<", "&lt;"),
         (">", "&gt;"),
         ("|", "\\|"),

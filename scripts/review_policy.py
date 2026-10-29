@@ -31,6 +31,7 @@ __all__ = [
     "Rejected",
     "check",
     "classify_trivial",
+    "defuse",
     "extract_verdict",
     "find_vetoes",
     "parse_approve_tiers",
@@ -56,25 +57,60 @@ FENCE_RE = re.compile(r"^[ \t]*(`{3,}|~{3,})([^\r\n]*)\r?$", re.MULTILINE)
 CONTROL_RE = re.compile(r"[\x00-\x1f\x7f-\x9f\u2028\u2029]")
 NO_VERDICT = "no verdict"
 HUMAN_REQUESTED = "agent judged the change needs a human review"
+# GitHub decodes character references before it links mentions and
+# references, so ``&#64;name`` still mentions and ``&#35;12`` still
+# links. A zero-width space after the trigger is what stops both; the
+# ampersand of any character reference is escaped first, so text that
+# spells one out stays literal. Markdown also drops the backslash of an
+# escaped punctuation mark before linking, so ``GH\-12`` and
+# ``issues\/12`` link like their plain forms; the patterns allow one.
+# Each pattern skips text it already defused, so a second pass changes
+# nothing.
+ZWSP = "\u200b"
+ENTITY_RE = re.compile(r"&(?!amp;)(?=#?[A-Za-z0-9]+;)")
+REFERENCE_RES = (
+    (re.compile("@(?!" + ZWSP + ")"), "@" + ZWSP),
+    (re.compile(r"#(?=[0-9])"), "#" + ZWSP),
+    (re.compile(r"\b(gh)(?=\\?-[0-9])", re.IGNORECASE), r"\1" + ZWSP),
+    (
+        re.compile(r"/(issues|pull|pulls|discussions)(\\?/)(?=[0-9])", re.IGNORECASE),
+        r"/\1\2" + ZWSP,
+    ),
+)
 
 
 class Rejected(Exception):
     """The verdict is not usable."""
 
 
+def defuse(text: str) -> str:
+    """Stop untrusted text from mentioning anyone or referencing anything.
+
+    Covers ``@`` mentions of users and teams, ``#12``, ``GH-12``,
+    ``owner/repo#12`` and GitHub issue, pull request and discussion
+    URLs, in Markdown links and autolinks too. The text still reads the
+    same; the zero-width space is invisible.
+    """
+    defused = ENTITY_RE.sub("&amp;", text)
+    for pattern, replacement in REFERENCE_RES:
+        defused = pattern.sub(replacement, defused)
+    return defused
+
+
 def sanitise(text: object, limit: int) -> str:
     """Fold untrusted text into one bounded line safe for logs and Markdown.
 
     Control characters become spaces, workflow-command markers are
-    broken, and ``@`` is encoded so the agent can never mention or
-    assign anyone through a summary.
+    broken, and mentions and references are defused so the agent can
+    never mention, assign or cross-reference anything through a
+    summary.
     """
     raw = text if isinstance(text, str) else ""
     if isinstance(text, int | float) and not isinstance(text, bool):
         raw = str(text)
     folded = CONTROL_RE.sub(" ", raw)
     escaped = folded.replace("::", ": :").replace("##[", "# #[")
-    collapsed = " ".join(escaped.replace("@", "&#64;").split())
+    collapsed = " ".join(defuse(escaped).split())
     if len(collapsed) > limit:
         return collapsed[:limit].rstrip() + "..."
     return collapsed
