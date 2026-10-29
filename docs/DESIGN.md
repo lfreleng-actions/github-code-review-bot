@@ -548,9 +548,19 @@ approvable tier, each starting "🤖 Auto-approved by agent:". The
 change; the `low-risk` line says a review of the workflow or code
 change for security and CI/CD impact found low risk. The
 sanitiser folds control characters, escapes `::` and
-`##[`, collapses whitespace, truncates to 600 characters, and turns
-every `@` into `&#64;`, so the body can never mention a user or a
-team. The reviewer name is the App login from the selection, or
+`##[`, collapses whitespace, truncates to 600 characters, and
+defuses mentions and references (`review_policy.defuse`): a
+zero-width space follows every `@`, a `#` or `GH-` before digits,
+and the `/issues/`, `/pull/`, `/pulls/` or `/discussions/` of a
+GitHub URL, and an `&amp;` replaces the ampersand of any character
+reference. GitHub decodes `&#64;` and `&commat;` before it links
+mentions, so an entity alone would still mention; the zero-width
+space is what stops it, invisibly. Markdown drops the backslash of
+an escaped `GH\-12` or `issues\/12` before GitHub links it, so the
+patterns match those spellings too. The body can never mention a
+user or a team, or cross-reference an issue or pull request. The
+same defusing applies to the run report and the selection summary.
+The reviewer name is the App login from the selection, or
 "the code review bot" in a secretless run; the model name comes
 from the selection, not from the session.
 

@@ -151,7 +151,6 @@ class TextTests(unittest.TestCase):
             with self.subTest(text=text), self.assertRaises(ValueError):
                 policy.parse_approve_tiers(text)
 
-    @unittest.expectedFailure
     def test_sanitise_neutralises_mentions_markers_and_controls(self) -> None:
         """Mentions, workflow commands and control characters are defused."""
         got = policy.sanitise("hi @octocat\x00::set\n##[cmd]  x", 100)
@@ -165,7 +164,6 @@ class TextTests(unittest.TestCase):
         self.assertEqual(policy.sanitise(42, 10), "42")
 
 
-@unittest.expectedFailure
 class DefuseTests(unittest.TestCase):
     """``defuse`` stops every form GitHub links as a mention or a reference.
 
@@ -427,7 +425,6 @@ class CheckTests(unittest.TestCase):
         bare = policy.check(entry(), verdict(tier="needs-human"), approve_tiers=ALL)
         self.assertEqual(bare["reasons"], [policy.HUMAN_REQUESTED])
 
-    @unittest.expectedFailure
     def test_copies_entry_fields_and_usage(self) -> None:
         """check.json carries the PR identity, a safe title and the spend."""
         usage = {"totalPremiumRequestCost": 1.5, "totalApiDurationMs": 42999}

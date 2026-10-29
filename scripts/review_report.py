@@ -26,6 +26,7 @@ from typing import Any, cast
 import bot_github as github
 import ledger
 from bot_evidence import MAX_EVIDENCE_BYTES, read_regular
+from review_policy import defuse
 
 SCHEMA = 1
 # The verdicts that make a head a skip next run; see ledger.record.
@@ -44,15 +45,16 @@ def one_line(text: object, limit: int = LINE_LIMIT) -> str:
     """Render untrusted text as one bounded markdown table cell.
 
     ``::`` and ``##[`` are workflow command syntax should the file ever
-    be echoed to a log; ``@`` becomes an entity so a summary can never
-    mention anyone; ``|`` would end the cell.
+    be echoed to a log; mentions and references are defused so a
+    summary can never mention or cross-reference anything; ``|`` would
+    end the cell.
     """
     folded = CONTROL_RE.sub(" ", "" if text is None else str(text))
     escaped = WHITESPACE_RE.sub(" ", folded).strip()
     # One pass leaves ":::" holding "::"; repeat until none remains.
     while "::" in escaped:
         escaped = escaped.replace("::", ": :")
-    escaped = escaped.replace("##[", "# #[").replace("@", "&#64;")
+    escaped = defuse(escaped.replace("##[", "# #["))
     escaped = escaped.replace("|", "\\|")
     if len(escaped) > limit:
         return escaped[: limit - 3].rstrip() + "..."
