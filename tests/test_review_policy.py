@@ -19,6 +19,8 @@ HEAD = "a" * 40
 SHA_NEW = "b" * 40
 REPO = "lfreleng-actions/repo"
 WORKFLOW = ".github/workflows/ci.yaml"
+# Zero-width space: what stops GitHub linking a mention or reference.
+ZWSP = "\u200b"
 
 
 def verdict(**overrides: Any) -> dict[str, Any]:
@@ -149,10 +151,11 @@ class TextTests(unittest.TestCase):
             with self.subTest(text=text), self.assertRaises(ValueError):
                 policy.parse_approve_tiers(text)
 
+    @unittest.expectedFailure
     def test_sanitise_neutralises_mentions_markers_and_controls(self) -> None:
         """Mentions, workflow commands and control characters are defused."""
         got = policy.sanitise("hi @octocat\x00::set\n##[cmd]  x", 100)
-        self.assertEqual(got, "hi &#64;octocat : :set # #[cmd] x")
+        self.assertEqual(got, f"hi @{ZWSP}octocat : :set # #[cmd] x")
 
     def test_sanitise_truncates_and_handles_non_strings(self) -> None:
         """Long text is cut with a marker; non-text becomes empty or digits."""
@@ -160,6 +163,75 @@ class TextTests(unittest.TestCase):
         self.assertEqual(policy.sanitise(None, 10), "")
         self.assertEqual(policy.sanitise({"a": 1}, 10), "")
         self.assertEqual(policy.sanitise(42, 10), "42")
+
+
+@unittest.expectedFailure
+class DefuseTests(unittest.TestCase):
+    """``defuse`` stops every form GitHub links as a mention or a reference.
+
+    Each input below was rendered through GitHub's Markdown API: the
+    raw form links, and the defused form renders as plain text.
+    GitHub decodes character references first, so ``&#64;`` and
+    ``&commat;`` mention as surely as ``@`` does.
+    """
+
+    def test_mentions_including_entity_spellings(self) -> None:
+        """A zero-width space follows every @; spelt-out entities stay literal."""
+        cases = {
+            "@octocat": f"@{ZWSP}octocat",
+            "@org/team": f"@{ZWSP}org/team",
+            "&#64;octocat": f"&amp;#{ZWSP}64;octocat",
+            "&commat;octocat": "&amp;commat;octocat",
+            "&#x40;octocat": "&amp;#x40;octocat",
+        }
+        for raw, expected in cases.items():
+            with self.subTest(raw=raw):
+                self.assertEqual(policy.defuse(raw), expected)
+
+    def test_issue_and_pull_request_references(self) -> None:
+        """Short references, GH- references and GitHub URLs all stop linking,
+        Markdown-escaped too: rendering drops the backslash before linking.
+        """
+        cases = {
+            "#12": f"#{ZWSP}12",
+            "org/repo#12": f"org/repo#{ZWSP}12",
+            "GH-12 and gh-3": f"GH{ZWSP}-12 and gh{ZWSP}-3",
+            "org/repo/pull/7": f"org/repo/pull/{ZWSP}7",
+            "https://github.com/org/repo/issues/12": (
+                f"https://github.com/org/repo/issues/{ZWSP}12"
+            ),
+            "[x](https://github.com/org/repo/pull/7/files)": (
+                f"[x](https://github.com/org/repo/pull/{ZWSP}7/files)"
+            ),
+            "<https://github.com/org/repo/discussions/3>": (
+                f"<https://github.com/org/repo/discussions/{ZWSP}3>"
+            ),
+            "https://github.com/org/repo/pulls/7": (
+                f"https://github.com/org/repo/pulls/{ZWSP}7"
+            ),
+            "GH\\-12": f"GH{ZWSP}\\-12",
+            "\\#12": f"\\#{ZWSP}12",
+            "\\@octocat": f"\\@{ZWSP}octocat",
+            "[x](https://github.com/org/repo/issues\\/12)": (
+                f"[x](https://github.com/org/repo/issues\\/{ZWSP}12)"
+            ),
+            "org/repo/pull\\/7": f"org/repo/pull\\/{ZWSP}7",
+        }
+        for raw, expected in cases.items():
+            with self.subTest(raw=raw):
+                self.assertEqual(policy.defuse(raw), expected)
+
+    def test_ordinary_text_is_untouched(self) -> None:
+        """Headings, anchors, shell operators and plain ampersands read as written."""
+        for text in ("## Heading", "see #readme", "a && b", "R&D", "&amp; kept"):
+            with self.subTest(text=text):
+                self.assertEqual(policy.defuse(text), text)
+
+    def test_defusing_twice_changes_nothing(self) -> None:
+        """Text sanitised twice on its way to GitHub reads the same as once."""
+        text = "&#64;a @b #1 GH-2 o/r/issues/3 https://github.com/o/r/pull/4"
+        once = policy.defuse(text)
+        self.assertEqual(policy.defuse(once), once)
 
 
 class ClassifyTrivialTests(unittest.TestCase):
@@ -355,12 +427,13 @@ class CheckTests(unittest.TestCase):
         bare = policy.check(entry(), verdict(tier="needs-human"), approve_tiers=ALL)
         self.assertEqual(bare["reasons"], [policy.HUMAN_REQUESTED])
 
+    @unittest.expectedFailure
     def test_copies_entry_fields_and_usage(self) -> None:
         """check.json carries the PR identity, a safe title and the spend."""
         usage = {"totalPremiumRequestCost": 1.5, "totalApiDurationMs": 42999}
         got = policy.check(entry(), verdict(), approve_tiers=ALL, usage=usage)
         self.assertEqual(got["key"], "repo-157")
-        self.assertEqual(got["title"], "Chore: Bump &#64;actions/checkout")
+        self.assertEqual(got["title"], f"Chore: Bump @{ZWSP}actions/checkout")
         self.assertEqual(got["premium_requests"], 1.5)
         self.assertEqual(got["agent_seconds"], 42)
 

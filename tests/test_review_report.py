@@ -85,12 +85,15 @@ class OneLineTest(unittest.TestCase):
         """Newlines, tabs and C1 controls become single spaces."""
         self.assertEqual(report.one_line("a\nb\t\tc\x85d  e"), "a b c d e")
 
+    @unittest.expectedFailure
     def test_workflow_commands_and_mentions_escaped(self) -> None:
         """Nothing that a log or GitHub would act on survives."""
         self.assertEqual(report.one_line("::warning::x"), ": :warning: :x")
         self.assertEqual(report.one_line(":::"), ": : :")
         self.assertEqual(report.one_line("##[group]"), "# #[group]")
-        self.assertEqual(report.one_line("hi @octocat"), "hi &#64;octocat")
+        self.assertEqual(
+            report.one_line("hi @octocat #4"), "hi @\u200boctocat #\u200b4"
+        )
         self.assertEqual(report.one_line("a|b"), "a\\|b")
 
     def test_truncation_marks_the_cut(self) -> None:
@@ -224,6 +227,7 @@ class ReportShapeTest(unittest.TestCase):
             [row["reason"] for row in built["skipped"]], ["ci_failing", "draft"]
         )
 
+    @unittest.expectedFailure
     def test_markdown_rows(self) -> None:
         """Each result row carries link, author, tier, verdict and detail."""
         results = [
@@ -248,13 +252,13 @@ class ReportShapeTest(unittest.TestCase):
         self.assertIn("Dry run: yes", rendered)
         self.assertIn("1 result file(s) unreadable: dir-x", rendered)
         self.assertIn(
-            f"| [lfreleng-actions/repo#157]({URL}) | Fix: Correct the thing | octocat"
-            f" | trivial | approved | [review]({URL}#pullrequestreview-1) |",
+            f"| [lfreleng-actions/repo#\u200b157]({URL}) | Fix: Correct the thing"
+            f" | octocat | trivial | approved | [review]({URL}#pullrequestreview-1) |",
             rendered,
         )
-        self.assertIn("| lfreleng-actions/repo#2 | ", rendered)
+        self.assertIn("| lfreleng-actions/repo#\u200b2 | ", rendered)
         self.assertIn(
-            "| ? | trivial | needs-human | not corroborated : :x &#64;bob |", rendered
+            "| ? | trivial | needs-human | not corroborated : :x @\u200bbob |", rendered
         )
         self.assertIn("| approved | S |", rendered)
         self.assertIn("| ci_failing |", rendered)
