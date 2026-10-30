@@ -23,7 +23,10 @@ organisation, in two modes:
   requests opened by coding bots (Code Monkey, the Copilot coding
   agent) as a hostile reviewer would, and posts its findings as one
   comment review with each finding on its line. It never approves:
-  a maintainer still reviews and approves every pull request.
+  a maintainer still reviews and approves every pull request. A Code
+  Monkey pull request with findings goes back to Code Monkey for a
+  revision round, for three antagonistic rounds at most; after that
+  a maintainer takes over.
 
 ## 📚 Documentation
 
@@ -67,7 +70,9 @@ In the antagonistic mode, Select keeps the listed bots' pull
 requests instead of humans', the agent emits findings anchored to
 diff lines rather than a tier, and Apply checks each anchor against
 the diff and posts one `COMMENT` review under a second App that
-never approves. See [`docs/DESIGN.md` §19](docs/DESIGN.md).
+never approves. A separate job then hands Code Monkey's reviewed pull
+requests back to it for revision, under a three-round cap. See
+[`docs/DESIGN.md` §19](docs/DESIGN.md).
 
 ## Schedule and dispatch
 

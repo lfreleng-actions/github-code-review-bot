@@ -22,12 +22,13 @@ from typing import Any, cast
 
 import bot_evidence as evidence
 import bot_github as github
+import comment_body as body
 import pull_changes
 import pull_reads
 import review_comments as comments
 import review_files as files
-import review_policy as policy
-from selection_rules import author_skip, reviewed_by
+from selection_inputs import bot_identity
+from selection_rules import MAX_ROUNDS, author_skip, reviewed_by, rounds_by
 
 SCHEMA = 1
 # The only review event this mode sends. GitHub also accepts APPROVE
@@ -35,52 +36,8 @@ SCHEMA = 1
 EVENT = "COMMENT"
 SOURCE = "comment_review"
 UNPROCESSABLE = 422
-DEFAULT_BOT = "the antagonistic review bot"
-OPENING = "🤖 Antagonistic review by agent"
-DISCLAIMER = (
-    "This is not a human review and never an approval: a maintainer must "
-    "still review and approve this pull request."
-)
-
-
-def findings_of(check: dict[str, Any], key: str) -> list[dict[str, Any]]:
-    """One of the check's finding lists: ``comments`` inline, or ``unplaced``."""
-    return cast("list[dict[str, Any]]", check.get(key) or [])
-
-
-def finding_count(check: dict[str, Any]) -> int:
-    """Every finding the review carries, inline or in its body."""
-    return len(findings_of(check, "comments")) + len(findings_of(check, "unplaced"))
-
-
-def summary_markdown(check: dict[str, Any]) -> str:
-    """A short Markdown summary of the check for the job summary.
-
-    Names every finding left out, and why, since the posted review
-    sends readers here for them.
-    """
-    dropped = cast("list[str]", check["dropped"])
-    lines = [
-        f"## Antagonistic review check: [{check['repository']}#{check['number']}]"
-        f"({check['url']})",
-        "",
-        f"- Title: {check['title']}",
-        f"- Commentable: {'yes' if check['commentable'] else 'no'}",
-        f"- Inline comments: {len(findings_of(check, 'comments'))}",
-        f"- In the body, no line to sit on: {len(findings_of(check, 'unplaced'))}",
-        f"- Malformed, left out: {len(dropped)}",
-        f"- Beyond the cap of {comments.MAX_COMMENTS}, not read: {check['capped']}",
-    ]
-    lines.extend(
-        f"  - `{policy.sanitise(c['path'], 120)}` line {c['line']}: "
-        f"{policy.sanitise(c.get('reason'), policy.MAX_REASON_CHARS)}"
-        for c in findings_of(check, "unplaced")
-    )
-    lines.extend(f"  - left out: {reason}" for reason in dropped)
-    reasons = cast("list[str]", check.get("reasons") or [])
-    if reasons:
-        lines.append(f"- Reasons: {'; '.join(reasons)}")
-    return "\n".join(lines) + "\n"
+OPENING = body.OPENING
+DISCLAIMER = body.DISCLAIMER
 
 
 def run_check(args: argparse.Namespace) -> None:
@@ -108,9 +65,9 @@ def run_check(args: argparse.Namespace) -> None:
     )
     files.write_json(args.output, check)
     args.summary.parent.mkdir(parents=True, exist_ok=True)
-    args.summary.write_text(summary_markdown(check), encoding="utf-8")
+    args.summary.write_text(body.summary_markdown(check), encoding="utf-8")
     print(f"commentable={'true' if check['commentable'] else 'false'}")
-    print(f"comments={finding_count(check)}")
+    print(f"comments={body.finding_count(check)}")
 
 
 def validated_check(path: Path) -> dict[str, Any]:
@@ -127,6 +84,8 @@ def validated_check(path: Path) -> dict[str, Any]:
     capped = check.get("capped")
     if type(capped) is not int or capped < 0:
         raise ValueError("check.json capped is not a count")
+    if not isinstance(check.get("summary_finding"), bool):
+        raise ValueError("check.json summary_finding is not a boolean")
     for key in ("comments", "unplaced"):
         raw = check.get(key)
         if not isinstance(raw, list):
@@ -148,92 +107,30 @@ def validated_check(path: Path) -> dict[str, Any]:
     return check
 
 
-def reviewer_of(selection: dict[str, Any]) -> str:
-    """The App login from the selection, or a generic name in a secretless run."""
-    bot_login = selection.get("bot_login")
-    return bot_login if isinstance(bot_login, str) and bot_login else DEFAULT_BOT
-
-
-def inline(comment: dict[str, Any], org: str) -> dict[str, Any]:
-    """One review comment as the reviews API takes it, on the new file's side.
-
-    The severity sits on a line of its own, so a body that opens with a
-    code fence still opens it at column 0, where the sanitiser assumed
-    it would be.
-    """
-    payload: dict[str, Any] = {
-        "path": comment["path"],
-        "line": comment["line"],
-        "side": "RIGHT",
-        "body": f"**{comment['severity']}**:\n\n{contained(comment['body'], org)}",
-    }
-    start = comment.get("start_line")
-    if type(start) is int:
-        payload["start_line"] = start
-        payload["start_side"] = "RIGHT"
-    return payload
-
-
-def contained(text: str, org: str) -> str:
-    """Untrusted Markdown with no live link outside the organisation, code aside."""
-    return comments.outside_code(text, lambda prose: policy.contain_links(prose, org))
-
-
-def review_body(
+def handback_due(
     check: dict[str, Any],
+    state: dict[str, Any],
     selection: dict[str, Any],
-    run_url: str,
-    folded: list[dict[str, Any]],
-) -> str:
-    """Compose the review body; the agent never writes to GitHub itself.
+    round_number: int,
+) -> bool:
+    """Whether this review should go back to its authoring bot for a round.
 
-    ``folded`` carries the findings that have no line to sit on, which
-    appear in the body under their file and line instead. A note says
-    how many proposed findings were malformed, so a short review never
-    passes for a clean one.
+    Only with something to act on, a finding on a line or a defect the
+    summary names, only to a bot that can revise (the hand-back
+    authors), and never from the last round: after it, a maintainer
+    decides what happens next.
     """
-    count = finding_count(check)
-    model = policy.sanitise(selection.get("model"), 100) or "unknown"
-    org = str(check["repository"]).partition("/")[0]
-    summary = policy.contain_links(
-        policy.sanitise(check.get("summary"), policy.MAX_SUMMARY_CHARS), org
+    actionable = body.finding_count(check) > 0 or check.get("summary_finding") is True
+    if not actionable or round_number >= MAX_ROUNDS:
+        return False
+    authors = cast("list[Any]", selection.get("handback_authors") or [])
+    author = cast("dict[str, Any]", state.get("author") or {})
+    login = author.get("login")
+    return (
+        author.get("is_bot") is True
+        and isinstance(login, str)
+        and bot_identity(login) in [str(name) for name in authors]
     )
-    # With no line-level finding the summary carries the verdict, and
-    # may name a whole-change blocker, so the opening claims nothing.
-    if count:
-        opening = f"{OPENING}: {count} finding(s) for the human reviewer."
-    elif summary:
-        opening = (
-            f"{OPENING}: no line-level findings; the summary below is the verdict."
-        )
-    else:
-        opening = f"{OPENING}: no findings on this head."
-    parts = [opening, summary]
-    if folded:
-        parts.append(
-            "\n\n".join(
-                f"- `{policy.sanitise(c['path'], 200)}` line {c['line']}, "
-                f"**{c['severity']}**:\n\n{contained(c['body'], org)}"
-                for c in folded
-            )
-        )
-    dropped = len(cast("list[Any]", check.get("dropped") or []))
-    if dropped:
-        parts.append(
-            f"_{dropped} further proposed finding(s) were malformed and are not "
-            "shown; the run's check summary names them._"
-        )
-    capped = check.get("capped")
-    if type(capped) is int and capped > 0:
-        parts.append(
-            f"_The agent proposed {capped} finding(s) beyond the cap of "
-            f"{comments.MAX_COMMENTS}; they were not read._"
-        )
-    footer = (
-        f"---\nAutomated antagonistic review by `{reviewer_of(selection)}` using "
-        f"model `{model}`; see the [run]({run_url}). {DISCLAIMER}"
-    )
-    return "\n\n".join([*(part for part in parts if part), footer])
 
 
 def gate_reasons(
@@ -271,6 +168,14 @@ def gate_reasons(
         and reviewed_by(history, bot_login, check["head_sha"])
     ):
         reasons.append("this head already carries an antagonistic review")
+    elif (
+        isinstance(bot_login, str)
+        and bot_login
+        and rounds_by(history, bot_login) >= MAX_ROUNDS
+    ):
+        reasons.append(
+            f"the round cap of {MAX_ROUNDS} is reached; a maintainer takes it from here"
+        )
     return reasons
 
 
@@ -287,7 +192,11 @@ def post(endpoint: str, payload: dict[str, Any]) -> dict[str, Any]:
 
 
 def submit(
-    check: dict[str, Any], selection: dict[str, Any], run_url: str
+    check: dict[str, Any],
+    selection: dict[str, Any],
+    run_url: str,
+    note: str = "",
+    marker: str = "",
 ) -> tuple[dict[str, Any], bool]:
     """Post the one COMMENT review; return the reply and whether it went inline.
 
@@ -297,16 +206,18 @@ def submit(
     """
     repository, number = str(check["repository"]), int(check["number"])
     endpoint = f"repos/{repository}/pulls/{number}/reviews"
-    found = findings_of(check, "comments")
-    unplaced = findings_of(check, "unplaced")
+    found = body.findings_of(check, "comments")
+    unplaced = body.findings_of(check, "unplaced")
     payload: dict[str, Any] = {
         "commit_id": check["head_sha"],
         "event": EVENT,
-        "body": review_body(check, selection, run_url, folded=unplaced),
+        "body": body.review_body(
+            check, selection, run_url, folded=unplaced, note=note, marker=marker
+        ),
     }
     if found:
         org = repository.partition("/")[0]
-        payload["comments"] = [inline(comment, org) for comment in found]
+        payload["comments"] = [body.inline(comment, org) for comment in found]
     try:
         return post(endpoint, payload), bool(found)
     except github.GitHubError as exc:
@@ -319,7 +230,14 @@ def submit(
     payload = {
         "commit_id": check["head_sha"],
         "event": EVENT,
-        "body": review_body(check, selection, run_url, folded=[*found, *unplaced]),
+        "body": body.review_body(
+            check,
+            selection,
+            run_url,
+            folded=[*found, *unplaced],
+            note=note,
+            marker=marker,
+        ),
     }
     return post(endpoint, payload), False
 
@@ -345,12 +263,14 @@ def run_comment(args: argparse.Namespace) -> None:
         "reasons": list(cast("list[str]", check.get("reasons") or [])),
         "summary": check.get("summary"),
         "findings": [],
-        "comment_count": finding_count(check),
+        "comment_count": body.finding_count(check),
         "dropped_count": len(cast("list[Any]", check.get("dropped") or [])),
         "capped_count": check["capped"],
         "inline": None,
         "injection_attempts": check.get("injection_attempts") or [],
         "review_url": None,
+        "round": None,
+        "handback": False,
         "dry_run": bool(args.dry_run),
         "run_attempt": args.run_attempt,
         "premium_requests": check.get("premium_requests"),
@@ -361,16 +281,35 @@ def run_comment(args: argparse.Namespace) -> None:
         state = pull_reads.pull_state(repository, number)
         history = pull_changes.pull_reviews(repository, number)
         reasons.extend(gate_reasons(check, state, history, selection))
+        bot_login = selection.get("bot_login")
+        round_number = 1 + (
+            rounds_by(history, bot_login)
+            if isinstance(bot_login, str) and bot_login
+            else 0
+        )
+        handing_back = bool(args.handback) and handback_due(
+            check, state, selection, round_number
+        )
+        result["round"] = round_number
         if reasons:
             result["verdict"] = "refused"
         elif args.dry_run:
             result["verdict"] = "would-comment"
         else:
-            reply, placed = submit(check, selection, args.run_url)
+            reply, placed = submit(
+                check,
+                selection,
+                args.run_url,
+                body.round_note(round_number, handing_back),
+                body.handback_marker(round_number, check["head_sha"], args.run_id)
+                if handing_back
+                else "",
+            )
             url = reply.get("html_url")
             result["review_url"] = url if isinstance(url, str) else None
             result["inline"] = placed
             result["verdict"] = "commented"
+            result["handback"] = handing_back
     elif not reasons:
         reasons.append("check found no usable verdict")
     files.write_json(args.output, result)
@@ -397,8 +336,10 @@ def build_parser() -> argparse.ArgumentParser:
     comment.add_argument("--selection", type=Path, required=True)
     comment.add_argument("--output", type=Path, required=True)
     comment.add_argument("--run-url", required=True)
+    comment.add_argument("--run-id", type=int, required=True)
     comment.add_argument("--run-attempt", type=int, required=True)
     comment.add_argument("--dry-run", action="store_true")
+    comment.add_argument("--handback", action="store_true")
     comment.set_defaults(handler=run_comment)
     return parser
 
@@ -407,6 +348,8 @@ def main(argv: list[str] | None = None) -> None:
     """Dispatch a command, keeping operational failures on the error path."""
     parser = build_parser()
     args = parser.parse_args(argv)
+    if args.command == "comment" and args.run_id <= 0:
+        parser.error("--run-id must be a positive integer")
     handler = cast("Callable[[argparse.Namespace], None]", args.handler)
     try:
         handler(args)

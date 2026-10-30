@@ -100,6 +100,13 @@ on:
         description: 'GitHub App client id; empty limits runs to dry-run'
         type: string
         default: ''
+      handback_repository:
+        description: >-
+          owner/repo whose code-monkey-cron.yaml an antagonistic run
+          dispatches to revise the bot pull requests it reviewed;
+          empty hands nothing back
+        type: string
+        default: ''
       assets_repository:
         description: 'Trusted repository providing the prompt and scripts'
         type: string
@@ -118,6 +125,11 @@ on:
         required: false
       github_app_private_key:
         description: 'GitHub App private key, used in trusted jobs alone'
+        required: false
+      handback_token:
+        description: >-
+          Token with Actions write on handback_repository alone; the
+          hand-back job holds it and nothing else does
         required: false
 
 permissions: {}
@@ -435,6 +447,7 @@ jobs:
             --exclude-file review-assets/config/excluded-repos.txt \
             --exclude-repos "$EXCLUDE_REPOS" \
             --bot-authors-file review-assets/config/antagonistic-authors.txt \
+            --handback-authors-file review-assets/config/handback-authors.txt \
             --max-pull-requests "$MAX_PRS" \
             --bot-slug "$BOT_SLUG" "${extra[@]}"
           cat artefacts/selection-summary.md >> "$GITHUB_STEP_SUMMARY"
@@ -712,9 +725,9 @@ jobs:
     # Live antagonistic runs each lock within their own run (see the
     # workflow group), so two dispatches naming one pull request could
     # both read it before either posts. This lock spans runs, one per
-    # pull request whatever the head, so the live re-read and the post
-    # are one step: the next applier's re-read sees the review, and
-    # refuses the head it covers.
+    # pull request whatever the head, so the live re-read, the round
+    # count and the post are one step: the next applier's re-read sees
+    # the review and refuses the head, or counts it toward the cap.
     # queue: max keeps every waiting job, so a late job for an older
     # head waits its turn rather than evicting the current head's.
     # Every other path keeps a group of its own per leg: the approve
@@ -896,6 +909,8 @@ jobs:
           GH_TOKEN: "${{ steps.write-token.outputs.token || github.token }}"
           MODE: "${{ inputs.mode }}"
           DRY_RUN: "${{ inputs.dry_run }}"
+          HANDBACK: "${{ inputs.handback_repository != '' }}"
+          RUN_ID: "${{ github.run_id }}"
           RUN_ATTEMPT: "${{ github.run_attempt }}"
           # yamllint disable-line rule:line-length
           RUN_URL: "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
@@ -904,7 +919,10 @@ jobs:
           if [ "$DRY_RUN" = true ]; then extra+=(--dry-run); fi
           case "$MODE" in
             approve) command=(apply_review.py apply) ;;
-            antagonistic) command=(comment_review.py comment) ;;
+            antagonistic)
+              command=(comment_review.py comment)
+              extra+=(--run-id "$RUN_ID")
+              if [ "$HANDBACK" = true ]; then extra+=(--handback); fi ;;
             *) echo '::error::unknown mode'; exit 1 ;;
           esac
           python3 "review-assets/scripts/${command[0]}" "${command[1]}" \
@@ -979,6 +997,9 @@ jobs:
     permissions:
       actions: read  # Gather per-pull-request result artifacts
       contents: read  # Checkout the report script
+    outputs:
+      handback_pulls: "${{ steps.handback.outputs.pulls }}"
+      handback_count: "${{ steps.handback.outputs.count }}"
     steps:
       - name: 'Load egress allow-list'
         if: inputs.egress_policy == 'block'
@@ -1058,6 +1079,23 @@ jobs:
           printf '\nReview job: %s; apply job: %s\n' \
             "$REVIEW_RESULT" "$APPLY_RESULT" >> "$GITHUB_STEP_SUMMARY"
 
+      # The pull requests whose posted antagonistic review chose a
+      # hand-back, each confirmed against the verified selection and
+      # this App's own review on GitHub, whose marker must name this
+      # run (scripts/handback.py), as one owner/repo#N list. Public
+      # reads; the native token suffices.
+      - name: 'List hand-backs'
+        id: handback
+        env:
+          GH_TOKEN: "${{ github.token }}"
+          ORG: "${{ inputs.org }}"
+          RUN_ID: "${{ github.run_id }}"
+        run: |
+          python3 review-assets/scripts/handback.py list \
+            --report artefacts/report.json \
+            --selection evidence/selection.json \
+            --org "$ORG" --run-id "$RUN_ID" >> "$GITHUB_OUTPUT"
+
       - name: 'Attach run report'
         # yamllint disable-line rule:line-length
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
@@ -1079,3 +1117,71 @@ jobs:
           path: 'ledger/'
           retention-days: 90
           if-no-files-found: 'error'
+
+  # Hands the reviewed bot pull requests back to their bot for a
+  # revision round (docs/DESIGN.md section 19.9): one dispatch of the
+  # hand-back repository's code-monkey-cron.yaml naming them all. The
+  # only job that holds handback_token, which can dispatch that one
+  # workflow and nothing else; it reads no artifact and runs no script.
+  # The applier already capped the rounds, so this job never needs to.
+  handback:
+    name: 'Hand back for revision'
+    needs: [select, report]
+    if: >-
+      !cancelled() && needs.report.result == 'success' &&
+      !inputs.dry_run && inputs.mode == 'antagonistic' &&
+      inputs.handback_repository != '' &&
+      needs.report.outputs.handback_count != '0' &&
+      needs.report.outputs.handback_count != ''
+    runs-on: 'ubuntu-latest'
+    timeout-minutes: 5
+    permissions: {}
+    steps:
+      - name: 'Load egress allow-list'
+        if: inputs.egress_policy == 'block'
+        # yamllint disable-line rule:line-length
+        uses: lfreleng-actions/harden-runner-block-action@e5e8179f45aa893b23cc8b5d2e25466355d9c4f8 # v0.14.0
+        with:
+          config: "${{ inputs.egress_allow_config }}"
+          allow_list_summary: 'false'
+
+      - name: 'Harden runner'
+        # yamllint disable-line rule:line-length
+        uses: step-security/harden-runner@dc2769abcc0fcfbadfc1df54081c1608579ef6b2 # v2.22.2
+        with:
+          egress-policy: "${{ inputs.egress_policy }}"
+          allowed-endpoints: "${{ env.CONNECTION_ALLOW_LIST }}"
+
+      - name: 'Dispatch the revision round'
+        env:
+          GH_TOKEN: "${{ secrets.handback_token }}"
+          REPOSITORY: "${{ inputs.handback_repository }}"
+          PULLS: "${{ needs.report.outputs.handback_pulls }}"
+        run: |
+          repo_re='^[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9._-]+$'
+          ref='[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9._-]+#[1-9][0-9]*'
+          [[ "$REPOSITORY" =~ $repo_re ]] || {
+            echo '::error::handback_repository must be owner/repo'; exit 1; }
+          [[ "$PULLS" =~ ^$ref(\ $ref)*$ ]] || {
+            echo '::error::the hand-back list is malformed'; exit 1; }
+          if [ -z "$GH_TOKEN" ]; then
+            echo '::error::handback_repository is set; handback_token is empty'
+            exit 1
+          fi
+          # Code Monkey caps a run at max_pull_requests, named ones
+          # included, so each dispatch lifts the cap (0) and names at most
+          # fifty: every confirmed hand-back is dispatched, none dropped.
+          read -r -a all <<< "$PULLS"
+          for ((start = 0; start < ${#all[@]}; start += 50)); do
+            chunk="${all[*]:start:50}"
+            gh workflow run code-monkey-cron.yaml --repo "$REPOSITORY" \
+              -f dry_run=false -f mode=pull-requests -f max_pull_requests=0 \
+              -f pull_requests="$chunk"
+          done
+          {
+            echo '## Handed back for revision'
+            echo
+            echo "Dispatched \`code-monkey-cron.yaml\` in \`$REPOSITORY\` for:"
+            echo
+            for pull in $PULLS; do echo "- \`$pull\`"; done
+          } >> "$GITHUB_STEP_SUMMARY"

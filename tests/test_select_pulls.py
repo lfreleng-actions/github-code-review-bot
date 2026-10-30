@@ -1097,6 +1097,43 @@ class AntagonisticSelectionTest(SelectionCase):
         self.run_main()
         self.assertFalse(any("/reviews?" in " ".join(c) for c in self.gh.calls))
 
+    def test_three_rounds_cap_a_pull_request(self) -> None:
+        """Three reviews from this App, on any heads, hand it to a maintainer;
+        two leave room for a third round on a new head.
+        """
+
+        def own(commit: str) -> dict[str, Any]:
+            return {
+                "user": {
+                    "login": "lf-releng-antagonistic-review-bot[bot]",
+                    "type": "Bot",
+                },
+                "state": "COMMENTED",
+                "commit_id": commit,
+            }
+
+        copilot = {
+            "user": {"login": "copilot-pull-request-reviewer[bot]", "type": "Bot"},
+            "state": "COMMENTED",
+            "commit_id": HEAD,
+        }
+        self.add_bot("alpha", 1)
+        self.add_bot("beta", 2)
+        self.gh.reviews[("org/alpha", 1)] = [copilot, *(own(c * 40) for c in "bcd")]
+        self.gh.reviews[("org/beta", 2)] = [copilot, own(BASE), own(OTHER)]
+        selection = self.run_antagonistic(
+            "--bot-slug", "lf-releng-antagonistic-review-bot"
+        )
+        self.assertEqual([e["key"] for e in selection["pull_requests"]], ["beta-2"])
+        self.assertEqual(selection["skip_counts"]["round_cap"], 1)
+
+    def test_the_selection_records_who_can_take_a_hand_back(self) -> None:
+        """The hand-back list travels in selection.json for the applier."""
+        authors = self.authors.parent / "handback.txt"
+        authors.write_text("lf-releng-code-monkey-bot[bot]\n", encoding="utf-8")
+        selection = self.run_antagonistic("--handback-authors-file", str(authors))
+        self.assertEqual(selection["handback_authors"], ["lf-releng-code-monkey-bot"])
+
     def test_a_pull_request_skipped_early_costs_no_history_read(self) -> None:
         """Closed or draft, a named bot pull request never walks its reviews."""
         self.add_bot("alpha", 1, state="CLOSED")

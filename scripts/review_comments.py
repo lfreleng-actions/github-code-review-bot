@@ -15,48 +15,19 @@ from __future__ import annotations
 
 import json
 import re
-from collections.abc import Callable
 from typing import Any, cast
 
 import review_policy as policy
+from comment_markdown import comment_text
 from review_policy import Rejected
 
 SCHEMA = 1
 MODE = "antagonistic"
 SEVERITIES = ("blocker", "major", "minor", "nit")
 MAX_COMMENTS = 25
-MAX_COMMENT_CHARS = 2000
 MAX_PATH_CHARS = 400
 MAX_DROPPED = 50
 HUNK_RE = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@")
-# A fence GitHub renders as a one-click suggested commit. A human must
-# write such a change, so the fence becomes a plain code block. Matched
-# on a line that can open a fence: one whose run of fence characters
-# follows nothing but a container's markers, as in a blockquote or a
-# list item, where a fence still renders. Inside a fenced block the
-# same text is code, and stays as written. Anchored, and the run is
-# taken whole, so a long run is read once.
-SUGGESTION_RE = re.compile(
-    r"^([ \t>*+\-0-9.)]*+)(`{3,}+|~{3,}+)[ \t]*+suggestion\b", re.IGNORECASE
-)
-# Every control character except tab and newline.
-BODY_CONTROL_RE = re.compile(r"[\x00-\x08\x0b-\x1f\x7f-\x9f\u2028\u2029]")
-# An opening fence GitHub is sure to render as one, wherever the comment
-# lands: at column 0, so at the top level whatever precedes it, since a
-# fence never continues a list item, a blockquote or a paragraph
-# lazily. A backtick fence's info string holds no backtick.
-TOP_FENCE_RE = re.compile(r"^(`{3,}|~{3,})(.*)$")
-# A line GitHub reads as a closing fence for an opener of its character
-# and at most its length: indented at most three spaces, with nothing
-# after the run.
-CLOSER_RE = re.compile(r"^ {0,3}(`+|~+)[ \t]*$")
-# A line GitHub might read as a fence that the scanner does not pair:
-# indented, inside a blockquote or list item, or never closed. Left
-# live, it could pair differently from the scanner and turn what the
-# scanner left as code into prose GitHub renders, or the reverse; a
-# zero-width space before its run means the only fences GitHub sees
-# are the ones the scanner found.
-FENCE_LIKE_RE = re.compile(r"^([ \t>*+\-0-9.)]*)(?=`{3,}|~{3,})", re.MULTILINE)
 PATH_CONTROL_RE = re.compile(r"[\x00-\x1f\x7f-\x9f\u2028\u2029]")
 
 __all__ = [
@@ -66,136 +37,7 @@ __all__ = [
     "anchor",
     "check",
     "extract_verdict",
-    "outside_code",
 ]
-
-
-def fences(lines: list[str]) -> tuple[set[int], str | None]:
-    """The lines of closed top-level fences, fence lines included, and any open one."""
-    spans, dangling = fence_spans(lines)
-    return {line for start, end in spans for line in range(start, end + 1)}, dangling
-
-
-def fence_spans(lines: list[str]) -> tuple[list[tuple[int, int]], str | None]:
-    """The first and last line of each closed top-level fence, and any open one.
-
-    A closing fence repeats the opening character at least as many
-    times, indented at most three spaces, with nothing after it, as
-    GitHub reads it. An opening fence with no closer is not code here:
-    the prose pass disarms it into text, so GitHub renders it as text
-    too; its marker comes back so a body cut mid-block can close it.
-
-    Linear in the lines: the longest closer still ahead tells at once
-    whether an opener has one, and the search for an opener's closer
-    covers lines the scan then skips past.
-    """
-    closers: list[tuple[str, int] | None] = []
-    for line in lines:
-        found = CLOSER_RE.match(line)
-        closers.append(None if found is None else (found[1][0], len(found[1])))
-    ahead = {"`": [0] * (len(lines) + 1), "~": [0] * (len(lines) + 1)}
-    for index in range(len(lines) - 1, -1, -1):
-        for longest in ahead.values():
-            longest[index] = longest[index + 1]
-        closer = closers[index]
-        if closer is not None:
-            ahead[closer[0]][index] = max(ahead[closer[0]][index], closer[1])
-    spans: list[tuple[int, int]] = []
-    dangling: str | None = None
-    index = 0
-    while index < len(lines):
-        found = TOP_FENCE_RE.match(lines[index])
-        if found is None or (found.group(1)[0] == "`" and "`" in found.group(2)):
-            index += 1
-            continue
-        marker = found.group(1)
-        if ahead[marker[0]][index + 1] < len(marker):
-            dangling = dangling or marker
-            index += 1
-            continue
-        end = index + 1
-        while not closes(closers[end], marker):
-            end += 1
-        spans.append((index, end))
-        index = end + 1
-    return spans, dangling
-
-
-def closes(closer: tuple[str, int] | None, marker: str) -> bool:
-    """Whether a closing-fence line closes a block its marker opened."""
-    return closer is not None and closer[0] == marker[0] and closer[1] >= len(marker)
-
-
-def outside_code(text: str, transform: Callable[[str], str]) -> str:
-    """Apply ``transform`` to the text outside fenced code, leaving code as written.
-
-    GitHub links no mention, reference or URL inside a fenced block,
-    so code needs no defusing, and code left alone pastes cleanly. Code
-    spans are not skipped: telling one apart from stray backticks needs
-    paragraph structure, and guessing wrong would leave a mention live.
-    """
-    lines = text.split("\n")
-    code, _ = fences(lines)
-    out: list[str] = []
-    prose: list[str] = []
-    for index, line in enumerate(lines):
-        if index not in code:
-            prose.append(line)
-            continue
-        if prose:
-            out.append(transform("\n".join(prose)))
-            prose = []
-        out.append(line)
-    if prose:
-        out.append(transform("\n".join(prose)))
-    return "\n".join(out)
-
-
-def disarm_prose(text: str) -> str:
-    """Disarm stray fences, mentions and references, and raw HTML, in prose."""
-    unfenced = FENCE_LIKE_RE.sub(r"\1" + policy.ZWSP, text)
-    return policy.disarm_html(policy.defuse(unfenced))
-
-
-def plain_fences(text: str) -> str:
-    """Turn each suggestion fence into a plain one, leaving fenced code as written.
-
-    A fenced block's opening line is rewritten like any line in prose;
-    the lines within it are code, so a suggestion fence quoted there
-    stays as written. The rewrite keeps the fence run, so the fences
-    pair as they did before it.
-    """
-    lines = text.split("\n")
-    spans, _ = fence_spans(lines)
-    within = {line for start, end in spans for line in range(start + 1, end + 1)}
-    return "\n".join(
-        line if index in within else SUGGESTION_RE.sub(r"\1\2text", line)
-        for index, line in enumerate(lines)
-    )
-
-
-def comment_text(text: str, limit: int = MAX_COMMENT_CHARS) -> str:
-    """Make untrusted Markdown safe to post as a review comment, keeping its lines.
-
-    Outside fenced code, mentions and references are defused and raw
-    HTML stays text, so a comment can never mention anyone, leave a
-    cross-reference or load anything; inside, code stays as written.
-    Suggestion fences become plain code blocks. A fence the body leaves
-    open, as written or once cut to the limit, is closed, so it never
-    swallows the rest of the review.
-    """
-    folded = BODY_CONTROL_RE.sub(" ", text.replace("\r\n", "\n"))
-    plain = plain_fences(folded)
-    escaped = outside_code(plain, disarm_prose).strip()
-    if len(escaped) > limit:
-        escaped = escaped[:limit].rstrip() + "..."
-    return close_fence(escaped)
-
-
-def close_fence(text: str) -> str:
-    """Close a top-level code fence the text leaves open, with its own marker."""
-    _, dangling = fences(text.split("\n"))
-    return text if dangling is None else f"{text}\n{dangling}"
 
 
 def right_lines(patch: str) -> dict[int, int]:
@@ -281,6 +123,20 @@ def comments_of(value: object) -> tuple[list[dict[str, Any]], list[str], int]:
     return comments, dropped, max(len(items) - MAX_COMMENTS, 0)
 
 
+def summary_finding(value: object) -> bool:
+    """Whether the summary itself names a defect to fix; absent means no.
+
+    A defect in removed lines, or in the change as a whole, has no line
+    to anchor on and lives in the summary; this flag carries it to the
+    hand-back, which a clean summary must not trigger.
+    """
+    if value is None:
+        return False
+    if not isinstance(value, bool):
+        raise Rejected("verdict 'summary_finding' must be true or false")
+    return value
+
+
 def extract_verdict(text: str) -> dict[str, Any]:
     """Pull the antagonistic verdict out of the agent's final message, validated.
 
@@ -315,6 +171,7 @@ def extract_verdict(text: str) -> dict[str, Any]:
         "comments": comments,
         "dropped": dropped,
         "capped": capped,
+        "summary_finding": summary_finding(data.get("summary_finding")),
         "injection_attempts": policy.injections_of(data.get("injection_attempts")),
     }
 
@@ -381,9 +238,11 @@ def check(
 ) -> dict[str, Any]:
     """Produce the antagonistic check.json for one pull request.
 
-    A verdict with nothing to post, every finding it read malformed, is
-    not commentable: posting it would read as a clean review, and the
-    review would stop the next run looking at the head again.
+    A verdict with nothing to post, every finding it read malformed and
+    no defect flagged in its summary, is not commentable: posting it
+    would read as a clean review, and the review would stop the next run
+    looking at the head again. A flagged summary is a finding in its
+    own right, so it posts and can go back for revision.
     """
     inline: list[dict[str, Any]] = []
     unplaced: list[dict[str, Any]] = []
@@ -401,7 +260,9 @@ def check(
         inline, unplaced = anchor(entry, verdict["comments"])
         dropped = list(verdict["dropped"])
         capped = int(verdict["capped"])
-        commentable = bool(inline or unplaced or not (dropped or capped))
+        commentable = bool(
+            inline or unplaced or verdict["summary_finding"] or not (dropped or capped)
+        )
         if not commentable:
             reasons = ["every proposed finding read was malformed; nothing to post"]
     premium_requests, agent_seconds = policy.usage_numbers(usage)
@@ -417,6 +278,7 @@ def check(
         "commentable": commentable,
         "reasons": reasons,
         "summary": "" if verdict is None else verdict["summary"],
+        "summary_finding": verdict is not None and verdict["summary_finding"] is True,
         "comments": inline,
         "unplaced": unplaced,
         "dropped": [

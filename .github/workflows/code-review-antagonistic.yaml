@@ -64,6 +64,12 @@ on:
           reviewed on GitHub stays skipped until a new push
         type: boolean
         default: false
+      handback:
+        description: >-
+          Hand reviewed Code Monkey pull requests back for a revision
+          round (three antagonistic rounds per pull request at most)
+        type: boolean
+        default: true
 
 permissions: {}
 
@@ -143,8 +149,17 @@ jobs:
       # key never reaches this caller. No client id permits dry-run
       # alone; a live dispatch without one fails before any session.
       github_app_client_id: "${{ vars.ANTAGONISTIC_APP_CLIENT_ID || '' }}"
+      # Code Monkey's revision rounds, in this owner. The applier caps
+      # the rounds, so the review and the revision cannot feed each
+      # other past three.
+      handback_repository: >-
+        ${{ inputs.handback
+        && format('{0}/github-code-monkey-bot', github.repository_owner)
+        || '' }}
       assets_repository: "${{ github.repository }}"
       assets_ref: "${{ github.sha }}"
     secrets:
       copilot_token: "${{ secrets.COPILOT_CLI_TOKEN }}"
       github_app_private_key: "${{ secrets.ANTAGONISTIC_APP_PRIVATE_KEY }}"
+      # Fine-grained, Actions write on the Code Monkey repository alone.
+      handback_token: "${{ secrets.CODE_MONKEY_DISPATCH_TOKEN }}"

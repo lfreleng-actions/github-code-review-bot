@@ -48,13 +48,19 @@ SPLITTER = "lfreleng-actions/list-splitter-action"
 DOWNLOAD = "actions/download-artifact"
 UPLOAD = "actions/upload-artifact"
 REUSABLE_CALL = "$/.github/workflows/code-review.yaml"
-TRUSTED_JOBS = ("select", "apply", "report")
+TRUSTED_JOBS = ("select", "apply", "report", "handback")
 # Review events GitHub accepts besides COMMENT; the antagonistic path
 # must never be able to send either.
 FORBIDDEN_EVENTS = frozenset({"APPROVE", "REQUEST_CHANGES"})
 # The modules the antagonistic apply path loads; apply_review, which
 # approves, must not be among them.
-COMMENT_PATH = ("comment_review", "review_comments", "review_files")
+COMMENT_PATH = (
+    "comment_review",
+    "comment_body",
+    "comment_markdown",
+    "review_comments",
+    "review_files",
+)
 
 COMMIT_PIN = re.compile(r"^[^@\s]+@[0-9a-f]{40}$")
 SECRET_REFERENCE = re.compile(r"secrets\.[A-Za-z0-9_]+")
@@ -635,7 +641,16 @@ class ApplyContracts(ReusableWorkflowCase):
         self.assertEqual(apply["env"]["MODE"], "${{ inputs.mode }}")
         run = flatten(apply["run"])
         self.assertIn("approve) command=(apply_review.py apply) ;;", run)
-        self.assertIn("antagonistic) command=(comment_review.py comment) ;;", run)
+        self.assertIn(
+            "antagonistic) command=(comment_review.py comment)"
+            ' extra+=(--run-id "$RUN_ID")'
+            ' if [ "$HANDBACK" = true ]; then extra+=(--handback); fi ;;',
+            run,
+        )
+        self.assertEqual(
+            apply["env"]["HANDBACK"], "${{ inputs.handback_repository != '' }}"
+        )
+        self.assertEqual(apply["env"]["RUN_ID"], "${{ github.run_id }}")
         self.assertIn("*) echo '::error::unknown mode'; exit 1 ;;", run)
 
     def test_every_entry_uploads_a_typed_result(self) -> None:
@@ -763,12 +778,14 @@ class InputContracts(ReusableWorkflowCase):
                 "egress_policy",
                 "egress_allow_config",
                 "github_app_client_id",
+                "handback_repository",
                 "assets_repository",
                 "assets_ref",
             },
         )
         self.assertEqual(
-            set(call["secrets"]), {"copilot_token", "github_app_private_key"}
+            set(call["secrets"]),
+            {"copilot_token", "github_app_private_key", "handback_token"},
         )
 
     def test_input_defaults(self) -> None:
@@ -964,7 +981,7 @@ class AntagonisticCallerContracts(WorkflowCase):
     WORKFLOW = ANTAGONISTIC
 
     def test_dispatch_only_with_gpt_by_default(self) -> None:
-        """No schedule; the form defaults to a dry run on GPT-6 Astra."""
+        """No schedule; the form defaults to a dry run on GPT-6 Astra, hand-back on."""
         self.assertEqual(set(self.triggers), {"workflow_dispatch"})
         inputs = self.triggers["workflow_dispatch"]["inputs"]
         self.assertEqual(
@@ -977,9 +994,11 @@ class AntagonisticCallerContracts(WorkflowCase):
                 "max_pull_requests",
                 "max_concurrent_agents",
                 "reassess",
+                "handback",
             },
         )
         self.assertTrue(inputs["dry_run"]["default"])
+        self.assertIs(inputs["handback"]["default"], True)
         self.assertEqual(inputs["model"]["default"], "GPT-6 Astra")
         self.assertNotIn("approve_tiers", inputs)
 
@@ -1012,7 +1031,14 @@ class AntagonisticCallerContracts(WorkflowCase):
             {
                 "copilot_token": "${{ secrets.COPILOT_CLI_TOKEN }}",
                 "github_app_private_key": "${{ secrets.ANTAGONISTIC_APP_PRIVATE_KEY }}",
+                "handback_token": "${{ secrets.CODE_MONKEY_DISPATCH_TOKEN }}",
             },
+        )
+        self.assertEqual(
+            squash(str(call["with"]["handback_repository"])),
+            "${{ inputs.handback"
+            " && format('{0}/github-code-monkey-bot', github.repository_owner)"
+            " || '' }}",
         )
         text = dumped(self.jobs)
         self.assertNotIn("BOT_APP_CLIENT_ID", text)
@@ -1060,11 +1086,96 @@ class ApprovingCallerContracts(WorkflowCase):
         self.assertNotIn("ANTAGONISTIC_APP", text)
 
 
+class HandbackContracts(ReusableWorkflowCase):
+    """The hand-back: one job, one credential, one fixed dispatch target."""
+
+    def test_report_lists_the_hand_backs_from_its_own_report(self) -> None:
+        """The trusted report job derives the list, from markers naming this
+        run alone; the hand-back job reads none.
+        """
+        step = self.step("report", "List hand-backs")
+        self.assertIn(
+            "handback.py list --report artefacts/report.json"
+            " --selection evidence/selection.json"
+            ' --org "$ORG" --run-id "$RUN_ID" >> "$GITHUB_OUTPUT"',
+            flatten(step["run"]),
+        )
+        self.assertEqual(step["env"]["GH_TOKEN"], "${{ github.token }}")
+        self.assertEqual(step["env"]["RUN_ID"], "${{ github.run_id }}")
+        self.assertLess(
+            self.position("report", "Build report and ledger"),
+            self.position("report", "List hand-backs"),
+        )
+        outputs = self.jobs["report"]["outputs"]
+        self.assertEqual(
+            outputs["handback_pulls"], "${{ steps.handback.outputs.pulls }}"
+        )
+        self.assertEqual(
+            outputs["handback_count"], "${{ steps.handback.outputs.count }}"
+        )
+
+    def test_hand_back_runs_live_antagonistic_runs_with_work_alone(self) -> None:
+        """Never in a dry run, never in the approve mode, never without a target."""
+        job = self.jobs["handback"]
+        self.assertEqual(job["needs"], ["select", "report"])
+        self.assertEqual(
+            squash(str(job["if"])),
+            "!cancelled() && needs.report.result == 'success' &&"
+            " !inputs.dry_run && inputs.mode == 'antagonistic' &&"
+            " inputs.handback_repository != '' &&"
+            " needs.report.outputs.handback_count != '0' &&"
+            " needs.report.outputs.handback_count != ''",
+        )
+        self.assertEqual(job["permissions"], {})
+        self.assertEqual(self.actions("handback", CHECKOUT), [])
+        self.assertEqual(self.actions("handback", DOWNLOAD), [])
+
+    def test_the_token_reaches_the_dispatch_step_alone(self) -> None:
+        """handback_token appears in one step of one job, and nowhere else."""
+        for job, body in self.jobs.items():
+            refs = SECRET_REFERENCE.findall(dumped(body))
+            with self.subTest(job=job):
+                if job == "handback":
+                    self.assertEqual(refs, ["secrets.handback_token"])
+                else:
+                    self.assertNotIn("secrets.handback_token", refs)
+        step = self.step("handback", "Dispatch the revision round")
+        self.assertEqual(step["env"]["GH_TOKEN"], "${{ secrets.handback_token }}")
+
+    def test_dispatch_target_and_list_are_fixed_and_checked(self) -> None:
+        """One workflow file, live, revision mode, no count cap, and a validated
+        list dispatched whole in chunks of fifty.
+        """
+        step = self.step("handback", "Dispatch the revision round")
+        run = flatten(step["run"])
+        self.assertIn(
+            'gh workflow run code-monkey-cron.yaml --repo "$REPOSITORY"'
+            " -f dry_run=false -f mode=pull-requests -f max_pull_requests=0"
+            ' -f pull_requests="$chunk"',
+            run,
+        )
+        self.assertIn("for ((start = 0; start < ${#all[@]}; start += 50)); do", run)
+        self.assertIn('chunk="${all[*]:start:50}"', run)
+        self.assertIn('[[ "$REPOSITORY" =~ $repo_re ]]', run)
+        self.assertIn('[[ "$PULLS" =~ ^$ref(\\ $ref)*$ ]]', run)
+        self.assertEqual(
+            step["env"]["PULLS"], "${{ needs.report.outputs.handback_pulls }}"
+        )
+
+    def test_the_approve_callers_hand_nothing_back(self) -> None:
+        """Neither the schedule nor the testing workflow names a target or token."""
+        for path in (CRON, TESTING):
+            loaded = cast(dict[str | bool, Any], yaml.safe_load(path.read_text()))
+            text = dumped(loaded["jobs"])
+            with self.subTest(workflow=path.name):
+                self.assertNotIn("handback", text)
+
+
 class CommentPathContracts(unittest.TestCase):
     """A lexical tripwire over the antagonistic apply path.
 
-    It scans the string literals of the three modules the path owns for
-    the two review events it must never send, and their imports for the
+    It scans the string literals of the modules the path owns for the
+    two review events it must never send, and their imports for the
     approving applier. It catches an honest mistake, not a determined
     one: a split or computed string passes, and the other modules the
     applier loads are not scanned. The enforcement is behavioural: the
