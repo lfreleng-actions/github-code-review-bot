@@ -287,7 +287,6 @@ class ApplyCommandTests(unittest.TestCase):
         self.assertTrue(result["dry_run"])
         self.assertIsNone(result["review_url"])
 
-    @unittest.expectedFailure
     def test_the_summary_links_nowhere_outside_the_organisation(self) -> None:
         """Raw HTML and off-site links in the agent's summary post as text."""
         verdict = policy.extract_verdict(
@@ -320,7 +319,6 @@ class ApplyCommandTests(unittest.TestCase):
         )
         self.assertIn(f"see the [run]({RUN_URL})", body)
 
-    @unittest.expectedFailure
     def test_the_summary_cannot_open_a_code_fence(self) -> None:
         """Opening with a fence, the summary would turn the footer into code."""
         verdict = policy.extract_verdict(verdict_text(summary="```"))
