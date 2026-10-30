@@ -312,6 +312,32 @@ class PreflightContracts(ReusableWorkflowCase):
         run = flatten(self.step("select", "Install zizmor")["run"])
         self.assertRegex(run, r"uv tool install 'zizmor==\d+\.\d+\.\d+'")
 
+    def test_uv_setup_works_outside_the_workspace(self) -> None:
+        """setup-uv looks up Python in the runner's temp directory, settings off."""
+        setup = self.step("select", "Set up uv")
+        self.assertEqual(setup["with"]["working-directory"], "${{ runner.temp }}")
+        self.assertEqual(
+            setup["env"],
+            {"UV_NO_CONFIG": "1", "UV_SYSTEM_PYTHON": "1", "UV_NO_PROJECT": "1"},
+        )
+
+    def test_gate_environment_is_built_outside_the_workspace(self) -> None:
+        """uv run gets an interpreter found in RUNNER_TEMP and an env there."""
+        run = flatten(
+            self.step("select", "Pre-flight: workflow contracts and audit")["run"]
+        )
+        self.assertIn(
+            'py="$(cd "$RUNNER_TEMP" &&'
+            ' UV_NO_CONFIG=1 uv python find --system --no-project)"',
+            run,
+        )
+        self.assertIn('if [ -z "$py" ]; then', run)
+        self.assertIn(
+            'UV_PROJECT_ENVIRONMENT="$RUNNER_TEMP/preflight-venv"'
+            ' uv run --locked --python "$py" python -B scripts/preflight.py',
+            run,
+        )
+
 
 class MintProvenanceContracts(ReusableWorkflowCase):
     """No token is ever minted for an owner or scope from untrusted input."""
@@ -796,6 +822,32 @@ class TestingContracts(WorkflowCase):
         self.assertEqual(regression["permissions"], {"contents": "read"})
         run = self.step("regression", "Run offline regression suite")["run"]
         self.assertIn("uv run --locked python -B -m unittest discover -s tests", run)
+
+    def test_preflight_isolation_runs_the_select_steps_verbatim(self) -> None:
+        """The planted-workspace job copies the select job's uv steps exactly."""
+        job = "preflight-isolation"
+        self.assertEqual(self.jobs[job]["permissions"], {"contents": "read"})
+        self.assertEqual(self.action(job, CHECKOUT)["with"]["path"], "review-assets")
+        reusable = cast(
+            dict[str, Any], yaml.safe_load(REUSABLE.read_text(encoding="utf-8"))
+        )
+        select = {s.get("name"): s for s in reusable["jobs"]["select"]["steps"]}
+        mirrored = (
+            "Set up uv",
+            "Install zizmor",
+            "Pre-flight: workflow contracts and audit",
+        )
+        for name in mirrored:
+            with self.subTest(step=name):
+                self.assertEqual(self.step(job, name), select[name])
+        plant = "Plant interpreters and uv settings"
+        run = flatten(self.step(job, plant)["run"])
+        self.assertIn('plant "$GITHUB_WORKSPACE"', run)
+        self.assertIn('plant "$GITHUB_WORKSPACE/review-assets"', run)
+        self.assertLess(self.position(job, plant), self.position(job, mirrored[0]))
+        self.assertEqual(
+            self.steps(job)[-1]["name"], "Check no planted interpreter ran"
+        )
 
     def test_caller_steps_are_pinned(self) -> None:
         """Runner steps name commits."""
