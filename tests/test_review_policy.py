@@ -232,7 +232,6 @@ class DefuseTests(unittest.TestCase):
         self.assertEqual(policy.defuse(once), once)
 
 
-@unittest.expectedFailure
 class DisarmTests(unittest.TestCase):
     """Raw HTML and links leave the agent's text inert outside the organisation.
 

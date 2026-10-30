@@ -560,6 +560,27 @@ an escaped `GH\-12` or `issues\/12` before GitHub links it, so the
 patterns match those spellings too. The body can never mention a
 user or a team, or cross-reference an issue or pull request. The
 same defusing applies to the run report and the selection summary.
+Raw HTML stays text too: a zero-width space follows every `<`, so no
+`<img>` beacon loads and no `<details>` hides anything. A summary
+that opens with three backticks or tildes gets a zero-width space
+before the run: standing as a paragraph of its own, it would
+otherwise open a code block that runs on to the next fence in the
+body. In the posted
+body, `review_policy.contain_links` leaves the summary no live link
+outside the organisation: link and image syntax and link definitions
+stop working, and a bare URL stays a link when it points under
+`https://github.com/<org>/` and becomes text otherwise. A URL
+holding a dot segment (`..` or `.`, literal or percent-encoded,
+after a slash or a backslash) anywhere up to the next ASCII space or
+`<`, the extent GitHub links, becomes text as well, since a browser
+resolves `https://github.com/<org>/../x` outside the organisation.
+GitHub trims trailing punctuation and an unmatched `)` before the
+browser sees the link, so a run of one or two dots counts unless a
+letter or digit follows it: `(https://github.com/<org>/%2e%2e)` links
+to the `..`.
+GitHub links a URL after an underscore, a digit or punctuation, so
+the scheme and `www.` match wherever they appear, not at word
+boundaries alone.
 The reviewer name is the App login from the selection, or
 "the code review bot" in a secretless run; the model name comes
 from the selection, not from the session.

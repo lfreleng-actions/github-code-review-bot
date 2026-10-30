@@ -142,11 +142,18 @@ def run_check(args: argparse.Namespace) -> None:
 def approval_body(
     check: dict[str, Any], selection: dict[str, Any], run_url: str
 ) -> str:
-    """Compose the review body; the agent never writes to GitHub itself."""
+    """Compose the review body; the agent never writes to GitHub itself.
+
+    The summary is the agent's text: it links nowhere outside the
+    organisation the pull request belongs to.
+    """
     bot_login = selection.get("bot_login")
     reviewer = bot_login if isinstance(bot_login, str) and bot_login else DEFAULT_BOT
     model = policy.sanitise(selection.get("model"), 100) or "unknown"
-    summary = policy.sanitise(check.get("summary"), policy.MAX_SUMMARY_CHARS)
+    org = str(check["repository"]).partition("/")[0]
+    summary = policy.contain_links(
+        policy.sanitise(check.get("summary"), policy.MAX_SUMMARY_CHARS), org
+    )
     return (
         f"{OPENINGS[str(check['tier'])]}\n\n{summary}\n\n---\n"
         f"Automated review by `{reviewer}` using model `{model}`; "
