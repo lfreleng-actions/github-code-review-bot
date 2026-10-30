@@ -58,7 +58,9 @@ it before changing how the jobs hand data to each other.
   change the two together.
 - `prompt/antagonistic.md`: the antagonistic mode's task and its
   comment contract. The trusted side lives in
-  `scripts/review_comments.py`; change the two together.
+  `scripts/review_comments.py` (shape and limits) and
+  `scripts/comment_markdown.py` (what a body may render); change
+  them together.
 
 Before pushing, run:
 
@@ -72,8 +74,11 @@ Nothing about the review job earns trust: never give it a credential
 that can write to a repository, and never let it hold an App key.
 Each mode makes one write from the apply job, under its own App: the
 approve mode an APPROVE review, the antagonistic mode a COMMENT
-review with inline comments. Never add a label or a request-changes
-review, never let the antagonistic path approve, and never let the
-approve mode comment. The contract tests in `tests/test_workflow.py`
+review with inline comments. The antagonistic mode may also dispatch
+Code Monkey's revision workflow from the `handback` job, which alone
+holds that token, at most three rounds per pull request. Never add a
+label or a request-changes review, never let the antagonistic path
+approve, never let the approve mode comment, and never lift the round
+cap. The contract tests in `tests/test_workflow.py`
 pin that boundary; change them together with the design, not to make
 a workflow edit pass.

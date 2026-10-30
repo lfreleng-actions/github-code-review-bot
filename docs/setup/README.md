@@ -112,6 +112,7 @@ repository that runs the scheduled caller:
 | `BOT_APP_PRIVATE_KEY`          | Repository secret   | The approving App's private key (PEM)                     |
 | `ANTAGONISTIC_APP_CLIENT_ID`   | Repository variable | The antagonistic App's client id                          |
 | `ANTAGONISTIC_APP_PRIVATE_KEY` | Repository secret   | The antagonistic App's private key (PEM)                  |
+| `CODE_MONKEY_DISPATCH_TOKEN`   | Repository secret   | Actions write on `github-code-monkey-bot` alone (below)   |
 | `COPILOT_CLI_TOKEN`            | Organisation secret | Fine-grained PAT with Copilot Requests (next section)     |
 
 <!-- markdownlint-enable MD013 -->
@@ -128,6 +129,16 @@ Monkey's for one, needs a credential with Actions: Read and write on
 this repository alone: a fine-grained PAT or an App installation
 scoped to `github-code-review-bot`. It needs no access to the
 repositories under review.
+
+The reverse direction, the hand-back ([`DESIGN.md`
+§19.9](../DESIGN.md)), needs `CODE_MONKEY_DISPATCH_TOKEN`: a
+fine-grained PAT, resource owner the organisation, repository
+`github-code-monkey-bot` alone, permission Actions: Read and write.
+The hand-back job sees it and no other. Without it, a live antagonistic run
+with `handback` on fails that job and says why; the reviews still
+post. Create it after Code Monkey's revision rounds read the
+antagonistic App's threads: until then a hand-back starts a round
+that cannot see the findings.
 
 ## The model credential
 

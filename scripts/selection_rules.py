@@ -30,6 +30,7 @@ SKIP_REASONS = (
     "already_approved",
     "copilot_pending",
     "copilot_feedback",
+    "round_cap",
     "already_reviewed",
     "copilot_unreviewed",
     "ci_pending",
@@ -44,6 +45,10 @@ CI_SKIPS = {"pending": "ci_pending", "failure": "ci_failing", "none": "ci_none"}
 # A pending review was never submitted and a dismissed one no longer
 # stands, so neither shows that its author read the head.
 INERT_REVIEW_STATES = frozenset({"PENDING", "DISMISSED"})
+# Antagonistic reviews one pull request takes, across all its heads,
+# before a maintainer must take over: the review and Code Monkey's
+# revision can feed each other, and this bounds the loop.
+MAX_ROUNDS = 3
 
 
 class Skips:
@@ -140,6 +145,19 @@ def copilot_reviewed(reviews: list[dict[str, Any]], head_sha: str) -> bool:
     )
 
 
+def rounds_by(reviews: list[dict[str, Any]], login: str) -> int:
+    """How many reviews the bot ``login`` has submitted, on any head."""
+    own = bot_identity(login)
+    return sum(
+        1
+        for review in reviews
+        if isinstance(review.get("author"), str)
+        and review.get("is_bot") is True
+        and bot_identity(str(review["author"])) == own
+        and review.get("state") not in INERT_REVIEW_STATES
+    )
+
+
 def mode_skip(state: dict[str, Any], rules: Rules) -> str | None:
     """The rules one mode applies and the other does not.
 
@@ -156,6 +174,8 @@ def mode_skip(state: dict[str, Any], rules: Rules) -> str | None:
         if rules.history is not None
         else cast("list[dict[str, Any]]", state["reviews"])
     )
+    if rules.bot_login and rounds_by(reviews, rules.bot_login) >= MAX_ROUNDS:
+        return "round_cap"
     if rules.bot_login and reviewed_by(reviews, rules.bot_login, state["head_sha"]):
         return "already_reviewed"
     if not copilot_reviewed(reviews, state["head_sha"]):

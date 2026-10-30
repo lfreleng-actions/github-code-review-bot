@@ -232,12 +232,14 @@ def build_selection(args: argparse.Namespace) -> dict[str, Any]:
     max_pull_requests = parse_max_pull_requests(args.max_pull_requests)
     approve_tiers = parse_approve_tiers(args.approve_tiers)
     bot_authors: list[str] = []
+    handback_authors: list[str] = []
     if mode == "antagonistic":
         # The antagonistic mode can never approve: a tier here is a
         # misconfigured caller, refused rather than ignored.
         if approve_tiers:
             raise SelectionError("the antagonistic mode approves nothing; pass none")
         bot_authors = load_bot_authors(args.bot_authors_file)
+        handback_authors = load_bot_authors(args.handback_authors_file)
         if not bot_authors:
             raise SelectionError("the antagonistic mode needs a bot author list")
     histories: dict[tuple[str, int], list[dict[str, Any]]] = {}
@@ -277,6 +279,7 @@ def build_selection(args: argparse.Namespace) -> dict[str, Any]:
         "model": args.model,
         "approve_tiers": approve_tiers,
         "bot_authors": bot_authors,
+        "handback_authors": handback_authors,
         "bot_login": reads.bot_login(args.bot_slug),
         "explicit_pull_requests": [
             f"{args.org}/{name}#{number}" for name, number in targets
@@ -306,6 +309,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--exclude-file", type=Path)
     parser.add_argument("--exclude-repos", default="")
     parser.add_argument("--bot-authors-file", type=Path)
+    parser.add_argument("--handback-authors-file", type=Path)
     parser.add_argument("--max-pull-requests", default="10")
     parser.add_argument("--bot-slug", default="")
     return parser
