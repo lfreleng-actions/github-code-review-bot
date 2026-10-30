@@ -287,6 +287,60 @@ class ApplyCommandTests(unittest.TestCase):
         self.assertTrue(result["dry_run"])
         self.assertIsNone(result["review_url"])
 
+    @unittest.expectedFailure
+    def test_the_summary_links_nowhere_outside_the_organisation(self) -> None:
+        """Raw HTML and off-site links in the agent's summary post as text."""
+        verdict = policy.extract_verdict(
+            verdict_text(
+                summary=(
+                    '<img src="https://e.com/b.png"> See [docs](https://e.com/d) '
+                    "and https://github.com/lfreleng-actions/repo/pull/3/files."
+                )
+            )
+        )
+        self.check = {
+            "mode": "approve",
+            **policy.check(
+                entry(), verdict, approve_tiers=frozenset({"trivial", "low-risk"})
+            ),
+        }
+        self.write_check()
+        with (
+            patch.object(
+                apply_review.pull_reads, "pull_state", return_value=live_state()
+            ),
+            patch.object(apply_review.github, "api_write", return_value={}) as write,
+        ):
+            self.apply()
+        body = write.call_args.args[2]["body"]
+        self.assertIn("<\u200bimg src=", body)
+        self.assertIn("[docs]\u200b(https:\u200b//e.com/d)", body)
+        self.assertIn(
+            "https://github.com/lfreleng-actions/repo/pull/\u200b3/files", body
+        )
+        self.assertIn(f"see the [run]({RUN_URL})", body)
+
+    @unittest.expectedFailure
+    def test_the_summary_cannot_open_a_code_fence(self) -> None:
+        """Opening with a fence, the summary would turn the footer into code."""
+        verdict = policy.extract_verdict(verdict_text(summary="```"))
+        self.check = {
+            "mode": "approve",
+            **policy.check(
+                entry(), verdict, approve_tiers=frozenset({"trivial", "low-risk"})
+            ),
+        }
+        self.write_check()
+        with (
+            patch.object(
+                apply_review.pull_reads, "pull_state", return_value=live_state()
+            ),
+            patch.object(apply_review.github, "api_write", return_value={}) as write,
+        ):
+            self.apply()
+        body = write.call_args.args[2]["body"]
+        self.assertIn("\n\n\u200b```\n\n---\n", body)
+
     def test_live_run_posts_one_approval(self) -> None:
         """The approval targets the checked head and carries provenance."""
         reply = {"html_url": "https://github.com/x/pull/157#pullrequestreview-1"}

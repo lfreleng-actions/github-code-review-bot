@@ -232,6 +232,171 @@ class DefuseTests(unittest.TestCase):
         self.assertEqual(policy.defuse(once), once)
 
 
+@unittest.expectedFailure
+class DisarmTests(unittest.TestCase):
+    """Raw HTML and links leave the agent's text inert outside the organisation.
+
+    Each output below was rendered through GitHub's Markdown API: the
+    disarmed forms render as plain text, the organisation link as a link.
+    """
+
+    def test_raw_html_and_angle_autolinks_stay_text(self) -> None:
+        """A zero-width space after ``<`` stops tags and ``<scheme:...>`` links."""
+        self.assertEqual(
+            policy.disarm_html('<img src="x"> <details>a</details> <https://e.com>'),
+            f'<{ZWSP}img src="x"> <{ZWSP}details>a<{ZWSP}/details> <{ZWSP}https://e.com>',
+        )
+
+    def test_links_outside_the_organisation_become_text(self) -> None:
+        """Link and image syntax, definitions and off-site bare URLs all break."""
+        cases = {
+            "[y](https://e.com/y)": f"[y]{ZWSP}(https:{ZWSP}//e.com/y)",
+            "![i](https://e.com/i.png)": f"![i]{ZWSP}(https:{ZWSP}//e.com/i.png)",
+            "[ref]: https://e.com/r": f"[ref]{ZWSP}: https:{ZWSP}//e.com/r",
+            "see http://e.com and HTTPS://E.COM": (
+                f"see http:{ZWSP}//e.com and HTTPS:{ZWSP}//E.COM"
+            ),
+            "www.e.com/z": f"www{ZWSP}.e.com/z",
+            "https://github.com/someone/repo": f"https:{ZWSP}//github.com/someone/repo",
+            "https://github.com/org-evil/x": f"https:{ZWSP}//github.com/org-evil/x",
+        }
+        for raw, expected in cases.items():
+            with self.subTest(raw=raw):
+                self.assertEqual(policy.contain_links(raw, "org"), expected)
+
+    def test_link_definitions_break_in_any_container(self) -> None:
+        """A definition in a quote, a list or over two lines feeds a reference
+        image as surely as one at the top level, so every ``]:`` breaks.
+        """
+        cases = {
+            "> [b]: //e.com/p.png": f"> [b]{ZWSP}: //e.com/p.png",
+            "- a\n\n    [b]: https://e.com/q": f"- a\n\n    [b]{ZWSP}: https:{ZWSP}//e.com/q",
+            "[b\nx]: https://e.com/r": f"[b\nx]{ZWSP}: https:{ZWSP}//e.com/r",
+        }
+        for raw, expected in cases.items():
+            with self.subTest(raw=raw):
+                self.assertEqual(policy.contain_links(raw, "org"), expected)
+
+    def test_lookalike_hosts_are_not_the_allow_listed_one(self) -> None:
+        """Case folds over ASCII alone: a dotless i is not GitHub."""
+        lookalike = "https://g\u0131thub.com/org/repo"
+        self.assertEqual(
+            policy.contain_links(lookalike, "org"),
+            f"https:{ZWSP}//g\u0131thub.com/org/repo",
+        )
+        self.assertEqual(
+            policy.contain_links("https://GITHUB.COM/ORG/x", "org"),
+            "https://GITHUB.COM/ORG/x",
+        )
+
+    def test_organisation_links_stay_live(self) -> None:
+        """A bare URL under github.com/<org>/ is the one link that survives."""
+        for text in (
+            "https://github.com/org/repo/blob/main/README.md",
+            "(https://github.com/org/repo)",
+            "https://github.com/ORG/repo",
+            "https://github.com/org",
+        ):
+            with self.subTest(text=text):
+                self.assertEqual(policy.contain_links(text, "org"), text)
+
+    def test_containment_twice_changes_nothing(self) -> None:
+        """Text contained on its way through two renderers reads the same."""
+        text = "<b> [x](https://e.com) [r]: www.e.com https://github.com/org/r"
+        once = policy.contain_links(policy.disarm_html(text), "org")
+        self.assertEqual(policy.contain_links(policy.disarm_html(once), "org"), once)
+
+    def test_sanitise_disarms_raw_html(self) -> None:
+        """The one-line sanitiser leaves no tag live in a summary."""
+        self.assertEqual(policy.sanitise('<img src="x">', 100), f'<{ZWSP}img src="x">')
+
+    def test_dot_segments_take_a_link_out_of_the_organisation(self) -> None:
+        """A browser resolves ``.`` and ``..``, percent-encoded or after a
+        backslash too, so a URL holding one is no longer under the
+        organisation. GitHub links up to the next ASCII space or ``<``, a
+        no-break space included, so the whole of that run counts; and it
+        trims trailing punctuation and an unmatched ``)`` first, so a dot
+        run counts unless a letter or digit follows it.
+        """
+        cases = {
+            "https://github.com/org/../outside/repo": (
+                f"https:{ZWSP}//github.com/org/../outside/repo"
+            ),
+            "https://github.com/org/%2e%2E/outside": (
+                f"https:{ZWSP}//github.com/org/%2e%2E/outside"
+            ),
+            "https://github.com/org/x/.%2e/y": f"https:{ZWSP}//github.com/org/x/.%2e/y",
+            "https://github.com/org/./x": f"https:{ZWSP}//github.com/org/./x",
+            "https://github.com/org/x\\..\\..\\y": (
+                f"https:{ZWSP}//github.com/org/x\\..\\..\\y"
+            ),
+            "https://github.com/org/x\u00a0/../../y": (
+                f"https:{ZWSP}//github.com/org/x\u00a0/../../y"
+            ),
+            "https://github.com/org/x?https://github.com/org/../y": (
+                f"https:{ZWSP}//github.com/org/x?https:{ZWSP}//github.com/org/../y"
+            ),
+            "https://github.com/org/../x https://github.com/org/y": (
+                f"https:{ZWSP}//github.com/org/../x https://github.com/org/y"
+            ),
+            "(https://github.com/org/%2e%2e)": f"(https:{ZWSP}//github.com/org/%2e%2e)",
+            "https://github.com/org/%2e%2e.": f"https:{ZWSP}//github.com/org/%2e%2e.",
+            "https://github.com/org/..!": f"https:{ZWSP}//github.com/org/..!",
+            "https://github.com/org/x/...": f"https:{ZWSP}//github.com/org/x/...",
+            "https://github.com/org/x/..y": "https://github.com/org/x/..y",
+            "https://github.com/org/r/blob/main/.github/x": (
+                "https://github.com/org/r/blob/main/.github/x"
+            ),
+        }
+        for raw, expected in cases.items():
+            with self.subTest(raw=raw):
+                self.assertEqual(policy.contain_links(raw, "org"), expected)
+
+    def test_a_link_after_any_character_is_still_found(self) -> None:
+        """GitHub links a URL or ``www.`` after an underscore, a digit or
+        punctuation, where a word boundary misses it.
+        """
+        cases = {
+            "_https://e.com/x_": f"_https:{ZWSP}//e.com/x_",
+            "1https://e.com": f"1https:{ZWSP}//e.com",
+            "x_www.e.com": f"x_www{ZWSP}.e.com",
+            "_https://github.com/org/r_": "_https://github.com/org/r_",
+        }
+        for raw, expected in cases.items():
+            with self.subTest(raw=raw):
+                self.assertEqual(policy.contain_links(raw, "org"), expected)
+
+    def test_plain_http_is_not_the_allow_listed_scheme(self) -> None:
+        """Only ``https://github.com/<org>/`` stays a link: the scheme counts
+        as much as the host and the organisation.
+        """
+        cases = {
+            "http://github.com/org/repo": f"http:{ZWSP}//github.com/org/repo",
+            "HTTP://GITHUB.COM/ORG/x": f"HTTP:{ZWSP}//GITHUB.COM/ORG/x",
+            "HTTPS://github.com/org/x": "HTTPS://github.com/org/x",
+        }
+        for raw, expected in cases.items():
+            with self.subTest(raw=raw):
+                self.assertEqual(policy.contain_links(raw, "org"), expected)
+
+    def test_sanitise_cannot_open_a_code_fence(self) -> None:
+        """A summary stands as a paragraph of its own; opening with a fence,
+        it would turn the rest of the body into code up to the next fence.
+        """
+        cases = {
+            "```": f"{ZWSP}```",
+            "  ~~~python x": f"{ZWSP}~~~python x",
+            "````` @a": f"{ZWSP}````` @{ZWSP}a",
+            "a ``` b": "a ``` b",
+            "``x``": "``x``",
+        }
+        for raw, expected in cases.items():
+            with self.subTest(raw=raw):
+                self.assertEqual(policy.sanitise(raw, 100), expected)
+        once = policy.sanitise("```", 100)
+        self.assertEqual(policy.sanitise(once, 100), once)
+
+
 class ClassifyTrivialTests(unittest.TestCase):
     """Each trivial class, with a change that passes and one that does not.
 
