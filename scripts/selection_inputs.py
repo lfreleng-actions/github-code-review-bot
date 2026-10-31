@@ -4,9 +4,9 @@
 """Parse the select job's command-line inputs.
 
 Kept apart from the selection flow so the accepted spellings of a
-repository list, a pull request list and the approval tiers read as
-one contract, and so the flow in ``select_pulls`` stays short enough
-to follow.
+repository list, a pull request list, the review mode, the approval
+tiers and the bot author list read as one contract, and so the flow
+in ``select_pulls`` stays short enough to follow.
 """
 
 from __future__ import annotations
@@ -24,6 +24,10 @@ PULL_RE = re.compile(
     r"(?P<repo>[A-Za-z0-9_.-]+)(?:/pull/|#)(?P<number>[0-9]+)/?"
 )
 APPROVABLE_TIERS = frozenset({"trivial", "low-risk"})
+# ``approve`` reviews human pull requests and may approve them;
+# ``antagonistic`` reviews listed bots' pull requests and may comment.
+MODES = ("approve", "antagonistic")
+BOT_LOGIN_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9-]*")
 
 
 def parse_repositories(text: str) -> list[str]:
@@ -92,6 +96,41 @@ def parse_approve_tiers(text: str) -> list[str]:
             raise SelectionError(f"unknown approve tier {token!r}")
         tiers.add(token)
     return sorted(tiers)
+
+
+def parse_mode(text: str) -> str:
+    """Accept one of the review modes, exactly as spelt."""
+    if text not in MODES:
+        raise SelectionError(f"mode must be one of {', '.join(MODES)}, got {text!r}")
+    return text
+
+
+def bot_identity(login: str) -> str:
+    """Fold a bot login to one comparable form.
+
+    GraphQL names an App ``slug`` and REST or search ``slug[bot]``;
+    logins compare without case on GitHub.
+    """
+    return login.removesuffix("[bot]").lower()
+
+
+def load_bot_authors(file: Path | None) -> list[str]:
+    """Read the bot logins the antagonistic mode reviews, folded and in order."""
+    if file is None:
+        return []
+    if not file.is_file():
+        raise SelectionError(f"bot author file {file} is not a regular file")
+    names: list[str] = []
+    for line in file.read_text(encoding="utf-8").splitlines():
+        stripped = line.split("#", 1)[0].strip()
+        if not stripped:
+            continue
+        login = stripped.removesuffix("[bot]")
+        if not BOT_LOGIN_RE.fullmatch(login):
+            raise SelectionError(f"invalid bot login {stripped!r} in {file}")
+        if bot_identity(login) not in names:
+            names.append(bot_identity(login))
+    return names
 
 
 def load_exclusions(file: Path | None, override: str) -> list[str]:

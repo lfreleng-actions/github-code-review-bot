@@ -1,0 +1,165 @@
+---
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Linux Foundation
+
+# On-demand entry point for the antagonistic mode (docs/DESIGN.md
+# section 19).
+#
+# Reviews pull requests opened by the bots config/antagonistic-authors.txt
+# lists (Code Monkey and the Copilot coding agent) and posts one COMMENT
+# review per head, with the findings inline where a human reviewer and
+# the authoring bot will see them. It never approves and never requests
+# changes: every pull request still needs a maintainer's approval.
+#
+# Code Monkey dispatches this workflow for its own pull requests once
+# their Copilot review is clean; a maintainer may dispatch it by hand,
+# naming pull requests or scanning for the listed bots' open ones.
+#
+# The run holds the antagonistic App's credentials and never the
+# approving App's (docs/DESIGN.md section 10). The pre-flight identity
+# checks refuse a token minted by any App other than the one
+# config/antagonistic-bot.json names. Disabling this workflow in the
+# Actions UI is the kill switch.
+name: 'Code Review Bot (antagonistic) 😈'
+
+# yamllint disable-line rule:truthy
+on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Run the agent and the checks; comment nothing'
+        type: boolean
+        default: true
+      model:
+        description: 'Model'
+        type: choice
+        options:
+          - 'GPT-6 Astra'
+          - 'Claude Opus 5.5'
+          - 'Claude Fable 5.1'
+          - 'Claude Sonnet 5.5'
+        default: 'GPT-6 Astra'
+      pull_requests:
+        description: >-
+          Review these pull requests instead of scanning
+          (repo/pull/N, owner/repo/pull/N, repo#N or URLs; commas
+          and/or spaces)
+        type: string
+        default: ''
+      repositories:
+        description: 'Repositories to scan (commas and/or spaces)'
+        type: string
+        default: ''
+      max_pull_requests:
+        description: 'Pull requests to review at most (0 = no cap)'
+        type: string
+        default: '10'
+      max_concurrent_agents:
+        description: 'Review sessions at once (1-30)'
+        type: string
+        default: '5'
+      reassess:
+        description: >-
+          Review heads the ledger records; a head this App already
+          reviewed on GitHub stays skipped until a new push
+        type: boolean
+        default: false
+      handback:
+        description: >-
+          Hand reviewed Code Monkey pull requests back for a revision
+          round (three antagonistic rounds per pull request at most)
+        type: boolean
+        default: true
+
+permissions: {}
+
+# Each dispatch locks within its own run: Code Monkey sends one batch
+# per run, and a shared group would let a newcomer cancel a pending
+# batch. The apply job refuses a head the bot already reviewed, so two
+# overlapping dispatches cannot comment on one head twice in sequence.
+concurrency:
+  group: "${{ format('code-review-antagonistic-{0}', github.run_id) }}"
+  cancel-in-progress: false
+
+jobs:
+  options:
+    name: 'Resolve options'
+    runs-on: 'ubuntu-latest'
+    timeout-minutes: 2
+    permissions: {}
+    outputs:
+      model: "${{ steps.map.outputs.id }}"
+    steps:
+      # The loader reads the public .github repository; no token needed.
+      - name: 'Load egress allow-list'
+        # yamllint disable-line rule:line-length
+        uses: lfreleng-actions/harden-runner-block-action@e5e8179f45aa893b23cc8b5d2e25466355d9c4f8 # v0.14.0
+        with:
+          config: '@ac32415b91e0b6db1166bc451024c472cdbcbd3d'  # v0.16.8
+          allow_list_summary: 'false'
+
+      - name: 'Harden runner'
+        # yamllint disable-line rule:line-length
+        uses: step-security/harden-runner@dc2769abcc0fcfbadfc1df54081c1608579ef6b2 # v2.22.2
+        with:
+          egress-policy: 'block'
+          allowed-endpoints: "${{ env.CONNECTION_ALLOW_LIST }}"
+
+      # Display names in the dispatch form map to the identifiers the
+      # Copilot CLI accepts (docs/DESIGN.md section 10.3).
+      - name: 'Map display name to identifier'
+        id: map
+        env:
+          MODEL: "${{ inputs.model || 'GPT-6 Astra' }}"
+        run: |
+          case "$MODEL" in
+            'GPT-6 Astra') id='gpt-6-astra' ;;
+            'Claude Opus 5.5') id='claude-opus-5.5' ;;
+            'Claude Fable 5.1') id='claude-fable-5.1' ;;
+            'Claude Sonnet 5.5') id='claude-sonnet-5.5' ;;
+            *) echo "::error::Unknown model $MODEL"; exit 1 ;;
+          esac
+          echo "id=$id" >> "$GITHUB_OUTPUT"
+
+  code-review:
+    name: 'Antagonistic Review'
+    needs: 'options'
+    permissions:
+      pull-requests: read  # Candidate scan when running without the App
+      contents: read  # Asset checkout and public repository reads
+      actions: read  # Ledger, session and result artifact reads
+    uses: $/.github/workflows/code-review.yaml
+    with:
+      org: "${{ github.repository_owner }}"
+      mode: 'antagonistic'
+      # Fixed: this caller can never ask for an approval, and the
+      # reusable workflow refuses any tier in this mode.
+      approve_tiers: 'none'
+      dry_run: ${{ inputs.dry_run }}
+      model: "${{ needs.options.outputs.model }}"
+      pull_requests: "${{ inputs.pull_requests || '' }}"
+      repositories: "${{ inputs.repositories || '' }}"
+      max_pull_requests: "${{ inputs.max_pull_requests || '10' }}"
+      max_concurrent_agents: "${{ inputs.max_concurrent_agents || '5' }}"
+      reassess: ${{ inputs.reassess || false }}
+      egress_policy: 'block'
+      # yamllint disable-line rule:line-length
+      egress_allow_config: '@ac32415b91e0b6db1166bc451024c472cdbcbd3d'  # v0.16.8
+      # The antagonistic App, under its own names: the approving App's
+      # key never reaches this caller. No client id permits dry-run
+      # alone; a live dispatch without one fails before any session.
+      github_app_client_id: "${{ vars.ANTAGONISTIC_APP_CLIENT_ID || '' }}"
+      # Code Monkey's revision rounds, in this owner. The applier caps
+      # the rounds, so the review and the revision cannot feed each
+      # other past three.
+      handback_repository: >-
+        ${{ inputs.handback
+        && format('{0}/github-code-monkey-bot', github.repository_owner)
+        || '' }}
+      assets_repository: "${{ github.repository }}"
+      assets_ref: "${{ github.sha }}"
+    secrets:
+      copilot_token: "${{ secrets.COPILOT_CLI_TOKEN }}"
+      github_app_private_key: "${{ secrets.ANTAGONISTIC_APP_PRIVATE_KEY }}"
+      # Fine-grained, Actions write on the Code Monkey repository alone.
+      handback_token: "${{ secrets.CODE_MONKEY_DISPATCH_TOKEN }}"

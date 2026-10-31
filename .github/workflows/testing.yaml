@@ -22,6 +22,13 @@ on:
   pull_request:
   workflow_dispatch:
     inputs:
+      mode:
+        description: 'Review mode for the manual dry-run'
+        type: choice
+        options:
+          - 'approve'
+          - 'antagonistic'
+        default: 'approve'
       pull_requests:
         description: 'Pull requests for the manual dry-run (see cron form)'
         type: string
@@ -48,12 +55,13 @@ concurrency:
 
 jobs:
   plumbing:
-    name: 'Plumbing (secretless, ${{ matrix.invocation }})'
+    name: 'Plumbing (secretless, ${{ matrix.mode }})'
     strategy:
       matrix:
-        # Two legs prove invocation namespaces never collide. Both are
-        # dry, so they share only this run's lock: one runs, one waits.
-        invocation: [first, second]
+        # One leg per review mode. Both are dry, so they share only
+        # this run's lock: one runs, one waits; their distinct
+        # namespaces also prove invocations never collide.
+        mode: ['approve', 'antagonistic']
     if: github.event_name == 'pull_request'
     permissions:
       # The job passes no secrets and skips the agent session, so
@@ -66,6 +74,9 @@ jobs:
       # The owner running the test, so a fork exercises its own
       # organisation rather than reaching into the upstream one.
       org: "${{ github.repository_owner }}"
+      mode: "${{ matrix.mode }}"
+      approve_tiers: >-
+        ${{ matrix.mode == 'antagonistic' && 'none' || 'trivial,low-risk' }}
       dry_run: true
       # Skip the agent: PR runs are secretless (see header comment).
       skip_agent: true
@@ -89,6 +100,9 @@ jobs:
     uses: $/.github/workflows/code-review.yaml
     with:
       org: "${{ github.repository_owner }}"
+      mode: "${{ inputs.mode || 'approve' }}"
+      approve_tiers: >-
+        ${{ inputs.mode == 'antagonistic' && 'none' || 'trivial,low-risk' }}
       dry_run: true
       pull_requests: "${{ inputs.pull_requests || '' }}"
       repositories: "${{ inputs.repositories || '' }}"
