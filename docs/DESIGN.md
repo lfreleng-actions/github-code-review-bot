@@ -485,7 +485,10 @@ the fallback in §13 records it.
 entry, bounded `summary`, `findings` with known areas, bounded
 `injection_attempts`. Any shape problem, an unterminated fence or a
 missing summary leaves the verdict `None`, the effective tier
-`needs-human`, and a reason saying why.
+`needs-human`, and a reason saying why. Finding the fences reads the
+summary once: a line of fence characters that never closes costs a
+single pass, not one per way of splitting it, so a session cannot
+hold the job to its timeout.
 
 With a usable verdict, `review_policy.check` applies three rules
 from `review_vetoes.py`:

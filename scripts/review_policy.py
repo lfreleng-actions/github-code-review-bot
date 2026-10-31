@@ -54,8 +54,11 @@ MAX_LISTED_PATHS = 5
 REPO_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9._-]+$")
 # Track all fences, not just completed JSON blocks: otherwise a
 # truncated or mislabelled final answer falls back to an earlier
-# example block. Opening and closing delimiters must match.
-FENCE_RE = re.compile(r"^[ \t]*(`{3,}|~{3,})([^\r\n]*)\r?$", re.MULTILINE)
+# example block. Opening and closing delimiters must match. The
+# quantifiers are possessive: giving characters back never makes a
+# line match, and a backtracking run would read a long line once per
+# character in it.
+FENCE_RE = re.compile(r"^[ \t]*+(`{3,}+|~{3,}+)([^\r\n]*+)\r?$", re.MULTILINE)
 CONTROL_RE = re.compile(r"[\x00-\x1f\x7f-\x9f\u2028\u2029]")
 NO_VERDICT = "no verdict"
 HUMAN_REQUESTED = "agent judged the change needs a human review"
