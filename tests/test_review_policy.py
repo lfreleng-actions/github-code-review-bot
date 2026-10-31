@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import sys
+import time
 import unittest
 from importlib import import_module
 from pathlib import Path
@@ -99,6 +100,18 @@ class ExtractVerdictTests(unittest.TestCase):
         text = message(verdict()) + "```json\n{"
         with self.assertRaisesRegex(policy.Rejected, "unterminated"):
             policy.extract_verdict(text)
+
+    def test_a_line_of_fence_characters_costs_one_pass(self) -> None:
+        """A long run of fence characters on a line that never closes, a
+        carriage return mid-line, took tens of seconds when every split of
+        the line between the run and the rest was tried in turn.
+        """
+        for run in ("`" * 40_000, "~" * 40_000):
+            with self.subTest(run=run[0]):
+                started = time.perf_counter()
+                got = policy.extract_verdict(f"{run}\rx\n" + message(verdict()))
+                self.assertLess(time.perf_counter() - started, 2.0)
+                self.assertEqual(got["tier"], "trivial")
 
     def test_rejects_non_object_and_wrong_schema(self) -> None:
         """Lists, bool schema and other schema numbers are refused."""
