@@ -88,7 +88,10 @@ jobs:
       org: 'your-org'
       dry_run: true
       approve_tiers: 'trivial,low-risk'
-      egress_allow_config: '@<allow-list commit sha>'
+      harden_runner_allowlist: '@<allow-list commit sha>'
+      # harden_runner_supplemental_allowlist: 'your-org/.github@<sha>'
+      # harden_runner_supplemental_unpinned: false
+      # harden_runner_extra_endpoints: 'example.com:443'
       github_app_client_id: ${{ vars.YOUR_APP_CLIENT_ID }}
     secrets:
       copilot_token: ${{ secrets.COPILOT_CLI_TOKEN }}
