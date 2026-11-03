@@ -1662,6 +1662,13 @@ when a maintainer takes over.
   run's review, which names the first run and not the second, so it
   dispatches nothing. A re-run of the report repeats its own run's
   hand-backs and no other run's.
+- **When a read fails.** The report job lists hand-backs in a live
+  antagonistic run alone, after it has uploaded the run report and
+  the ledger, so a failure there never costs the run its record. It
+  reads with the native token, which sees public repositories alone:
+  hand-back needs public candidates. A candidate whose reviews it
+  cannot read (a private repository, a 5xx, a rate limit) drops out
+  with a warning and never goes back; the rest of the list stands.
 - **How.** A separate `handback` job, with no permissions, no checkout
   and no artifact, holds `handback_token` and dispatches
   `code-monkey-cron.yaml` in `handback_repository`, live, in

@@ -1130,23 +1130,6 @@ jobs:
           printf '\nReview job: %s; apply job: %s\n' \
             "$REVIEW_RESULT" "$APPLY_RESULT" >> "$GITHUB_STEP_SUMMARY"
 
-      # The pull requests whose posted antagonistic review chose a
-      # hand-back, each confirmed against the verified selection and
-      # this App's own review on GitHub, whose marker must name this
-      # run (scripts/handback.py), as one owner/repo#N list. Public
-      # reads; the native token suffices.
-      - name: 'List hand-backs'
-        id: handback
-        env:
-          GH_TOKEN: "${{ github.token }}"
-          ORG: "${{ inputs.org }}"
-          RUN_ID: "${{ github.run_id }}"
-        run: |
-          python3 review-assets/scripts/handback.py list \
-            --report artefacts/report.json \
-            --selection evidence/selection.json \
-            --org "$ORG" --run-id "$RUN_ID" >> "$GITHUB_OUTPUT"
-
       - name: 'Attach run report'
         # yamllint disable-line rule:line-length
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
@@ -1168,6 +1151,28 @@ jobs:
           path: 'ledger/'
           retention-days: 90
           if-no-files-found: 'error'
+
+      # The pull requests whose posted antagonistic review chose a
+      # hand-back, each confirmed against the verified selection and
+      # this App's own review on GitHub, whose marker must name this
+      # run (scripts/handback.py), as one owner/repo#N list. Only a
+      # live antagonistic run can hand back, so no other reads here.
+      # It runs after both uploads so that no failure here costs the
+      # run its report or ledger. The native token reads public
+      # repositories alone: a candidate it cannot read (private, 5xx,
+      # rate limited) is skipped with a warning, never dispatched.
+      - name: 'List hand-backs'
+        id: handback
+        if: inputs.mode == 'antagonistic' && !inputs.dry_run
+        env:
+          GH_TOKEN: "${{ github.token }}"
+          ORG: "${{ inputs.org }}"
+          RUN_ID: "${{ github.run_id }}"
+        run: |
+          python3 review-assets/scripts/handback.py list \
+            --report artefacts/report.json \
+            --selection evidence/selection.json \
+            --org "$ORG" --run-id "$RUN_ID" >> "$GITHUB_OUTPUT"
 
   # Hands the reviewed bot pull requests back to their bot for a
   # revision round (docs/DESIGN.md section 19.9): one dispatch of the
