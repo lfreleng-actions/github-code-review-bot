@@ -3,18 +3,19 @@
 
 """Turn a review session into a check, then a check into an approval.
 
-``check`` runs offline against the session artefact and writes the
-typed ``check.json`` the workflow gates its write token on.
-``apply`` re-reads the pull request live, applies the gates, and is
-the only place that submits a review. A policy refusal is a typed
-``needs-human`` result and exit 0; a GitHub failure is exit 1.
+The approve mode's applier. ``check`` runs offline against the session
+artefact and writes the typed ``check.json`` the workflow gates its
+write token on. ``apply`` re-reads the pull request live, applies the
+gates, and is the only place that submits an approval. A policy
+refusal is a typed ``needs-human`` result and exit 0; a GitHub failure
+is exit 1. Both commands refuse a selection or a check from the
+antagonistic mode, which ``comment_review`` handles and which never
+approves.
 """
 
 from __future__ import annotations
 
 import argparse
-import json
-import sys
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any, cast
@@ -22,10 +23,12 @@ from typing import Any, cast
 import bot_evidence as evidence
 import bot_github as github
 import pull_reads
+import review_files as files
 import review_policy as policy
 
 SCHEMA = 1
-MAX_CHECK_BYTES = 1024 * 1024
+MODE = "approve"
+SOURCE = "apply_review"
 DEFAULT_BOT = "the code review bot"
 OPENINGS = {
     "trivial": (
@@ -36,59 +39,6 @@ OPENINGS = {
         "security and CI/CD impact, found low risk."
     ),
 }
-
-
-def note(message: str) -> None:
-    """Log to stderr so stdout stays a clean list of workflow outputs."""
-    print(f"apply_review: {message}", file=sys.stderr)
-
-
-def load_json(path: Path, limit: int, context: str) -> dict[str, Any]:
-    """Read a bounded regular JSON file that must hold an object."""
-    try:
-        parsed: Any = json.loads(evidence.read_regular(path, limit))
-    except (ValueError, RecursionError) as exc:
-        raise ValueError(f"{context}: {exc}") from exc
-    if not isinstance(parsed, dict):
-        raise ValueError(f"{context}: expected a JSON object")
-    return cast("dict[str, Any]", parsed)
-
-
-def find_entry(selection: dict[str, Any], key: str) -> dict[str, Any]:
-    """Locate the per-PR entry by key or fail the step."""
-    for item in cast("list[Any]", selection.get("pull_requests") or []):
-        if isinstance(item, dict):
-            candidate = cast("dict[str, Any]", item)
-            if candidate.get("key") == key:
-                return candidate
-    raise ValueError(f"key {key!r} is not in the selection")
-
-
-def read_verdict(session_dir: Path) -> tuple[dict[str, Any] | None, str | None]:
-    """Read the agent's verdict, or explain why none could be read."""
-    path = session_dir / "session-summary.md"
-    if not path.exists():
-        return None, "no session summary"
-    try:
-        content = evidence.read_regular(path, evidence.MAX_SUMMARY_BYTES)
-    except (OSError, ValueError) as exc:
-        return None, f"session summary unreadable: {github.safe_message(exc)}"
-    try:
-        return policy.extract_verdict(content.decode("utf-8", errors="replace")), None
-    except policy.Rejected as exc:
-        return None, str(exc)
-
-
-def read_usage(session_dir: Path) -> dict[str, Any] | None:
-    """Read usage.json when present; a bad file costs the spend figures only."""
-    path = session_dir / "usage.json"
-    if not path.exists():
-        return None
-    try:
-        return load_json(path, evidence.MAX_USAGE_BYTES, "usage.json")
-    except (OSError, ValueError) as exc:
-        note(f"ignoring usage.json: {github.safe_message(exc)}")
-        return None
 
 
 def summary_markdown(check: dict[str, Any]) -> str:
@@ -108,31 +58,33 @@ def summary_markdown(check: dict[str, Any]) -> str:
     return "\n".join(lines) + "\n"
 
 
-def write_json(path: Path, data: dict[str, Any]) -> None:
-    """Write a JSON artefact, creating its directory."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
-
-
 def run_check(args: argparse.Namespace) -> None:
     """Offline check: verdict, corroboration, vetoes, enabled tiers."""
     approve_tiers = policy.parse_approve_tiers(args.approve_tiers)
-    selection = load_json(args.selection, evidence.MAX_EVIDENCE_BYTES, "selection")
-    entry = find_entry(selection, args.key)
+    selection = files.load_json(
+        args.selection, evidence.MAX_EVIDENCE_BYTES, "selection"
+    )
+    files.require_mode(selection, MODE, "selection")
+    entry = files.find_entry(selection, args.key)
     verdict: dict[str, Any] | None = None
     failure: str | None = str(args.failure) if args.failure else None
     if failure is None:
-        verdict, failure = read_verdict(args.session_dir)
+        verdict, failure = files.read_verdict(args.session_dir, policy.extract_verdict)
     if failure is not None:
-        note(f"no usable verdict: {github.safe_message(ValueError(failure))}")
-    check = policy.check(
-        entry,
-        verdict,
-        approve_tiers=approve_tiers,
-        failure=failure,
-        usage=read_usage(args.session_dir),
-    )
-    write_json(args.output, check)
+        files.note(
+            SOURCE, f"no usable verdict: {github.safe_message(ValueError(failure))}"
+        )
+    check = {
+        "mode": MODE,
+        **policy.check(
+            entry,
+            verdict,
+            approve_tiers=approve_tiers,
+            failure=failure,
+            usage=files.read_usage(args.session_dir, SOURCE),
+        ),
+    }
+    files.write_json(args.output, check)
     args.summary.parent.mkdir(parents=True, exist_ok=True)
     args.summary.write_text(summary_markdown(check), encoding="utf-8")
     print(f"approvable={'true' if check['approvable'] else 'false'}")
@@ -142,11 +94,18 @@ def run_check(args: argparse.Namespace) -> None:
 def approval_body(
     check: dict[str, Any], selection: dict[str, Any], run_url: str
 ) -> str:
-    """Compose the review body; the agent never writes to GitHub itself."""
+    """Compose the review body; the agent never writes to GitHub itself.
+
+    The summary is the agent's text: it links nowhere outside the
+    organisation the pull request belongs to.
+    """
     bot_login = selection.get("bot_login")
     reviewer = bot_login if isinstance(bot_login, str) and bot_login else DEFAULT_BOT
     model = policy.sanitise(selection.get("model"), 100) or "unknown"
-    summary = policy.sanitise(check.get("summary"), policy.MAX_SUMMARY_CHARS)
+    org = str(check["repository"]).partition("/")[0]
+    summary = policy.contain_links(
+        policy.sanitise(check.get("summary"), policy.MAX_SUMMARY_CHARS), org
+    )
     return (
         f"{OPENINGS[str(check['tier'])]}\n\n{summary}\n\n---\n"
         f"Automated review by `{reviewer}` using model `{model}`; "
@@ -184,9 +143,10 @@ def gate_reasons(check: dict[str, Any], state: dict[str, Any]) -> list[str]:
 
 def validated_check(path: Path) -> dict[str, Any]:
     """Load check.json and confirm the fields apply acts on."""
-    check = load_json(path, MAX_CHECK_BYTES, "check")
+    check = files.load_json(path, files.MAX_CHECK_BYTES, "check")
     if check.get("schema") != SCHEMA:
         raise ValueError("check.json has an unknown schema")
+    files.require_mode(check, MODE, "check.json")
     repository = github.require_str(check, "repository", "check.json")
     if not github.REPO_RE.fullmatch(repository):
         raise ValueError("check.json repository is malformed")
@@ -200,7 +160,10 @@ def validated_check(path: Path) -> dict[str, Any]:
 def run_apply(args: argparse.Namespace) -> None:
     """Gate the live pull request, then approve or record why not."""
     check = validated_check(args.check)
-    selection = load_json(args.selection, evidence.MAX_EVIDENCE_BYTES, "selection")
+    selection = files.load_json(
+        args.selection, evidence.MAX_EVIDENCE_BYTES, "selection"
+    )
+    files.require_mode(selection, MODE, "selection")
     repository, number = str(check["repository"]), int(check["number"])
     result: dict[str, Any] = {
         "schema": SCHEMA,
@@ -245,7 +208,7 @@ def run_apply(args: argparse.Namespace) -> None:
             result["verdict"] = "approved"
     elif not reasons:
         reasons.append("check judged the change not approvable")
-    write_json(args.output, result)
+    files.write_json(args.output, result)
     review_url = result["review_url"] or "-"
     print(f"apply: {result['verdict']} {repository}#{number} review={review_url}")
 

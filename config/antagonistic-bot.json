@@ -1,0 +1,4 @@
+{
+  "app_slug": "lf-releng-antagonistic-review-bot",
+  "description": "GitHub App whose installation tokens the antagonistic mode mints. It may comment on pull requests and never approve them; the select job refuses a token minted by any other App."
+}

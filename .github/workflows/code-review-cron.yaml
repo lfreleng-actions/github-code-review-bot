@@ -135,6 +135,9 @@ jobs:
       # lfreleng-actions. Naming it this way rather than hard-coding
       # it keeps a fork's scheduled runs inside the fork.
       org: "${{ github.repository_owner }}"
+      # This caller approves human pull requests; the antagonistic
+      # mode has its own caller and its own App.
+      mode: 'approve'
       # Scheduled runs stay dry-run until the rollout clears them; a
       # manual dispatch takes the operator's choice.
       dry_run: >-

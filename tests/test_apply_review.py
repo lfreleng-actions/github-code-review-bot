@@ -51,6 +51,7 @@ def selection(**overrides: Any) -> dict[str, Any]:
     """A selection.json object holding the entry."""
     data: dict[str, Any] = {
         "schema": 1,
+        "mode": "approve",
         "dry_run": False,
         "model": "claude-opus-5.5",
         "approve_tiers": ["low-risk", "trivial"],
@@ -145,7 +146,7 @@ class CheckCommandTests(unittest.TestCase):
         self.assertEqual(out, "approvable=true\ntier=trivial\n")
         check = json.loads((self.root / "out" / "check.json").read_text())
         self.assertEqual(check["agent_tier"], "trivial")
-        self.assertEqual(check["summary"], "Fixes a typo. Thanks &#64;someone!")
+        self.assertEqual(check["summary"], "Fixes a typo. Thanks @\u200bsomeone!")
         self.assertEqual(check["premium_requests"], 2.0)
         self.assertEqual(check["agent_seconds"], 5)
         summary = (self.root / "out" / "check-summary.md").read_text()
@@ -193,9 +194,12 @@ class ApplyCommandTests(unittest.TestCase):
         self.root = Path(self.tmp.name)
         (self.root / "selection.json").write_text(json.dumps(selection()))
         verdict = policy.extract_verdict(verdict_text())
-        self.check = policy.check(
-            entry(), verdict, approve_tiers=frozenset({"trivial", "low-risk"})
-        )
+        self.check = {
+            "mode": "approve",
+            **policy.check(
+                entry(), verdict, approve_tiers=frozenset({"trivial", "low-risk"})
+            ),
+        }
         self.write_check()
 
     def tearDown(self) -> None:
@@ -287,6 +291,58 @@ class ApplyCommandTests(unittest.TestCase):
         self.assertTrue(result["dry_run"])
         self.assertIsNone(result["review_url"])
 
+    def test_the_summary_links_nowhere_outside_the_organisation(self) -> None:
+        """Raw HTML and off-site links in the agent's summary post as text."""
+        verdict = policy.extract_verdict(
+            verdict_text(
+                summary=(
+                    '<img src="https://e.com/b.png"> See [docs](https://e.com/d) '
+                    "and https://github.com/lfreleng-actions/repo/pull/3/files."
+                )
+            )
+        )
+        self.check = {
+            "mode": "approve",
+            **policy.check(
+                entry(), verdict, approve_tiers=frozenset({"trivial", "low-risk"})
+            ),
+        }
+        self.write_check()
+        with (
+            patch.object(
+                apply_review.pull_reads, "pull_state", return_value=live_state()
+            ),
+            patch.object(apply_review.github, "api_write", return_value={}) as write,
+        ):
+            self.apply()
+        body = write.call_args.args[2]["body"]
+        self.assertIn("<\u200bimg src=", body)
+        self.assertIn("[docs]\u200b(https:\u200b//e.com/d)", body)
+        self.assertIn(
+            "https://github.com/lfreleng-actions/repo/pull/\u200b3/files", body
+        )
+        self.assertIn(f"see the [run]({RUN_URL})", body)
+
+    def test_the_summary_cannot_open_a_code_fence(self) -> None:
+        """Opening with a fence, the summary would turn the footer into code."""
+        verdict = policy.extract_verdict(verdict_text(summary="```"))
+        self.check = {
+            "mode": "approve",
+            **policy.check(
+                entry(), verdict, approve_tiers=frozenset({"trivial", "low-risk"})
+            ),
+        }
+        self.write_check()
+        with (
+            patch.object(
+                apply_review.pull_reads, "pull_state", return_value=live_state()
+            ),
+            patch.object(apply_review.github, "api_write", return_value={}) as write,
+        ):
+            self.apply()
+        body = write.call_args.args[2]["body"]
+        self.assertIn("\n\n\u200b```\n\n---\n", body)
+
     def test_live_run_posts_one_approval(self) -> None:
         """The approval targets the checked head and carries provenance."""
         reply = {"html_url": "https://github.com/x/pull/157#pullrequestreview-1"}
@@ -306,7 +362,7 @@ class ApplyCommandTests(unittest.TestCase):
         self.assertEqual(payload["event"], "APPROVE")
         body = payload["body"]
         self.assertTrue(body.startswith(apply_review.OPENINGS["trivial"] + "\n\n"))
-        self.assertIn("\n\nFixes a typo. Thanks &#64;someone!\n\n---\n", body)
+        self.assertIn("\n\nFixes a typo. Thanks @\u200bsomeone!\n\n---\n", body)
         self.assertIn(
             f"Automated review by `{BOT}` using model `claude-opus-5.5`", body
         )
@@ -347,6 +403,28 @@ class ApplyCommandTests(unittest.TestCase):
         """A tampered or inconsistent check.json cannot drive an approval."""
         self.check["tier"] = "needs-human"
         self.write_check()
+        with (
+            patch.object(apply_review.github, "api_write") as write,
+            self.assertRaises(SystemExit),
+        ):
+            self.apply()
+        write.assert_not_called()
+
+    def test_antagonistic_files_cannot_drive_an_approval(self) -> None:
+        """A check or a selection from the antagonistic mode is refused outright."""
+        self.check["mode"] = "antagonistic"
+        self.write_check()
+        with (
+            patch.object(apply_review.github, "api_write") as write,
+            self.assertRaises(SystemExit),
+        ):
+            self.apply()
+        write.assert_not_called()
+        self.check["mode"] = "approve"
+        self.write_check()
+        (self.root / "selection.json").write_text(
+            json.dumps(selection(mode="antagonistic"))
+        )
         with (
             patch.object(apply_review.github, "api_write") as write,
             self.assertRaises(SystemExit),

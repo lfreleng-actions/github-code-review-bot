@@ -1,0 +1,12 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Linux Foundation
+
+# Bot authors the antagonistic mode hands a reviewed pull request back
+# to for a revision round, one login per line, compared as in
+# antagonistic-authors.txt. Each must also be listed there. The
+# hand-back dispatches the reusable workflow's handback_repository,
+# which must run that bot's revision rounds. The Copilot coding agent
+# has no such workflow, so it is not listed.
+
+# Code Monkey: lfreleng-actions/github-code-monkey-bot
+lf-releng-code-monkey-bot
