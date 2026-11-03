@@ -81,15 +81,23 @@ def review(
 class GitHubDouble:
     """Serve each pull request's reviews from a dict, recording the reads."""
 
-    def __init__(self, reviews: dict[int, list[dict[str, Any]]]) -> None:
-        """Remember what each pull request's listing returns."""
+    def __init__(
+        self,
+        reviews: dict[int, list[dict[str, Any]]],
+        failures: dict[int, int] | None = None,
+    ) -> None:
+        """Remember each listing, and the HTTP status of each that fails."""
         self.reviews = reviews
+        self.failures = failures or {}
         self.reads: list[str] = []
 
     def __call__(self, endpoint: str) -> list[dict[str, Any]]:
         """Answer ``api_list`` for ``repos/org/repo/pulls/N/reviews``."""
         self.reads.append(endpoint)
         number = int(endpoint.split("/pulls/")[1].split("/")[0])
+        if number in self.failures:
+            status = self.failures[number]
+            raise handback.github.GitHubError(f"HTTP {status}: ::read failed", status)
         return self.reviews.get(number, [])
 
 
@@ -101,9 +109,10 @@ class HandbacksTest(unittest.TestCase):
         report: dict[str, Any],
         chosen: dict[str, Any],
         reviews: dict[int, list[dict[str, Any]]],
+        failures: dict[int, int] | None = None,
     ) -> tuple[list[str], GitHubDouble]:
         """Run with the GitHub double; return the list and the reads it made."""
-        double = GitHubDouble(reviews)
+        double = GitHubDouble(reviews, failures)
         with patch.object(handback.github, "api_list", side_effect=double):
             return handback.handbacks(report, chosen, "org", RUN), double
 
@@ -202,12 +211,40 @@ class HandbacksTest(unittest.TestCase):
         )
         self.assertEqual(len(refs), 80)
 
+    @unittest.expectedFailure
+    def test_an_unreadable_candidate_is_skipped(self) -> None:
+        """A 404 (a private repository) or a 5xx on one candidate drops that
+        candidate with a warning; the others are still read and confirmed.
+        """
+        numbers = (1, 2, 3)
+        for status in (404, 502):
+            with (
+                self.subTest(status=status),
+                contextlib.redirect_stderr(io.StringIO()) as err,
+            ):
+                refs, double = self.run_handbacks(
+                    {"results": [result(n) for n in numbers]},
+                    selection(*(entry(n) for n in numbers)),
+                    {n: [review()] for n in numbers},
+                    {1: status},
+                )
+            self.assertEqual(refs, ["org/repo#2", "org/repo#3"])
+            self.assertEqual(len(double.reads), 3)
+            warning = err.getvalue()
+            self.assertTrue(warning.startswith("::warning::handback: org/repo#1"))
+            self.assertNotIn("::read", warning)
+
 
 class MainTest(unittest.TestCase):
     """The CLI prints exactly two output lines."""
 
     def run_list(
-        self, report: object, chosen: object, org: str = "org", run: str = str(RUN)
+        self,
+        report: object,
+        chosen: object,
+        org: str = "org",
+        run: str = str(RUN),
+        failures: dict[int, int] | None = None,
     ) -> str:
         """Run ``list`` over files in a temp tree; return stdout."""
         with tempfile.TemporaryDirectory() as tmp:
@@ -222,7 +259,7 @@ class MainTest(unittest.TestCase):
                 patch.object(
                     handback.github,
                     "api_list",
-                    side_effect=GitHubDouble({1: [review()]}),
+                    side_effect=GitHubDouble({1: [review()]}, failures),
                 ),
             ):
                 handback.main(
@@ -249,6 +286,20 @@ class MainTest(unittest.TestCase):
         self.assertEqual(
             self.run_list({"results": []}, selection()), "pulls=\ncount=0\n"
         )
+
+    @unittest.expectedFailure
+    def test_a_failed_read_lists_nothing_and_succeeds(self) -> None:
+        """A 404 or a 5xx on the only candidate gives an empty list, not exit 1."""
+        for status in (404, 503):
+            with self.subTest(status=status):
+                self.assertEqual(
+                    self.run_list(
+                        {"results": [result(1)]},
+                        selection(entry(1)),
+                        failures={1: status},
+                    ),
+                    "pulls=\ncount=0\n",
+                )
 
     def test_bad_inputs_fail(self) -> None:
         """Files that are not objects, or an owner or run that is malformed, exit."""

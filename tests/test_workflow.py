@@ -1154,6 +1154,24 @@ class HandbackContracts(ReusableWorkflowCase):
             outputs["handback_count"], "${{ steps.handback.outputs.count }}"
         )
 
+    @unittest.expectedFailure
+    def test_listing_runs_live_antagonistic_runs_after_the_uploads(self) -> None:
+        """The listing reads GitHub only when a hand-back could follow, and only
+        once the report and ledger are uploaded, so a failed read cannot cost
+        the run its record.
+        """
+        step = self.step("report", "List hand-backs")
+        self.assertEqual(
+            squash(str(step["if"])),
+            "inputs.mode == 'antagonistic' && !inputs.dry_run",
+        )
+        for upload in ("Attach run report", "Publish ledger"):
+            with self.subTest(upload=upload):
+                self.assertLess(
+                    self.position("report", upload),
+                    self.position("report", "List hand-backs"),
+                )
+
     def test_hand_back_runs_live_antagonistic_runs_with_work_alone(self) -> None:
         """Never in a dry run, never in the approve mode, never without a target."""
         job = self.jobs["handback"]
