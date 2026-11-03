@@ -15,6 +15,7 @@ hand-backs; and this App's own review of that head, read from GitHub,
 must end with the hand-back marker the trusted applier of this run
 appends. The review runner holds no App token and cannot post that
 review, and a review another run posted names that run, not this one.
+A candidate whose reviews cannot be read is skipped, never dispatched.
 """
 
 from __future__ import annotations
@@ -125,7 +126,12 @@ def marked(
 def handbacks(
     report: dict[str, Any], selection: dict[str, Any], org: str, run_id: int
 ) -> list[str]:
-    """The ``owner/repo#N`` of each nominated hand-back that GitHub confirms."""
+    """The ``owner/repo#N`` of each nominated hand-back that GitHub confirms.
+
+    A candidate whose reviews cannot be read (a private repository the
+    native token cannot see, a 5xx, a rate limit) is not confirmed: it
+    is skipped with a warning, and the rest of the list still stands.
+    """
     bot_login = selection.get("bot_login")
     if not isinstance(bot_login, str) or not bot_login:
         return []
@@ -133,8 +139,20 @@ def handbacks(
     confirmed: list[str] = []
     for repository, number in candidates(report, org):
         head = heads.get((repository, number))
-        if head is not None and marked(repository, number, bot_login, head, run_id):
-            confirmed.append(f"{repository}#{number}")
+        if head is None:
+            continue
+        ref = f"{repository}#{number}"
+        try:
+            found = marked(repository, number, bot_login, head, run_id)
+        except github.GitHubError as exc:
+            print(
+                f"::warning::handback: {ref} not handed back; its reviews"
+                f" could not be read: {github.safe_message(exc)}",
+                file=sys.stderr,
+            )
+            continue
+        if found:
+            confirmed.append(ref)
     return confirmed
 
 

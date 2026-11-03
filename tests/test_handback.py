@@ -211,7 +211,6 @@ class HandbacksTest(unittest.TestCase):
         )
         self.assertEqual(len(refs), 80)
 
-    @unittest.expectedFailure
     def test_an_unreadable_candidate_is_skipped(self) -> None:
         """A 404 (a private repository) or a 5xx on one candidate drops that
         candidate with a warning; the others are still read and confirmed.
@@ -287,7 +286,6 @@ class MainTest(unittest.TestCase):
             self.run_list({"results": []}, selection()), "pulls=\ncount=0\n"
         )
 
-    @unittest.expectedFailure
     def test_a_failed_read_lists_nothing_and_succeeds(self) -> None:
         """A 404 or a 5xx on the only candidate gives an empty list, not exit 1."""
         for status in (404, 503):
