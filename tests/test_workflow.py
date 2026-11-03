@@ -175,6 +175,40 @@ class TopLevelContracts(ReusableWorkflowCase):
         """The review job audits: the model backend is outside the allow-list."""
         self.assertEqual(self.actions("review", BLOCK_ACTION), [])
 
+    @unittest.expectedFailure
+    def test_every_allow_list_loader_passes_every_input(self) -> None:
+        """Each loader passes the baseline, supplemental and extra endpoints.
+
+        Every key is passed even when empty, so no call site silently
+        drops one; ``supplemental_required`` is derived, never an input.
+        """
+        expected = {
+            "config": "${{ inputs.harden_runner_allowlist }}",
+            "supplemental_config": (
+                "${{ inputs.harden_runner_supplemental_allowlist }}"
+            ),
+            "supplemental_required": (
+                "${{ inputs.harden_runner_supplemental_allowlist != ''"
+                " && 'true' || 'false' }}"
+            ),
+            "supplemental_unpinned": (
+                "${{ inputs.harden_runner_supplemental_unpinned && 'true' || 'false' }}"
+            ),
+            "extra_endpoints": "${{ inputs.harden_runner_extra_endpoints }}",
+        }
+        loaders = 0
+        for job in self.jobs:
+            for step in self.actions(job, BLOCK_ACTION):
+                loaders += 1
+                with self.subTest(job=job):
+                    self.assertEqual(
+                        step["if"], "inputs.harden_runner_egress == 'block'"
+                    )
+                    passed = dict(step["with"])
+                    passed.pop("allow_list_summary")
+                    self.assertEqual(passed, expected)
+        self.assertEqual(loaders, len(TRUSTED_JOBS))
+
 
 class SelectContracts(ReusableWorkflowCase):
     """The trusted select job: scoped reads, ledger, evidence and matrix."""
