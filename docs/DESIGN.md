@@ -185,11 +185,15 @@ jobs. Callers run reviewed assets with secrets or none at all: the
 testing workflow's pull request legs check out the pull request's
 own head as assets and pass no secret for this reason.
 
-`egress_allow_config` names the organisation allow-list coordinate
-for `harden-runner-block-action`; the bundled callers pin it to a
-commit. `github_app_client_id` and the two secrets reach trusted
-jobs alone, by construction of the reusable workflow: no step in the
-review job references them.
+`harden_runner_allowlist` names the organisation allow-list
+coordinate for `harden-runner-block-action`; the bundled callers pin
+it to a commit. `harden_runner_supplemental_allowlist` and
+`harden_runner_extra_endpoints` extend that list for every trusted
+job, and the action, not the workflow, enforces the pinning rule
+that `harden_runner_supplemental_unpinned` relaxes.
+`github_app_client_id` and the two secrets reach trusted jobs alone,
+by construction of the reusable workflow: no step in the review job
+references them.
 
 ### 4.3 What the design does not trust the caller with
 
@@ -420,10 +424,11 @@ path.
 ### 7.5 Egress
 
 The review job runs harden-runner in `audit` mode whatever the
-caller's `egress_policy`. The model backend, `api.githubcopilot.com`,
-is absent from the organisation allow-list, and the job holds
-nothing a block could protect beyond the model credential. §16
-records the switch to block mode as a later capability.
+caller's `harden_runner_egress`. The model backend,
+`api.githubcopilot.com`, is absent from the organisation allow-list,
+and the job holds nothing a block could protect beyond the model
+credential. §16 records the switch to block mode as a later
+capability.
 
 ## 8. The Apply Job
 
@@ -565,25 +570,28 @@ working: a typed `needs-human` result and exit 0.
 
 <!-- markdownlint-disable MD013 -->
 
-| Input                   | Default                                   | Meaning                                                                           |
-| ----------------------- | ----------------------------------------- | --------------------------------------------------------------------------------- |
-| `org`                   | required                                  | Target owner; live runs require an organisation App                               |
-| `dry_run`               | `true`                                    | Run the agent and the checks; approve nothing                                     |
-| `model`                 | `claude-opus-5.5`                         | Copilot CLI model identifier, `^[a-z0-9.-]+$`                                     |
-| `approve_tiers`         | `trivial,low-risk`                        | Tiers the run may approve: `trivial,low-risk`, `trivial` or `none`                |
-| `pull_requests`         | `''`                                      | Pull requests to review instead of scanning (§9.4)                                |
-| `repositories`          | `''`                                      | Repository names to scan; commas and/or spaces                                    |
-| `exclude_repos`         | `''`                                      | Repository names to skip; commas and/or spaces; overrides the bundled list        |
-| `max_pull_requests`     | `20`                                      | Cap after ordering; `0` lifts it to 256                                           |
-| `max_concurrent_agents` | `5`                                       | Review sessions at once, 1-30                                                     |
-| `max_runtime_minutes`   | `20`                                      | Wall-clock budget per session, 1-120                                              |
-| `reassess`              | `false`                                   | Review heads the ledger already records                                           |
-| `skip_agent`            | `false`                                   | Plumbing test: select and report without sessions                                 |
-| `egress_policy`         | `block`                                   | harden-runner policy for trusted jobs: `audit` or `block`                         |
-| `egress_allow_config`   | `''`                                      | `harden-runner-block-action` config coordinate                                    |
-| `github_app_client_id`  | `''`                                      | App client id; empty limits runs to dry-run                                       |
-| `assets_repository`     | `lfreleng-actions/github-code-review-bot` | Trusted source of prompt and scripts                                              |
-| `assets_ref`            | `''`                                      | Commit, tag or branch of the assets; empty resolves the calling workflow's commit |
+| Input                                  | Default                                   | Meaning                                                                           |
+| -------------------------------------- | ----------------------------------------- | --------------------------------------------------------------------------------- |
+| `org`                                  | required                                  | Target owner; live runs require an organisation App                               |
+| `dry_run`                              | `true`                                    | Run the agent and the checks; approve nothing                                     |
+| `model`                                | `claude-opus-5.5`                         | Copilot CLI model identifier, `^[a-z0-9.-]+$`                                     |
+| `approve_tiers`                        | `trivial,low-risk`                        | Tiers the run may approve: `trivial,low-risk`, `trivial` or `none`                |
+| `pull_requests`                        | `''`                                      | Pull requests to review instead of scanning (§9.4)                                |
+| `repositories`                         | `''`                                      | Repository names to scan; commas and/or spaces                                    |
+| `exclude_repos`                        | `''`                                      | Repository names to skip; commas and/or spaces; overrides the bundled list        |
+| `max_pull_requests`                    | `20`                                      | Cap after ordering; `0` lifts it to 256                                           |
+| `max_concurrent_agents`                | `5`                                       | Review sessions at once, 1-30                                                     |
+| `max_runtime_minutes`                  | `20`                                      | Wall-clock budget per session, 1-120                                              |
+| `reassess`                             | `false`                                   | Review heads the ledger already records                                           |
+| `skip_agent`                           | `false`                                   | Plumbing test: select and report without sessions                                 |
+| `harden_runner_egress`                 | `block`                                   | harden-runner policy for trusted jobs: `audit` or `block`                         |
+| `harden_runner_allowlist`              | `''`                                      | `harden-runner-block-action` config coordinate                                    |
+| `harden_runner_supplemental_allowlist` | `''`                                      | Extra allow-list merged with the baseline, same coordinate grammar                |
+| `harden_runner_supplemental_unpinned`  | `false`                                   | Let the supplemental list omit `@ref`; caller's organisation                      |
+| `harden_runner_extra_endpoints`        | `''`                                      | Inline `host[:port]` tokens merged into the allow-list                            |
+| `github_app_client_id`                 | `''`                                      | App client id; empty limits runs to dry-run                                       |
+| `assets_repository`                    | `lfreleng-actions/github-code-review-bot` | Trusted source of prompt and scripts                                              |
+| `assets_ref`                           | `''`                                      | Commit, tag or branch of the assets; empty resolves the calling workflow's commit |
 
 <!-- markdownlint-enable MD013 -->
 
@@ -898,7 +906,7 @@ at threshold 100.
 
 - **Block-mode egress for the review job**, once the organisation
   allow-list carries the Copilot backend. The job would then share
-  the trusted jobs' `egress_policy` rather than forcing `audit`.
+  the trusted jobs' `harden_runner_egress` rather than forcing `audit`.
 - **A supplemental notification channel** for `needs-human`
   verdicts, if humans want one beyond the run report: a digest
   issue, a chat message, or a label on the pull request. Each is a

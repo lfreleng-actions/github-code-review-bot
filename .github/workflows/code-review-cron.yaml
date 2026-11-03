@@ -146,9 +146,9 @@ jobs:
       max_pull_requests: "${{ inputs.max_pull_requests || '20' }}"
       max_concurrent_agents: "${{ inputs.max_concurrent_agents || '5' }}"
       reassess: ${{ inputs.reassess || false }}
-      egress_policy: 'block'
+      harden_runner_egress: 'block'
       # yamllint disable-line rule:line-length
-      egress_allow_config: '@6d4a65c5601afd6c2fbe52bda4b0024b132f265d'  # v0.19.0
+      harden_runner_allowlist: '@6d4a65c5601afd6c2fbe52bda4b0024b132f265d'  # v0.19.0
       # Repository-level credentials reach the trusted select and
       # apply jobs, never an action in the review job. No client id
       # permits dry-run fallback; a missing key fails token creation

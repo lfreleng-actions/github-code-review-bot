@@ -165,7 +165,8 @@ class TopLevelContracts(ReusableWorkflowCase):
                     self.assertTrue(is_action(first_action, BLOCK_ACTION))
                     harden = self.action(job, HARDEN_RUNNER)
                     self.assertEqual(
-                        harden["with"]["egress-policy"], "${{ inputs.egress_policy }}"
+                        harden["with"]["egress-policy"],
+                        "${{ inputs.harden_runner_egress }}",
                     )
                 else:
                     self.assertTrue(is_action(first_action, HARDEN_RUNNER))
@@ -175,7 +176,6 @@ class TopLevelContracts(ReusableWorkflowCase):
         """The review job audits: the model backend is outside the allow-list."""
         self.assertEqual(self.actions("review", BLOCK_ACTION), [])
 
-    @unittest.expectedFailure
     def test_every_allow_list_loader_passes_every_input(self) -> None:
         """Each loader passes the baseline, supplemental and extra endpoints.
 
@@ -645,8 +645,11 @@ class InputContracts(ReusableWorkflowCase):
                 "max_runtime_minutes",
                 "reassess",
                 "skip_agent",
-                "egress_policy",
-                "egress_allow_config",
+                "harden_runner_egress",
+                "harden_runner_allowlist",
+                "harden_runner_supplemental_allowlist",
+                "harden_runner_supplemental_unpinned",
+                "harden_runner_extra_endpoints",
                 "github_app_client_id",
                 "assets_repository",
                 "assets_ref",
@@ -663,7 +666,10 @@ class InputContracts(ReusableWorkflowCase):
         self.assertEqual(inputs["model"]["default"], "claude-opus-5.5")
         self.assertEqual(inputs["approve_tiers"]["default"], "trivial,low-risk")
         self.assertEqual(inputs["max_pull_requests"]["default"], "20")
-        self.assertEqual(inputs["egress_policy"]["default"], "block")
+        self.assertEqual(inputs["harden_runner_egress"]["default"], "block")
+        self.assertEqual(inputs["harden_runner_supplemental_allowlist"]["default"], "")
+        self.assertFalse(inputs["harden_runner_supplemental_unpinned"]["default"])
+        self.assertEqual(inputs["harden_runner_extra_endpoints"]["default"], "")
         self.assertFalse(inputs["reassess"]["default"])
         self.assertFalse(inputs["skip_agent"]["default"])
 
@@ -744,8 +750,8 @@ class CronContracts(WorkflowCase):
         )
         self.assertEqual(call["with"]["assets_repository"], "${{ github.repository }}")
         self.assertEqual(call["with"]["assets_ref"], "${{ github.sha }}")
-        self.assertEqual(call["with"]["egress_policy"], "block")
-        self.assertRegex(call["with"]["egress_allow_config"], ALLOW_CONFIG)
+        self.assertEqual(call["with"]["harden_runner_egress"], "block")
+        self.assertRegex(call["with"]["harden_runner_allowlist"], ALLOW_CONFIG)
         self.assertEqual(
             call["permissions"],
             {"pull-requests": "read", "contents": "read", "actions": "read"},
@@ -772,7 +778,7 @@ class CronContracts(WorkflowCase):
         loader = self.action("options", BLOCK_ACTION)
         self.assertEqual(
             loader["with"]["config"],
-            self.jobs["code-review"]["with"]["egress_allow_config"],
+            self.jobs["code-review"]["with"]["harden_runner_allowlist"],
         )
         self.assertEqual(loader["with"]["allow_list_summary"], "false")
         harden = self.action("options", HARDEN_RUNNER)
