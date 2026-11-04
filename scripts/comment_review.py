@@ -49,10 +49,17 @@ def run_check(args: argparse.Namespace) -> None:
     entry = files.find_entry(selection, args.key)
     verdict: dict[str, Any] | None = None
     failure: str | None = str(args.failure) if args.failure else None
+    # Whether the final message of a session whose agent step succeeded
+    # was read; a refusal of one is settled (see comments.check). The
+    # artifact uploads after a timeout or a CLI failure too, so a
+    # summary alone does not show the session completed, and a blank
+    # one is a session that left no message.
+    read = False
     if failure is None:
-        verdict, failure = files.read_verdict(
-            args.session_dir, comments.extract_verdict
-        )
+        text, failure = files.read_summary(args.session_dir)
+        if text is not None:
+            read = args.agent_outcome == "success" and bool(text.strip())
+            verdict, failure = files.parse_verdict(text, comments.extract_verdict)
     if failure is not None:
         files.note(
             SOURCE, f"no usable verdict: {github.safe_message(ValueError(failure))}"
@@ -62,6 +69,7 @@ def run_check(args: argparse.Namespace) -> None:
         verdict,
         failure=failure,
         usage=files.read_usage(args.session_dir, SOURCE),
+        read=read,
     )
     files.write_json(args.output, check)
     args.summary.parent.mkdir(parents=True, exist_ok=True)
@@ -270,6 +278,7 @@ def run_comment(args: argparse.Namespace) -> None:
         "review_url": None,
         "round": None,
         "handback": False,
+        "settled": False,
         "dry_run": bool(args.dry_run),
         "run_attempt": args.run_attempt,
         "premium_requests": check.get("premium_requests"),
@@ -311,6 +320,8 @@ def run_comment(args: argparse.Namespace) -> None:
             result["handback"] = handing_back
     elif not reasons:
         reasons.append("check found no usable verdict")
+    if check.get("commentable") is not True:
+        result["settled"] = check.get("settled") is True
     files.write_json(args.output, result)
     review_url = result["review_url"] or "-"
     print(f"comment: {result['verdict']} {repository}#{number} review={review_url}")
@@ -326,6 +337,7 @@ def build_parser() -> argparse.ArgumentParser:
     check.add_argument("--key", required=True)
     check.add_argument("--session-dir", type=Path, required=True)
     check.add_argument("--failure", default=None)
+    check.add_argument("--agent-outcome", default=None)
     check.add_argument("--output", type=Path, required=True)
     check.add_argument("--summary", type=Path, required=True)
     check.set_defaults(handler=run_check)

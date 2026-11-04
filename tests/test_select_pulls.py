@@ -1078,7 +1078,6 @@ class AntagonisticSelectionTest(SelectionCase):
         )
         return selection
 
-    @unittest.expectedFailure
     def test_a_settled_refusal_waits_for_reassess(self) -> None:
         """The report's ledger skips a settled refusal; a failure is retried."""
         self.add_bot("alpha", 1)

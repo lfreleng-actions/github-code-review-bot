@@ -50,7 +50,7 @@ DOWNLOAD = "actions/download-artifact"
 UPLOAD = "actions/upload-artifact"
 SETUP_UV = "astral-sh/setup-uv"
 REUSABLE_CALL = "$/.github/workflows/code-review.yaml"
-TRUSTED_JOBS = ("select", "apply", "report", "handback")
+TRUSTED_JOBS = ("select", "outcomes", "apply", "report", "handback")
 # Review events GitHub accepts besides COMMENT; the antagonistic path
 # must never be able to send either.
 FORBIDDEN_EVENTS = frozenset({"APPROVE", "REQUEST_CHANGES"})
@@ -665,7 +665,6 @@ class ApplyContracts(ReusableWorkflowCase):
             "${{ needs.select.outputs.evidence_id }}",
         )
 
-    @unittest.expectedFailure
     def test_a_refusal_settles_only_after_the_agent_step_succeeded(self) -> None:
         """One trusted job reads every leg's agent and upload outcome from
         GitHub's record of the run, under the names the reader looks for,

@@ -307,7 +307,6 @@ class AntagonisticReportTest(unittest.TestCase):
         self.assertIn("| ? | 3 | commented |", rendered)
         self.assertIn("| ? | ? | refused |", rendered)
 
-    @unittest.expectedFailure
     def test_a_settled_refusal_is_recorded_and_no_other(self) -> None:
         """The session's own empty verdict skips the head; a gate or failure does not."""
         results = [

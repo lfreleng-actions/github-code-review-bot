@@ -194,7 +194,6 @@ class CheckCommandTests(Tree):
             self.check()
         self.assertEqual(caught.exception.code, 1)
 
-    @unittest.expectedFailure
     def test_a_read_verdict_with_nothing_to_post_is_settled(self) -> None:
         """No JSON block, a malformed one or only malformed findings settle."""
         cases = {
@@ -211,7 +210,6 @@ class CheckCommandTests(Tree):
                 self.assertEqual(out, "commentable=false\ncomments=0\n")
                 self.assertIs(check["settled"], True)
 
-    @unittest.expectedFailure
     def test_no_message_to_read_or_a_commentable_one_is_not_settled(self) -> None:
         """A missing session or a fetch failure is retried; a posted one never settles."""
         _, check = self.check("--agent-outcome", "success")
@@ -229,7 +227,6 @@ class CheckCommandTests(Tree):
         self.assertIs(check["commentable"], True)
         self.assertIs(check["settled"], False)
 
-    @unittest.expectedFailure
     def test_an_empty_summary_is_not_settled(self) -> None:
         """A session that left no message is retried, even after success."""
         for text in ("", " \n\t\n"):
@@ -239,7 +236,6 @@ class CheckCommandTests(Tree):
                 self.assertEqual(out, "commentable=false\ncomments=0\n")
                 self.assertIs(check["settled"], False)
 
-    @unittest.expectedFailure
     def test_a_summary_from_an_unsuccessful_agent_step_is_not_settled(self) -> None:
         """A timed-out or failed session can still upload a summary; retry it."""
         (self.session / "session-summary.md").write_text("No block.\n")
@@ -840,7 +836,6 @@ class CommentCommandTests(Tree):
         self.assertEqual(result["verdict"], "refused")
         self.assertEqual(result["reasons"], ["no session summary"])
 
-    @unittest.expectedFailure
     def test_a_settled_check_yields_a_settled_refusal(self) -> None:
         """The report records this refusal, so it carries the check's flag."""
         for read in (True, False):
@@ -857,7 +852,6 @@ class CommentCommandTests(Tree):
                 self.assertEqual(result["verdict"], "refused")
                 self.assertIs(result["settled"], read)
 
-    @unittest.expectedFailure
     def test_a_gate_refusal_is_never_settled(self) -> None:
         """A draft or a moved head is looked at again, whatever the check says."""
         self.check["settled"] = True
