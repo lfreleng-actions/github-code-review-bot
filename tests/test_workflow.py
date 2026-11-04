@@ -36,6 +36,7 @@ REUSABLE = WORKFLOWS / "code-review.yaml"
 CRON = WORKFLOWS / "code-review-cron.yaml"
 ANTAGONISTIC = WORKFLOWS / "code-review-antagonistic.yaml"
 TESTING = WORKFLOWS / "testing.yaml"
+DOCUMENTATION = WORKFLOWS / "documentation.yaml"
 
 # PyYAML reads the bare mapping key ``on`` as the boolean ``True``.
 TRIGGERS = True
@@ -47,6 +48,7 @@ APP_TOKEN = "actions/create-github-app-token"
 SPLITTER = "lfreleng-actions/list-splitter-action"
 DOWNLOAD = "actions/download-artifact"
 UPLOAD = "actions/upload-artifact"
+SETUP_UV = "astral-sh/setup-uv"
 REUSABLE_CALL = "$/.github/workflows/code-review.yaml"
 TRUSTED_JOBS = ("select", "apply", "report", "handback")
 # Review events GitHub accepts besides COMMENT; the antagonistic path
@@ -61,6 +63,21 @@ COMMENT_PATH = (
     "review_comments",
     "review_files",
 )
+
+# setup-uv looks up a Python interpreter and reads uv settings in its
+# working directory, so every setup runs from the runner's temporary
+# directory with uv's own discovery of either switched off.
+SETUP_UV_WITH = {"enable-cache": False, "working-directory": "${{ runner.temp }}"}
+SETUP_UV_ENV = {"UV_NO_CONFIG": "1", "UV_SYSTEM_PYTHON": "1", "UV_NO_PROJECT": "1"}
+# The select job's uv steps, which testing.yaml runs as exact copies
+# against interpreters planted in the workspace.
+SELECT_UV_STEPS = (
+    "Set up uv",
+    "Install zizmor",
+    "Pre-flight: workflow contracts and audit",
+)
+ISOLATION_JOB = "uv-isolation"
+PLANTED_MARK = '"$RUNNER_TEMP/planted-interpreter-ran"'
 
 COMMIT_PIN = re.compile(r"^[^@\s]+@[0-9a-f]{40}$")
 SECRET_REFERENCE = re.compile(r"secrets\.[A-Za-z0-9_]+")
@@ -90,6 +107,12 @@ def is_action(step: dict[str, Any], action: str) -> bool:
 def dumped(node: object) -> str:
     """Serialise a YAML subtree so a regex can scan every value in it."""
     return json.dumps(node, sort_keys=True)
+
+
+def load_jobs(path: Path) -> dict[str, dict[str, Any]]:
+    """Parse one workflow file and return its jobs."""
+    loaded = cast(dict[str, Any], yaml.safe_load(path.read_text(encoding="utf-8")))
+    return cast(dict[str, dict[str, Any]], loaded["jobs"])
 
 
 def module_tree(name: str) -> ast.Module:
@@ -435,6 +458,25 @@ class PreflightContracts(ReusableWorkflowCase):
         self.assertLess(
             self.position("apply", "Pre-flight: write token identity"),
             self.position("apply", "Apply verdict"),
+        )
+
+    @unittest.expectedFailure
+    def test_preflight_python_comes_from_outside_the_workspace(self) -> None:
+        """The gate's interpreter and environment are chosen outside the checkout."""
+        step = self.step("select", "Pre-flight: workflow contracts and audit")
+        self.assertEqual(
+            step["env"],
+            {"UV_PROJECT_ENVIRONMENT": "${{ runner.temp }}/preflight-venv"},
+        )
+        run = flatten(step["run"])
+        find = (
+            'cd "$RUNNER_TEMP" && UV_NO_CONFIG=1 uv python find --system --no-project'
+        )
+        lookup = run[: run.index("cd review-assets")]
+        self.assertIn(find, lookup)
+        self.assertIn("exit 1", lookup)
+        self.assertIn(
+            'uv run --locked --python "$python" python -B scripts/preflight.py', run
         )
 
     def test_zizmor_is_pinned(self) -> None:
@@ -1010,6 +1052,45 @@ class TestingContracts(WorkflowCase):
         run = self.step("regression", "Run offline regression suite")["run"]
         self.assertIn("uv run --locked python -B -m unittest discover -s tests", run)
 
+    @unittest.expectedFailure
+    def test_isolation_job_runs_copies_of_the_select_uv_steps(self) -> None:
+        """The isolation job proves the select job's own uv steps, unedited."""
+        select = cast(list[dict[str, Any]], load_jobs(REUSABLE)["select"]["steps"])
+        for name in SELECT_UV_STEPS:
+            with self.subTest(step=name):
+                originals = [s for s in select if s.get("name") == name]
+                self.assertEqual(len(originals), 1)
+                self.assertEqual(self.step(ISOLATION_JOB, name), originals[0])
+
+    @unittest.expectedFailure
+    def test_isolation_job_fails_when_a_planted_interpreter_runs(self) -> None:
+        """Interpreters planted in the workspace and assets must never run."""
+        self.assertEqual(self.jobs[ISOLATION_JOB]["permissions"], {"contents": "read"})
+        checkout = self.action(ISOLATION_JOB, CHECKOUT)
+        self.assertEqual(checkout["with"]["path"], "review-assets")
+        plant = flatten(self.step(ISOLATION_JOB, "Plant workspace interpreters")["run"])
+        for needle in (
+            'for dir in "$GITHUB_WORKSPACE" "$GITHUB_WORKSPACE/review-assets"',
+            "/.venv/bin/python",
+            "/.venv/pyvenv.cfg",
+            "/.python-version",
+            '\'required-version = "==0.0.1"\' > "$GITHUB_WORKSPACE/uv.toml"',
+            f"mark={PLANTED_MARK}",
+        ):
+            with self.subTest(needle=needle):
+                self.assertIn(needle, plant)
+        check = self.step(ISOLATION_JOB, "Check no planted interpreter ran")
+        self.assertEqual(check["if"], "always()")
+        self.assertIn(f"mark={PLANTED_MARK}", flatten(check["run"]))
+        order = [
+            self.steps(ISOLATION_JOB).index(checkout),
+            self.position(ISOLATION_JOB, "Plant workspace interpreters"),
+            *(self.position(ISOLATION_JOB, name) for name in SELECT_UV_STEPS),
+            self.position(ISOLATION_JOB, "Check no planted interpreter ran"),
+        ]
+        self.assertEqual(order, sorted(order))
+        self.assertEqual(order[-1], len(self.steps(ISOLATION_JOB)) - 1)
+
     def test_caller_steps_are_pinned(self) -> None:
         """Runner steps name commits."""
         self.assert_pinned_steps()
@@ -1268,6 +1349,27 @@ class CommentPathContracts(unittest.TestCase):
             and isinstance(node.value, ast.Constant)
         ]
         self.assertEqual(events, ["COMMENT"])
+
+
+class SetupUvContracts(unittest.TestCase):
+    """No uv setup picks a Python or a uv setting from the workspace."""
+
+    @unittest.expectedFailure
+    def test_every_setup_uv_step_runs_outside_the_workspace(self) -> None:
+        """Every setup-uv step runs in the runner's temp directory, config off."""
+        for path in (REUSABLE, TESTING, DOCUMENTATION):
+            setups = [
+                (job, step)
+                for job, body in load_jobs(path).items()
+                for step in cast(list[dict[str, Any]], body.get("steps", []))
+                if is_action(step, SETUP_UV)
+            ]
+            with self.subTest(workflow=path.name):
+                self.assertTrue(setups)
+            for job, step in setups:
+                with self.subTest(workflow=path.name, job=job):
+                    self.assertEqual(step.get("with"), SETUP_UV_WITH)
+                    self.assertEqual(step.get("env"), SETUP_UV_ENV)
 
 
 if __name__ == "__main__":
