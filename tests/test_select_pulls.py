@@ -25,6 +25,7 @@ changes = import_module("pull_changes")
 select = import_module("select_pulls")
 rules = import_module("selection_rules")
 outputs = import_module("selection_outputs")
+report = import_module("review_report")
 
 HEAD = "a" * 40
 BASE = "b" * 40
@@ -1061,7 +1062,9 @@ class AntagonisticSelectionTest(SelectionCase):
         node.update(overrides)
         self.gh.pulls[(f"org/{repo}", number)] = pull_node(repo, number, **node)
 
-    def run_antagonistic(self, *extra: str) -> dict[str, Any]:
+    def run_antagonistic(
+        self, *extra: str, entries: list[dict[str, Any]] | None = None
+    ) -> dict[str, Any]:
         """Run the selection in the antagonistic mode; return selection.json."""
         selection, _, _ = self.run_main(
             "--mode",
@@ -1071,8 +1074,41 @@ class AntagonisticSelectionTest(SelectionCase):
             "--bot-authors-file",
             str(self.authors),
             *extra,
+            entries=entries,
         )
         return selection
+
+    @unittest.expectedFailure
+    def test_a_settled_refusal_waits_for_reassess(self) -> None:
+        """The report's ledger skips a settled refusal; a failure is retried."""
+        self.add_bot("alpha", 1)
+        self.add_bot("beta", 2)
+        results = [
+            {
+                "repository": f"org/{repo}",
+                "number": number,
+                "head_sha": HEAD,
+                "verdict": verdict,
+                "tier": None,
+                "dry_run": False,
+                "settled": True,
+            }
+            for repo, number, verdict in (
+                ("alpha", 1, "refused"),
+                ("beta", 2, "failed"),
+            )
+        ]
+        entries = report.build_ledger(
+            ledger.empty_ledger(), results, 7, "antagonistic"
+        )["entries"]
+        selection = self.run_antagonistic(entries=entries)
+        self.assertEqual([e["key"] for e in selection["pull_requests"]], ["beta-2"])
+        self.assertEqual(selection["skip_counts"]["already_assessed"], 1)
+        self.gh.calls.clear()
+        selection = self.run_antagonistic("--reassess", entries=entries)
+        self.assertEqual(
+            [e["key"] for e in selection["pull_requests"]], ["alpha-1", "beta-2"]
+        )
 
     def test_listed_bots_kept_humans_and_other_bots_skipped(self) -> None:
         """Search applies the author rule with the inverse sense of approve."""

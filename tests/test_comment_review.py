@@ -194,6 +194,63 @@ class CheckCommandTests(Tree):
             self.check()
         self.assertEqual(caught.exception.code, 1)
 
+    @unittest.expectedFailure
+    def test_a_read_verdict_with_nothing_to_post_is_settled(self) -> None:
+        """No JSON block, a malformed one or only malformed findings settle."""
+        cases = {
+            "no block": "I read the diff and stopped.\n",
+            "malformed block": 'Done.\n\n```json\n{"schema": 1,\n```\n',
+            "malformed findings": verdict_text(
+                comments=[{"path": "fetch.py", "line": 0, "severity": "nit"}]
+            ),
+        }
+        for name, text in cases.items():
+            with self.subTest(name):
+                (self.session / "session-summary.md").write_text(text)
+                out, check = self.check("--agent-outcome", "success")
+                self.assertEqual(out, "commentable=false\ncomments=0\n")
+                self.assertIs(check["settled"], True)
+
+    @unittest.expectedFailure
+    def test_no_message_to_read_or_a_commentable_one_is_not_settled(self) -> None:
+        """A missing session or a fetch failure is retried; a posted one never settles."""
+        _, check = self.check("--agent-outcome", "success")
+        self.assertIs(check["settled"], False)
+        (self.session / "session-summary.md").write_text("No block.\n")
+        _, check = self.check(
+            "--agent-outcome",
+            "success",
+            "--failure",
+            "the review job produced no session",
+        )
+        self.assertIs(check["settled"], False)
+        (self.session / "session-summary.md").write_text(verdict_text())
+        _, check = self.check("--agent-outcome", "success")
+        self.assertIs(check["commentable"], True)
+        self.assertIs(check["settled"], False)
+
+    @unittest.expectedFailure
+    def test_an_empty_summary_is_not_settled(self) -> None:
+        """A session that left no message is retried, even after success."""
+        for text in ("", " \n\t\n"):
+            with self.subTest(text=text):
+                (self.session / "session-summary.md").write_text(text)
+                out, check = self.check("--agent-outcome", "success")
+                self.assertEqual(out, "commentable=false\ncomments=0\n")
+                self.assertIs(check["settled"], False)
+
+    @unittest.expectedFailure
+    def test_a_summary_from_an_unsuccessful_agent_step_is_not_settled(self) -> None:
+        """A timed-out or failed session can still upload a summary; retry it."""
+        (self.session / "session-summary.md").write_text("No block.\n")
+        for outcome in ("failure", "cancelled", "unknown", ""):
+            with self.subTest(outcome=outcome):
+                out, check = self.check("--agent-outcome", outcome)
+                self.assertEqual(out, "commentable=false\ncomments=0\n")
+                self.assertIs(check["settled"], False)
+        _, check = self.check()
+        self.assertIs(check["settled"], False)
+
 
 class CommentCommandTests(Tree):
     """The live gates and the single COMMENT review."""
@@ -782,6 +839,38 @@ class CommentCommandTests(Tree):
         self.write.assert_not_called()
         self.assertEqual(result["verdict"], "refused")
         self.assertEqual(result["reasons"], ["no session summary"])
+
+    @unittest.expectedFailure
+    def test_a_settled_check_yields_a_settled_refusal(self) -> None:
+        """The report records this refusal, so it carries the check's flag."""
+        for read in (True, False):
+            self.check = comments.check(
+                entry(), None, failure="the final fenced block must be json", read=read
+            )
+            self.write_check()
+            with (
+                self.subTest(read=read),
+                patch.object(comment_review.pull_reads, "pull_state") as state,
+            ):
+                result = self.comment()
+                state.assert_not_called()
+                self.assertEqual(result["verdict"], "refused")
+                self.assertIs(result["settled"], read)
+
+    @unittest.expectedFailure
+    def test_a_gate_refusal_is_never_settled(self) -> None:
+        """A draft or a moved head is looked at again, whatever the check says."""
+        self.check["settled"] = True
+        self.write_check()
+        with patch.object(
+            comment_review.pull_reads,
+            "pull_state",
+            return_value=live_state(is_draft=True),
+        ):
+            result = self.comment()
+        self.write.assert_not_called()
+        self.assertEqual(result["verdict"], "refused")
+        self.assertIs(result["settled"], False)
 
     def test_unplaced_findings_go_in_the_body_and_malformed_ones_are_counted(
         self,
