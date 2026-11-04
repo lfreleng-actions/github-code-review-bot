@@ -25,20 +25,68 @@ from pull_reads import (
 )
 
 
-def pull_files(repository: str, number: int) -> tuple[list[dict[str, Any]], int, bool]:
-    """Read the changed files with bounded patches.
+def pull_comparison(
+    repository: str, base_sha: str, head_sha: str
+) -> tuple[list[dict[str, Any]], int, bool, list[dict[str, Any]]]:
+    """Read the changed files and commits of one fixed comparison.
 
-    Returns the files, the total patch bytes GitHub reported, and
-    whether the change exceeds what a review session may receive;
-    once it does the files read so far are returned as they stand.
+    The pull request's own files and commits listings follow its live
+    head and base, so a push or a retarget undone between two reads
+    would leave another comparison's diff under the selected SHAs. The
+    three-dot compare names both ends by SHA and diffs from their merge
+    base, as the pull request does, so what it returns belongs to the
+    selected comparison whatever the pull request does meanwhile.
+
+    Returns the files, the total patch bytes GitHub reported, whether
+    the change exceeds what a review session may receive, and the
+    commits. GitHub lists at most 300 files for a comparison, above
+    ``MAX_FILES``, so a longer list is still reported too large.
     """
-    context = f"{repository}#{number} file"
-    entries = github.api_list(f"repos/{repository}/pulls/{number}/files?per_page=100")
+    context = f"{repository} {base_sha[:12]}...{head_sha[:12]}"
+    endpoint = f"repos/{repository}/compare/{base_sha}...{head_sha}?per_page=100"
+    pages = github.decode_response(
+        github.run_gh(["api", endpoint, "--paginate", "--slurp"])
+    )
+    if not isinstance(pages, list) or not pages:
+        raise github.GitHubError(f"{context}: expected paginated comparison pages")
+    file_entries: list[Any] = []
+    commit_entries: list[Any] = []
+    for index, page in enumerate(cast("list[Any]", pages)):
+        data = require_object(page, context)
+        # GitHub lists the files on the first page alone.
+        file_entries.extend(page_list(data, "files", context, required=index == 0))
+        commit_entries.extend(page_list(data, "commits", context, required=True))
+    files, diff_bytes, too_large = bounded_files(file_entries, f"{context} file")
+    commits = [commit_entry(entry, f"{context} commit") for entry in commit_entries]
+    return files, diff_bytes, too_large, commits
+
+
+def page_list(
+    page: dict[str, Any], key: str, context: str, *, required: bool
+) -> list[Any]:
+    """One list field of a comparison page; absent is empty unless required."""
+    value = page.get(key)
+    if value is None and not required:
+        return []
+    if not isinstance(value, list):
+        raise github.GitHubError(f"{context}: missing or invalid '{key}'")
+    return cast("list[Any]", value)
+
+
+def bounded_files(
+    entries: list[Any], context: str
+) -> tuple[list[dict[str, Any]], int, bool]:
+    """Bound the changed files' patches and flag a change too large to review.
+
+    Once the change is too large the files read so far are returned as
+    they stand.
+    """
     files: list[dict[str, Any]] = []
     diff_bytes = 0
-    for entry in entries:
+    for item in entries:
         if len(files) >= MAX_FILES:
             return files, diff_bytes, True
+        entry = require_object(item, context)
         raw_patch = optional_str(entry.get("patch"), context)
         size = len(raw_patch.encode("utf-8")) if raw_patch is not None else 0
         diff_bytes += size
@@ -62,35 +110,28 @@ def pull_files(repository: str, number: int) -> tuple[list[dict[str, Any]], int,
     return files, diff_bytes, False
 
 
-def pull_commits(repository: str, number: int) -> list[dict[str, Any]]:
-    """Read the commits with bounded messages and their verification flag."""
-    context = f"{repository}#{number} commit"
-    commits: list[dict[str, Any]] = []
-    for entry in github.api_list(
-        f"repos/{repository}/pulls/{number}/commits?per_page=100"
-    ):
-        detail = require_object(entry.get("commit"), context)
-        message = detail.get("message")
-        if not isinstance(message, str):
-            raise github.GitHubError(f"{context}: missing or invalid 'message'")
-        verification = detail.get("verification")
-        # The author is null when the commit email matches no account.
-        author = entry.get("author")
-        login = (
-            cast("dict[str, Any]", author).get("login")
-            if isinstance(author, dict)
-            else None
-        )
-        commits.append(
-            {
-                "sha": github.require_sha(entry, "sha", context),
-                "message": truncate_utf8(message, MAX_MESSAGE_BYTES),
-                "verified": isinstance(verification, dict)
-                and cast("dict[str, Any]", verification).get("verified") is True,
-                "author": login if isinstance(login, str) else None,
-            }
-        )
-    return commits
+def commit_entry(item: Any, context: str) -> dict[str, Any]:
+    """One commit with a bounded message and its verification flag."""
+    entry = require_object(item, context)
+    detail = require_object(entry.get("commit"), context)
+    message = detail.get("message")
+    if not isinstance(message, str):
+        raise github.GitHubError(f"{context}: missing or invalid 'message'")
+    verification = detail.get("verification")
+    # The author is null when the commit email matches no account.
+    author = entry.get("author")
+    login = (
+        cast("dict[str, Any]", author).get("login")
+        if isinstance(author, dict)
+        else None
+    )
+    return {
+        "sha": github.require_sha(entry, "sha", context),
+        "message": truncate_utf8(message, MAX_MESSAGE_BYTES),
+        "verified": isinstance(verification, dict)
+        and cast("dict[str, Any]", verification).get("verified") is True,
+        "author": login if isinstance(login, str) else None,
+    }
 
 
 def pull_reviews(repository: str, number: int) -> list[dict[str, Any]]:

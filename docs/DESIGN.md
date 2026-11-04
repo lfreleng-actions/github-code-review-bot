@@ -295,6 +295,7 @@ records a count for every reason, zero included:
 | `ci_none`            | No status check rollup at all; approve mode alone                                                                                                                  |
 | `already_assessed`   | The ledger holds this head (§6); `reassess` bypasses                                                                                                               |
 | `too_large`          | More than 200 files or more than 512 KiB of patch                                                                                                                  |
+| `moved`              | The head SHA, base ref or base SHA changed after the selection read the state                                                                                      |
 | `cap`                | Over `max_pull_requests`, oldest `updated_at` first                                                                                                                |
 
 <!-- markdownlint-enable MD013 -->
@@ -302,8 +303,24 @@ records a count for every reason, zero included:
 The `repository` and author rules run on the search result
 before any further read. One GraphQL query per survivor then
 supplies the state the remaining rules inspect; the diff and commit
-reads, which cost the most, run for survivors alone. The default cap
-is 20 pull requests; `0` lifts it to the matrix limit of 256.
+read, which costs the most, runs for survivors alone. It reads the
+three-dot comparison of the state's base SHA and head SHA, not the
+pull request's own listings, which follow its live head and base: a
+push or a retarget undone between two reads would otherwise leave
+another comparison's diff under the recorded SHAs, unseen by any
+re-read. The base SHA is the base branch's current tip
+(`baseRef.target.oid`), not the pull request's `baseRefOid`, which
+GitHub updates on its own schedule and which can lag the branch:
+compared from that older SHA, a head that merged newer base commits
+diffs from an older merge base, so a change it makes to the newer
+content, such as removing a `permissions: {}` block the base added,
+nets out of the diff and reaches neither the vetoes nor the agent.
+The read fails when the base branch no longer exists. A last, small
+query then reads the head SHA, base ref and base SHA again: if any
+changed, the apply job would refuse the entry, so the selection
+skips the pull request as `moved` and the next run takes it.
+The default cap is 20 pull requests; `0` lifts it to the matrix
+limit of 256.
 
 Named pull requests bypass the exclusion list and the search,
 nothing else. Every other rule applies to them, so an operator
@@ -313,11 +330,12 @@ same failure during a scan is an operational error. Both fail the
 run.
 
 For each survivor `selection.json` records the head SHA the review
-job will check out, the reviews and checks the apply job will
-re-verify, and the bounded diff the agent reads: every changed file
-with its unified patch (64 KiB per file, marked `patch_truncated`
-when cut), the body (64 KiB), and each commit message (4 KiB). The
-`key` is `<repo_name>-<number>` and names every per-entry artifact.
+job will check out, the base ref and base SHA its diff runs from,
+the reviews and checks the apply job will re-verify, and the bounded
+diff the agent reads: every changed file with its unified patch
+(64 KiB per file, marked `patch_truncated` when cut), the body
+(64 KiB), and each commit message (4 KiB). The `key` is
+`<repo_name>-<number>` and names every per-entry artifact.
 
 ## 6. The Ledger
 
@@ -553,13 +571,33 @@ cannot approve anything.
 
 `apply` re-reads the pull request with the same GraphQL query the
 selection used and refuses, with a reason each, unless the pull
-request is `OPEN`, not a draft, at the same head SHA, with CI
-`success`, with no reviewer requesting changes, with no Copilot
-review pending, with no unresolved Copilot thread, and with no
-standing approval on the head. The selection skipped approved pull
+request is `OPEN`, not a draft, at the same head SHA, against the
+same base ref at the same base SHA, with CI `success`, with no
+reviewer requesting changes, with no Copilot review pending, with no
+unresolved Copilot thread, and with no standing approval on the
+head. The selection skipped approved pull
 requests, so an approval arriving here landed during the run, the
 bot's own from an overlapping attempt included; a second one is
 noise.
+
+A pull request's diff is a comparison of two refs, and the selection
+read the evidence the check corroborated, its files and patches, for
+one pair: `check.json` carries the entry's `base_ref` and
+`base_sha` beside `head_sha`, and `apply` fails on a check that lacks
+them. Retargeting the pull request changes its diff without a push, so a
+new base ref refuses with "base retargeted". The base SHA is the
+base branch's tip (§5), so any commit landing on the base ref between
+the selection and `apply` refuses too, with "base moved". Most such
+moves leave the diff alone, but a force push of the base, or a merge
+of the head's own commits into it, moves the merge base and changes
+what the diff shows; telling the cases apart would take another read
+and a rule harder to audit than "both ends unchanged". In the
+approve mode the refusal is a `needs-human` result, which the ledger
+records for the head as it does every other live refusal, so on a
+busy base branch an approvable pull request now and then waits for a
+human, a new head or `reassess`; the antagonistic mode writes a
+`refused` result, which the ledger does not record, and the next run
+reviews the pull request again.
 
 With `--dry-run` the verdict is `would-approve` and `apply` writes
 nothing. Otherwise `apply` posts one review:
@@ -909,6 +947,8 @@ requires; the next select job fetches the newest five by that name.
 | Verdict names another repository, number or head         | Target mismatch                            | Offline check refuses; `needs-human` with the reason                                                               |
 | Agent claims `trivial` on a code change                  | Classifier disagrees                       | Tier drops to `needs-human`; non-trivial paths listed                                                              |
 | Head moves between select and apply                      | Live re-read sees a new SHA                | `needs-human` with "head moved"; the new head is a new key next run                                                |
+| Base retargeted or moved between select and apply        | Live re-read sees a new base ref or SHA    | `needs-human` with "base retargeted" or "base moved"; the reviewed diff is not the live one (§8.3)                 |
+| Head or base changes while selection reads the diff      | Selection reads the diff by base and head  | The entry keeps the selected diff; an identity re-read skips a lasting change as `moved` for the next run          |
 | Human approves or requests changes during the run        | Live re-read sees it                       | `needs-human`; no duplicate or conflicting review                                                                  |
 | App token mint fails                                     | Apply step skipped                         | Fallback writes a `failed` result, a report row, no ledger entry; next run retries                                 |
 | GitHub unreachable during the write                      | `apply` exits 1                            | Same fallback; the run shows the failed entry                                                                      |
@@ -1152,8 +1192,10 @@ holds the folded logins that mode reviews, and is empty in the
 approve mode. `skip_counts` carries every reason from §5. `skipped` has
 one row per skipped pull request; `title` may be `null` when the
 skip happened before a read. Entries sort by repository and number.
-`files` comes from REST `pulls/{n}/files`; a file GitHub returns
-without a patch has `patch: null`.
+`base_sha` is the base branch's tip at the state read, not the pull
+request's `baseRefOid` (§5). `files` and `commits` come from REST
+`compare/{base_sha}...{head_sha}`, the comparison the entry records;
+a file GitHub returns without a patch has `patch: null`.
 
 ### 18.2 `matrix.json` (select to workflow)
 
@@ -1238,7 +1280,8 @@ first 25 comments; a malformed one costs itself alone (§19.5).
 {
   "schema": 1, "mode": "approve", "key": "repo-157",
   "repository": "lfreleng-actions/repo", "number": 157,
-  "head_sha": "<40 hex>", "url": "...", "title": "...",
+  "head_sha": "<40 hex>", "base_ref": "main", "base_sha": "<40 hex>",
+  "url": "...", "title": "...",
   "agent_tier": "trivial",
   "tier": "needs-human",
   "approvable": false,
@@ -1252,11 +1295,13 @@ first 25 comments; a malformed one costs itself alone (§19.5).
 }
 ```
 
-`tier` is the effective tier after corroboration and vetoes;
-`approvable` is `tier in approve_tiers`. `agent_tier` is `null` when
-the check could read no verdict; `tier` is then `needs-human` and `reasons`
-says why. `premium_requests` and `agent_seconds` come from
-`usage.json` when present and finite.
+`head_sha`, `base_ref` and `base_sha` copy the selection entry: the
+comparison the selection read the evidence for, which the live gate
+re-checks (§8.3). `tier` is the effective tier after corroboration
+and vetoes; `approvable` is `tier in approve_tiers`. `agent_tier` is
+`null` when the check could read no verdict; `tier` is then
+`needs-human` and `reasons` says why. `premium_requests` and
+`agent_seconds` come from `usage.json` when present and finite.
 
 The antagonistic `check.json` has no `tier` and no `approvable`:
 
@@ -1264,7 +1309,8 @@ The antagonistic `check.json` has no `tier` and no `approvable`:
 {
   "schema": 1, "mode": "antagonistic", "key": "repo-157",
   "repository": "lfreleng-actions/repo", "number": 157,
-  "head_sha": "<40 hex>", "url": "...", "title": "...",
+  "head_sha": "<40 hex>", "base_ref": "main", "base_sha": "<40 hex>",
+  "url": "...", "title": "...",
   "commentable": true, "reasons": [],
   "summary": "sanitised, bounded",
   "comments": [{"path": "...", "line": 44, "start_line": 40,
@@ -1505,10 +1551,11 @@ left out of the inline set and why.
 The write token mints on the same terms as §8.3, gated on
 `commentable` and the mode. `comment_review.py comment` re-reads the
 pull request and refuses, with a reason each, unless the pull request
-is `OPEN`, not a draft, at the same head, still by a listed bot, and
-carries no review from this App on that head, reading the full
-review history as the selection does. The apply job holds one lock
-per pull request across live antagonistic runs
+is `OPEN`, not a draft, at the same head against the same base ref
+and base SHA (§8.3; the check anchored its comments on that diff),
+still by a listed bot, and carries no review from this App on that
+head, reading the full review history as the selection does. The
+apply job holds one lock per pull request across live antagonistic runs
 (`code-review-antagonistic-apply-<repository>-<number>`), whatever
 the head, so a second dispatch naming the pull request reaches that
 re-read once the first has posted, and reads the first's

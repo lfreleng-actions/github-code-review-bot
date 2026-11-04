@@ -412,6 +412,8 @@ def check(
         "repository": str(entry.get("repository", "")),
         "number": entry.get("number"),
         "head_sha": str(entry.get("head_sha", "")),
+        "base_ref": str(entry.get("base_ref", "")),
+        "base_sha": str(entry.get("base_sha", "")),
         "url": str(entry.get("url", "")),
         "title": sanitise(entry.get("title"), MAX_TITLE_CHARS),
         "agent_tier": None if verdict is None else verdict["tier"],

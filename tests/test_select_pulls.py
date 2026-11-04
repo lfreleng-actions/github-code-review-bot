@@ -30,9 +30,7 @@ HEAD = "a" * 40
 BASE = "b" * 40
 OTHER = "c" * 40
 PATCH = "@@ -1 +1 @@\n-a\n+b"
-REST_PATH_RE = re.compile(
-    r"repos/([^/]+/[^/]+)/pulls/(\d+)/(files|commits|reviews)\?per_page=100"
-)
+REST_PATH_RE = re.compile(r"repos/([^/]+/[^/]+)/pulls/(\d+)/reviews\?per_page=100")
 COMPARE_PATH_RE = re.compile(
     r"repos/([^/]+/[^/]+)/compare/([0-9a-f]{40})\.\.\.([0-9a-f]{40})\?per_page=100"
 )
@@ -84,7 +82,6 @@ def pull_node(repo: str, number: int, **overrides: Any) -> dict[str, Any]:
         "headRefOid": HEAD,
         "headRefName": "fix/thing",
         "baseRefName": "main",
-        "baseRefOid": BASE,
         "baseRef": {"target": {"oid": BASE}},
         "isCrossRepository": False,
         "headRepository": {"nameWithOwner": f"org/{repo}"},
@@ -162,7 +159,6 @@ class FakeGitHub:
         self.search: list[dict[str, Any]] = []
         self.pulls: dict[tuple[str, int], dict[str, Any]] = {}
         self.archived: set[str] = set()
-        self.files: dict[tuple[str, int], list[dict[str, Any]]] = {}
         # Files and commits per comparison, keyed by repository, base SHA
         # and head SHA; an unlisted comparison has one file and one commit.
         self.diffs: dict[
@@ -206,16 +202,7 @@ class FakeGitHub:
         if found is None:
             raise AssertionError(f"unexpected gh call {args}")
         key = (found.group(1), int(found.group(2)))
-        if found.group(3) == "reviews":
-            return json.dumps([self.reviews.get(key, self.rest_reviews(key))])
-        # The pull request's own listings follow its live head and the
-        # base branch's tip.
-        node = self.pulls[key]
-        base = node["baseRef"]["target"]["oid"]
-        files, commits = self.diff(key[0], base, node["headRefOid"])
-        if found.group(3) == "files":
-            return json.dumps([self.files.get(key, files)])
-        return json.dumps([commits])
+        return json.dumps([self.reviews.get(key, self.rest_reviews(key))])
 
     def diff(
         self, repository: str, base: str, head: str
@@ -651,21 +638,18 @@ class SkipRulesTest(SelectionCase):
         self.assertEqual(selection["skip_counts"]["already_assessed"], 0)
 
     def test_too_large(self) -> None:
-        """A diff over the byte cap is skipped after the files read."""
+        """A diff over the byte cap is skipped after the comparison read."""
         self.gh.add("alpha", 1)
-        self.gh.files[("org/alpha", 1)] = [
-            rest_file("big.txt", "x" * (reads.MAX_DIFF_BYTES + 1))
-        ]
+        self.gh.diffs[("org/alpha", BASE, HEAD)] = (
+            [rest_file("big.txt", "x" * (reads.MAX_DIFF_BYTES + 1))],
+            [rest_commit()],
+        )
         selection, _, _ = self.run_main()
         self.assert_only_skip(selection, "too_large")
-        self.assertFalse(
-            any("/commits" in args[1] for args in self.gh.calls if len(args) > 1)
-        )
 
-    @unittest.expectedFailure
     def test_a_comparison_that_moves_during_the_reads_is_skipped(self) -> None:
-        """Files read across a push or a retarget belong to no one comparison."""
-        read_commits = changes.pull_commits
+        """A pull request that moves after the state read is left to the next run."""
+        read_comparison = changes.pull_comparison
         cases: list[dict[str, Any]] = [
             {"headRefOid": OTHER},
             {"baseRefName": "release"},
@@ -674,22 +658,24 @@ class SkipRulesTest(SelectionCase):
         for overrides in cases:
 
             def moving(
-                repository: str, number: int, moved: dict[str, Any] = overrides
+                repository: str,
+                base_sha: str,
+                head_sha: str,
+                moved: dict[str, Any] = overrides,
             ) -> Any:
-                """Read the commits, then move the pull request."""
-                self.gh.pulls[(repository, number)].update(moved)
-                return read_commits(repository, number)
+                """Read the comparison, then move the pull request."""
+                self.gh.pulls[(repository, 1)].update(moved)
+                return read_comparison(repository, base_sha, head_sha)
 
             with (
                 self.subTest(overrides=overrides),
-                patch.object(changes, "pull_commits", side_effect=moving),
+                patch.object(changes, "pull_comparison", side_effect=moving),
             ):
                 self.install(FakeGitHub())
                 self.gh.add("alpha", 1)
                 selection, _, _ = self.run_main()
                 self.assert_only_skip(selection, "moved")
 
-    @unittest.expectedFailure
     def test_a_change_and_restore_during_the_reads_keeps_the_selected_diff(
         self,
     ) -> None:
@@ -740,7 +726,6 @@ class SkipRulesTest(SelectionCase):
                 self.assertEqual([f["path"] for f in entry["files"]], ["README.md"])
                 self.assertEqual([c["sha"] for c in entry["commits"]], [HEAD])
 
-    @unittest.expectedFailure
     def test_a_stale_base_sha_cannot_hide_a_revert_of_newer_base_content(
         self,
     ) -> None:

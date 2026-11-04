@@ -80,7 +80,7 @@ def validated_check(path: Path) -> dict[str, Any]:
     if not github.REPO_RE.fullmatch(repository):
         raise ValueError("check.json repository is malformed")
     github.require_int(check, "number", "check.json")
-    github.require_sha(check, "head_sha", "check.json")
+    files.require_comparison(check, "check.json")
     capped = check.get("capped")
     if type(capped) is not int or capped < 0:
         raise ValueError("check.json capped is not a count")
@@ -151,8 +151,7 @@ def gate_reasons(
         reasons.append(f"pull request is {state.get('state')}")
     if state.get("is_draft"):
         reasons.append("pull request is a draft")
-    if state.get("head_sha") != check["head_sha"]:
-        reasons.append(f"head moved to {str(state.get('head_sha'))[:12]}")
+    reasons.extend(files.comparison_reasons(check, state))
     authors = [
         str(login)
         for login in cast("list[Any]", selection.get("bot_authors") or [])

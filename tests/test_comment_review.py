@@ -432,7 +432,6 @@ class CommentCommandTests(Tree):
                 self.assertEqual(len(result["reasons"]), 1)
                 self.assertIn(expected, result["reasons"][0])
 
-    @unittest.expectedFailure
     def test_a_changed_base_refuses(self) -> None:
         """Anchors computed against one comparison are not posted on another."""
         cases: list[tuple[dict[str, Any], str]] = [
@@ -457,7 +456,6 @@ class CommentCommandTests(Tree):
                 self.assertEqual(result["verdict"], "refused")
                 self.assertEqual(result["reasons"], [expected])
 
-    @unittest.expectedFailure
     def test_a_check_without_its_base_is_refused(self) -> None:
         """A check.json that does not name the reviewed base cannot comment."""
         for key in ("base_ref", "base_sha"):

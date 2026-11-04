@@ -281,7 +281,6 @@ class ApplyCommandTests(unittest.TestCase):
                 self.assertEqual(len(result["reasons"]), 1)
                 self.assertIn(expected, result["reasons"][0])
 
-    @unittest.expectedFailure
     def test_a_retargeted_base_refuses(self) -> None:
         """The same head against another base ref is a diff nobody reviewed."""
         with (
@@ -297,7 +296,6 @@ class ApplyCommandTests(unittest.TestCase):
         self.assertEqual(result["verdict"], "needs-human")
         self.assertEqual(result["reasons"], ["base retargeted from release to main"])
 
-    @unittest.expectedFailure
     def test_a_moved_base_refuses(self) -> None:
         """The same head and base ref at a new base SHA is not the reviewed diff."""
         with (
@@ -313,7 +311,6 @@ class ApplyCommandTests(unittest.TestCase):
         self.assertEqual(result["verdict"], "needs-human")
         self.assertEqual(result["reasons"], [f"base release moved to {MOVED[:12]}"])
 
-    @unittest.expectedFailure
     def test_a_check_without_its_base_is_refused(self) -> None:
         """A check.json that does not name the reviewed base cannot approve."""
         for key in ("base_ref", "base_sha"):
