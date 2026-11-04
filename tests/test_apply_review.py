@@ -22,6 +22,7 @@ policy = import_module("review_policy")
 
 HEAD = "a" * 40
 MOVED = "b" * 40
+BASE = "c" * 40
 REPO = "lfreleng-actions/repo"
 BOT = "lf-releng-code-review-bot[bot]"
 RUN_URL = "https://github.com/lfreleng-actions/bot/actions/runs/1"
@@ -34,6 +35,8 @@ def entry() -> dict[str, Any]:
         "repository": REPO,
         "number": 157,
         "head_sha": HEAD,
+        "base_ref": "release",
+        "base_sha": BASE,
         "url": "https://github.com/lfreleng-actions/repo/pull/157",
         "title": "Docs: Fix a typo",
         "files": [
@@ -84,6 +87,8 @@ def live_state(**overrides: Any) -> dict[str, Any]:
         "state": "OPEN",
         "is_draft": False,
         "head_sha": HEAD,
+        "base_ref": "release",
+        "base_sha": BASE,
         "ci": "success",
         "changes_requested": False,
         "approved_by": [],
@@ -275,6 +280,55 @@ class ApplyCommandTests(unittest.TestCase):
                 self.assertEqual(result["verdict"], "needs-human")
                 self.assertEqual(len(result["reasons"]), 1)
                 self.assertIn(expected, result["reasons"][0])
+
+    @unittest.expectedFailure
+    def test_a_retargeted_base_refuses(self) -> None:
+        """The same head against another base ref is a diff nobody reviewed."""
+        with (
+            patch.object(
+                apply_review.pull_reads,
+                "pull_state",
+                return_value=live_state(base_ref="main", base_sha=MOVED),
+            ),
+            patch.object(apply_review.github, "api_write") as write,
+        ):
+            result = self.apply()
+        write.assert_not_called()
+        self.assertEqual(result["verdict"], "needs-human")
+        self.assertEqual(result["reasons"], ["base retargeted from release to main"])
+
+    @unittest.expectedFailure
+    def test_a_moved_base_refuses(self) -> None:
+        """The same head and base ref at a new base SHA is not the reviewed diff."""
+        with (
+            patch.object(
+                apply_review.pull_reads,
+                "pull_state",
+                return_value=live_state(base_sha=MOVED),
+            ),
+            patch.object(apply_review.github, "api_write") as write,
+        ):
+            result = self.apply()
+        write.assert_not_called()
+        self.assertEqual(result["verdict"], "needs-human")
+        self.assertEqual(result["reasons"], [f"base release moved to {MOVED[:12]}"])
+
+    @unittest.expectedFailure
+    def test_a_check_without_its_base_is_refused(self) -> None:
+        """A check.json that does not name the reviewed base cannot approve."""
+        for key in ("base_ref", "base_sha"):
+            check = {k: v for k, v in self.check.items() if k != key}
+            (self.root / "check.json").write_text(json.dumps(check))
+            with (
+                self.subTest(key=key),
+                patch.object(
+                    apply_review.pull_reads, "pull_state", return_value=live_state()
+                ),
+                patch.object(apply_review.github, "api_write") as write,
+                self.assertRaises(SystemExit),
+            ):
+                self.apply()
+            write.assert_not_called()
 
     def test_dry_run_reads_live_state_but_does_not_write(self) -> None:
         """A dry run reports what a live run would have hit, then stops."""

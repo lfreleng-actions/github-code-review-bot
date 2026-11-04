@@ -23,6 +23,7 @@ markdown = import_module("comment_markdown")
 
 HEAD = "a" * 40
 MOVED = "b" * 40
+BASE = "c" * 40
 REPO = "lfreleng-actions/repo"
 BOT = "lf-releng-antagonistic-review-bot[bot]"
 RUN_URL = "https://github.com/lfreleng-actions/bot/actions/runs/1"
@@ -37,6 +38,8 @@ def entry() -> dict[str, Any]:
         "repository": REPO,
         "number": 157,
         "head_sha": HEAD,
+        "base_ref": "release",
+        "base_sha": BASE,
         "url": "https://github.com/lfreleng-actions/repo/pull/157",
         "title": "Fix: Retry the fetch",
         "author": "lf-releng-code-monkey-bot",
@@ -90,6 +93,8 @@ def live_state(**overrides: Any) -> dict[str, Any]:
         "state": "OPEN",
         "is_draft": False,
         "head_sha": HEAD,
+        "base_ref": "release",
+        "base_sha": BASE,
         "author": {"login": "lf-releng-code-monkey-bot", "is_bot": True},
         "reviews": [],
         "ci": "pending",
@@ -426,6 +431,48 @@ class CommentCommandTests(Tree):
                 self.assertEqual(result["verdict"], "refused")
                 self.assertEqual(len(result["reasons"]), 1)
                 self.assertIn(expected, result["reasons"][0])
+
+    @unittest.expectedFailure
+    def test_a_changed_base_refuses(self) -> None:
+        """Anchors computed against one comparison are not posted on another."""
+        cases: list[tuple[dict[str, Any], str]] = [
+            (
+                {"base_ref": "main", "base_sha": MOVED},
+                "base retargeted from release to main",
+            ),
+            ({"base_sha": MOVED}, f"base release moved to {MOVED[:12]}"),
+        ]
+        for overrides, expected in cases:
+            self.replies = [{}]
+            with (
+                self.subTest(overrides=overrides),
+                patch.object(
+                    comment_review.pull_reads,
+                    "pull_state",
+                    return_value=live_state(**overrides),
+                ),
+            ):
+                result = self.comment()
+                self.write.assert_not_called()
+                self.assertEqual(result["verdict"], "refused")
+                self.assertEqual(result["reasons"], [expected])
+
+    @unittest.expectedFailure
+    def test_a_check_without_its_base_is_refused(self) -> None:
+        """A check.json that does not name the reviewed base cannot comment."""
+        for key in ("base_ref", "base_sha"):
+            check = {k: v for k, v in self.check.items() if k != key}
+            (self.root / "check.json").write_text(json.dumps(check))
+            self.replies = [{}]
+            with (
+                self.subTest(key=key),
+                patch.object(
+                    comment_review.pull_reads, "pull_state", return_value=live_state()
+                ),
+                self.assertRaises(SystemExit),
+            ):
+                self.comment()
+            self.write.assert_not_called()
 
     def test_a_review_of_this_head_anywhere_in_the_history_refuses(self) -> None:
         """The full history decides, so a review the state window misses counts."""

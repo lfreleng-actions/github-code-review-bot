@@ -86,6 +86,7 @@ def pull_node(**overrides: Any) -> dict[str, Any]:
         "headRefName": "fix/thing",
         "baseRefName": "main",
         "baseRefOid": BASE,
+        "baseRef": {"target": {"oid": BASE}},
         "isCrossRepository": True,
         "headRepository": {"nameWithOwner": "alice/alpha"},
         "labels": {"nodes": [{"name": "bug"}]},
@@ -533,6 +534,64 @@ class PullStateTest(ReadsCase):
         for index, node in enumerate(bad_nodes):
             with self.subTest(index=index), self.assertRaises(github.GitHubError):
                 self.state_of(node)
+
+
+class PullStateBaseTest(ReadsCase):
+    """``pull_state`` takes the base SHA from the base branch's tip."""
+
+    @unittest.expectedFailure
+    def test_base_sha_is_the_base_branch_tip(self) -> None:
+        """A stale recorded base SHA is ignored in favour of the branch tip.
+
+        GitHub's ``baseRefOid`` can lag the base branch. Compared from
+        it, a head that merged newer base content and then removed some
+        of it would show no removal at all.
+        """
+        state = self.state_of(pull_node(baseRefOid=OLD_HEAD))
+        self.assertEqual(state["base_sha"], BASE)
+
+    @unittest.expectedFailure
+    def test_a_missing_or_malformed_base_branch_raises(self) -> None:
+        """A deleted base branch or a malformed tip is an error, not a match."""
+        for base in (None, "main", {"target": None}, {"target": {"oid": "short"}}):
+            with self.subTest(base=base), self.assertRaises(github.GitHubError):
+                self.state_of(pull_node(baseRef=base))
+
+
+class PullIdentityTest(ReadsCase):
+    """``pull_identity`` reads the two ends of the comparison and nothing else."""
+
+    def identity_of(self, node: dict[str, Any] | None, **kwargs: Any) -> dict[str, str]:
+        """Run ``pull_identity`` against one canned reply."""
+        with patch.object(github, "run_gh", return_value=reply(node, **kwargs)) as gh:
+            identity = reads.pull_identity("org/alpha", 7)
+        gh.assert_called_once()
+        self.assertIs(gh.call_args.kwargs.get("read"), True)
+        return identity
+
+    @unittest.expectedFailure
+    def test_extracts_the_comparison(self) -> None:
+        """The head SHA, base ref and base SHA come back under the state's keys."""
+        self.assertEqual(
+            self.identity_of(pull_node(baseRefOid=OLD_HEAD)),
+            {"head_sha": HEAD, "base_ref": "main", "base_sha": BASE},
+        )
+
+    @unittest.expectedFailure
+    def test_absent_or_invalid_fields_raise(self) -> None:
+        """A missing target or a malformed end is an error, not a match."""
+        cases: list[tuple[dict[str, Any] | None, dict[str, Any]]] = [
+            (pull_node(), {"repository": None}),
+            (None, {}),
+            (pull_node(headRefOid="short"), {}),
+            (pull_node(baseRefName=""), {}),
+            (pull_node(baseRef=None), {}),
+            (pull_node(baseRef={"target": {"oid": "short"}}), {}),
+        ]
+        for node, kwargs in cases:
+            with self.subTest(node=node, kwargs=kwargs):
+                with self.assertRaises(github.GitHubError):
+                    self.identity_of(node, **kwargs)
 
 
 def rest_file(
