@@ -50,7 +50,7 @@ DOWNLOAD = "actions/download-artifact"
 UPLOAD = "actions/upload-artifact"
 SETUP_UV = "astral-sh/setup-uv"
 REUSABLE_CALL = "$/.github/workflows/code-review.yaml"
-TRUSTED_JOBS = ("select", "apply", "report", "handback")
+TRUSTED_JOBS = ("select", "outcomes", "apply", "report", "handback")
 # Review events GitHub accepts besides COMMENT; the antagonistic path
 # must never be able to send either.
 FORBIDDEN_EVENTS = frozenset({"APPROVE", "REQUEST_CHANGES"})
@@ -621,7 +621,7 @@ class ApplyContracts(ReusableWorkflowCase):
     def test_apply_runs_for_every_entry_after_review(self) -> None:
         """Failed review entries still get a verdict; cancellation stops everything."""
         job = self.jobs["apply"]
-        self.assertEqual(job["needs"], ["select", "review"])
+        self.assertLessEqual({"select", "review"}, set(job["needs"]))
         condition = squash(str(job["if"]))
         self.assertIn("!cancelled()", condition)
         self.assertIn("needs.select.result == 'success'", condition)
@@ -663,6 +663,63 @@ class ApplyContracts(ReusableWorkflowCase):
         self.assertEqual(
             downloads[0]["with"]["artifact-ids"],
             "${{ needs.select.outputs.evidence_id }}",
+        )
+
+    def test_a_refusal_settles_only_after_the_agent_step_succeeded(self) -> None:
+        """One trusted job reads every leg's agent and upload outcome from
+        GitHub's record of the run, under the names the reader looks for,
+        and each applier looks its own key up in that map: no leg lists
+        the run's jobs itself.
+        """
+        self.assertEqual(self.jobs["review"]["name"], "Review (${{ matrix.key }})")
+        self.assertEqual(
+            self.step("review", "agent")["name"], "Run review agent (Copilot)"
+        )
+        self.step("review", "Preserve session output")
+        constants = string_constants(module_tree("agent_outcome"))
+        self.assertIn("Review ({})", constants)
+        self.assertIn("Run review agent (Copilot)", constants)
+        self.assertIn("Preserve session output", constants)
+
+        job = self.jobs["outcomes"]
+        self.assertEqual(job["needs"], ["select", "review"])
+        condition = squash(str(job["if"]))
+        self.assertIn("!cancelled()", condition)
+        self.assertIn("needs.select.result == 'success'", condition)
+        self.assertIn("needs.select.outputs.run_agent == 'true'", condition)
+        self.assertIn("inputs.mode == 'antagonistic'", condition)
+        self.assertEqual(job["permissions"], {"actions": "read", "contents": "read"})
+        self.assertEqual(
+            job["outputs"], {"outcomes": "${{ steps.agent-outcome.outputs.outcomes }}"}
+        )
+        outcome = self.step("outcomes", "agent-outcome")
+        self.assertEqual(outcome["env"]["GH_TOKEN"], "${{ github.token }}")
+        self.assertEqual(outcome["env"]["RUN_ID"], "${{ github.run_id }}")
+        run = flatten(outcome["run"])
+        self.assertIn("review-assets/scripts/agent_outcome.py", run)
+        self.assertIn("--selection evidence/selection.json", run)
+        self.assertLess(
+            self.position("outcomes", "Verify evidence bytes"),
+            self.position("outcomes", "agent-outcome"),
+        )
+
+        self.assertEqual(self.jobs["apply"]["needs"], ["select", "review", "outcomes"])
+        for step in self.steps("apply"):
+            with self.subTest(step=step.get("name")):
+                self.assertNotIn("agent_outcome.py", flatten(str(step.get("run", ""))))
+        check = self.step("apply", "Check verdict offline")
+        self.assertEqual(
+            check["env"]["AGENT_OUTCOMES"], "${{ needs.outcomes.outputs.outcomes }}"
+        )
+        run = flatten(check["run"])
+        self.assertIn(
+            'outcome="$(jq -rn --arg key "$KEY" --arg map "$AGENT_OUTCOMES"', run
+        )
+        self.assertLess(run.index('outcome="$(jq'), run.index('case "$MODE" in'))
+        self.assertIn(
+            "antagonistic) python3 review-assets/scripts/comment_review.py check"
+            ' --agent-outcome "$outcome"',
+            run,
         )
 
     def test_write_token_is_minted_for_one_repository_on_the_live_path(self) -> None:

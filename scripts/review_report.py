@@ -30,15 +30,16 @@ from review_policy import defuse
 
 SCHEMA = 1
 # Per mode: the verdicts a result may carry, and those that make a head
-# a skip next run (see ledger.record). A refused antagonistic review is
-# looked at again, as is any failure.
+# a skip next run (see ledger.record). An antagonistic refusal counts
+# only when settled (see recordable); a gate refusal and any failure
+# are looked at again.
 VERDICTS_BY_MODE = {
     "approve": ("approved", "would-approve", "needs-human", "failed"),
     "antagonistic": ("commented", "would-comment", "refused", "failed"),
 }
 RECORDED_BY_MODE = {
     "approve": frozenset({"approved", "would-approve", "needs-human"}),
-    "antagonistic": frozenset({"commented", "would-comment"}),
+    "antagonistic": frozenset({"commented", "would-comment", "refused"}),
 }
 MAX_RESULT_BYTES = 1024 * 1024
 LINE_LIMIT = 120
@@ -217,12 +218,24 @@ def spend(results: list[dict[str, Any]]) -> tuple[float, int]:
     return round(requests, 2), seconds
 
 
+def recordable(result: dict[str, Any]) -> bool:
+    """Whether a result may enter the ledger at all.
+
+    A refusal is recorded only when the applier marked it settled: the
+    session's own verdict gave nothing to post, and a second paid
+    session reads the same head with the same prompt. A gate refusal
+    (a draft, a moved head) is left out, so the head is looked at again.
+    """
+    return result.get("verdict") != "refused" or result.get("settled") is True
+
+
 def build_ledger(
     prior: dict[str, Any], results: list[dict[str, Any]], run_id: int, mode: str
 ) -> dict[str, Any]:
     """The prior ledger plus this run's assessments."""
     for result in results:
-        ledger.record(prior, result, run_id=run_id, recorded=RECORDED_BY_MODE[mode])
+        if recordable(result):
+            ledger.record(prior, result, run_id=run_id, recorded=RECORDED_BY_MODE[mode])
     return prior
 
 

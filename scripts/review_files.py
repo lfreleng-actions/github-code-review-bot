@@ -90,10 +90,8 @@ def comparison_reasons(check: dict[str, Any], state: dict[str, Any]) -> list[str
     return reasons
 
 
-def read_verdict(
-    session_dir: Path, extract: Callable[[str], dict[str, Any]]
-) -> tuple[dict[str, Any] | None, str | None]:
-    """Read the agent's verdict with ``extract``, or explain why none could be read."""
+def read_summary(session_dir: Path) -> tuple[str | None, str | None]:
+    """Read the session's final message, or explain why it could not be read."""
     path = session_dir / "session-summary.md"
     if not path.exists():
         return None, "no session summary"
@@ -101,10 +99,27 @@ def read_verdict(
         content = evidence.read_regular(path, evidence.MAX_SUMMARY_BYTES)
     except (OSError, ValueError) as exc:
         return None, f"session summary unreadable: {github.safe_message(exc)}"
+    return content.decode("utf-8", errors="replace"), None
+
+
+def parse_verdict(
+    text: str, extract: Callable[[str], dict[str, Any]]
+) -> tuple[dict[str, Any] | None, str | None]:
+    """Extract the verdict from a read summary, or explain why it is unusable."""
     try:
-        return extract(content.decode("utf-8", errors="replace")), None
+        return extract(text), None
     except Rejected as exc:
         return None, str(exc)
+
+
+def read_verdict(
+    session_dir: Path, extract: Callable[[str], dict[str, Any]]
+) -> tuple[dict[str, Any] | None, str | None]:
+    """Read the agent's verdict with ``extract``, or explain why none could be read."""
+    text, failure = read_summary(session_dir)
+    if text is None:
+        return None, failure
+    return parse_verdict(text, extract)
 
 
 def read_usage(session_dir: Path, source: str) -> dict[str, Any] | None:

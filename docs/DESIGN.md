@@ -169,6 +169,11 @@ token for that one repository and submits the approval, or in the
 antagonistic mode the comment review (§19.5). Every path ends in a
 typed `result.json`.
 
+In the antagonistic mode one **outcomes** job runs between the two,
+once every review entry ends. It lists the run's jobs once and hands
+the apply matrix a map from each key to its leg's session outcome
+(§18.5).
+
 The **report** job gathers every result, renders the step summary,
 writes `report.json` and `report.md`, and publishes the new ledger.
 
@@ -1006,6 +1011,7 @@ tools/copilot-cli/                       pinned CLI lockfile
 scripts/bot_github.py                    gh wrapper, REST and GraphQL
 scripts/bot_evidence.py                  evidence digests, file caps
 scripts/artifact_fetch.py                bounded artifact extraction
+scripts/agent_outcome.py                 review legs' session outcomes (§18.5)
 scripts/ledger.py                        run-to-run memory (§6)
 scripts/pull_reads.py                    GitHub reads for selection
 scripts/pull_changes.py                  bounded files and commits
@@ -1037,10 +1043,10 @@ template first, then copy; never patch a copy alone. The same holds
 for their test files.
 
 The suite holds one test file per script module that owns a
-contract (`apply_review`, `artifact_fetch`, `bot_evidence`,
-`bot_github`, `comment_review`, `handback`, `ledger`, `preflight`,
-`pull_reads`, `review_comments`, `review_policy`, `review_report`,
-`select_pulls`)
+contract (`agent_outcome`, `apply_review`, `artifact_fetch`,
+`bot_evidence`, `bot_github`, `comment_review`, `handback`, `ledger`,
+`preflight`, `pull_reads`, `review_comments`, `review_policy`,
+`review_report`, `select_pulls`)
 plus `test_workflow.py`, which
 pins the workflow facts the scripts rely on: which job holds which
 credential, which step gates the write token, the artifact
@@ -1332,7 +1338,7 @@ The antagonistic `check.json` has no `tier` and no `approvable`:
   "repository": "lfreleng-actions/repo", "number": 157,
   "head_sha": "<40 hex>", "base_ref": "main", "base_sha": "<40 hex>",
   "url": "...", "title": "...",
-  "commentable": true, "reasons": [],
+  "commentable": true, "settled": false, "reasons": [],
   "summary": "sanitised, bounded",
   "comments": [{"path": "...", "line": 44, "start_line": 40,
                 "severity": "blocker", "body": "sanitised"}],
@@ -1351,6 +1357,24 @@ one reason per malformed comment and `capped` counts those past the
 cap. `commentable` is false with no usable verdict, a verdict about
 another target, or one whose every comment read failed validation
 while its summary flags no defect (`summary_finding`).
+`settled` is true when the check read the final message of a session
+whose agent step succeeded and it still gave nothing to post: no
+verdict block, a malformed one, another target, or every finding
+malformed. A second paid session reads the same head with the same
+prompt, so the report records the refusal (§19.6). The session
+artifact uploads after a timeout or a CLI failure too, and a rerun
+whose upload failed leaves the earlier attempt's artifact in place.
+So once every review entry ends, one trusted `outcomes` job runs
+`agent_outcome.py`, which lists the run's jobs once with the
+job-native token, under `actions: read`, and publishes a map from
+each selected key to its leg's outcome, `success` when both the agent
+step and the `Preserve session output` upload succeeded. Each
+applier looks its own key up in that map, so the listing is never
+repeated per pull request, and the check settles on `success` alone;
+any doubt, a skipped or failed `outcomes` job included, reads as
+`unknown`. A missing or refused artifact, a session that left no
+summary or a blank one, and an agent step or upload that did not
+succeed stay unsettled, and the next run retries them.
 
 ### 18.6 `result.json` (apply, per pull request; trusted)
 
@@ -1381,14 +1405,16 @@ An antagonistic `result.json` has the same identity, `reasons`,
 {
   "verdict": "commented",
   "comment_count": 3, "dropped_count": 1, "capped_count": 0,
-  "inline": true
+  "inline": true, "settled": false
 }
 ```
 
 `verdict` is `commented`, `would-comment`, `refused` or `failed`.
 `comment_count` counts inline and unplaced findings together;
 `inline` is `true` when GitHub placed the comments, `false` when they
-went into the body, and `null` when nothing posted.
+went into the body, and `null` when nothing posted. `settled` copies
+the check's flag onto a refusal of a check that was not commentable;
+a refusal at a live gate is never settled.
 
 ### 18.7 `report.json` and `report.md` (report; trusted)
 
@@ -1629,8 +1655,12 @@ not their own.
 The report counts `commented`, `would-comment`, `refused` and
 `failed`, and shows `comment_count` (§18.6) where the approve mode
 shows a tier. The ledger is `code-review-antagonistic-ledger` and records
-`commented` and `would-comment`: the next run looks again at a
-refused or failed head. Keeping it apart from the approve ledger
+`commented`, `would-comment` and a settled `refused` (§18.5): a
+session whose own verdict gave nothing to post is not paid for again
+on that head until it moves or a run sets `reassess`. The next run
+looks again at a head refused at a live gate (a draft, a moved head)
+and at a failed one, so a GitHub or network failure retries.
+Keeping this ledger apart from the approve one
 means neither mode's memory can skip a head for the other. For live
 runs the ledger is a cache in front of `already_reviewed`, which
 reads the posted review itself; dry runs post nothing, so they rely

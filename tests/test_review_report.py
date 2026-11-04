@@ -307,6 +307,22 @@ class AntagonisticReportTest(unittest.TestCase):
         self.assertIn("| ? | 3 | commented |", rendered)
         self.assertIn("| ? | ? | refused |", rendered)
 
+    def test_a_settled_refusal_is_recorded_and_no_other(self) -> None:
+        """The session's own empty verdict skips the head; a gate or failure does not."""
+        results = [
+            make_result(key="a-1", number=1, verdict="refused", settled=True),
+            make_result(key="b-2", number=2, verdict="refused", settled=False),
+            make_result(key="c-3", number=3, verdict="refused"),
+            make_result(key="d-4", number=4, verdict="failed", settled=True),
+        ]
+        ledger_after = report.build_ledger(
+            ledger.empty_ledger(), results, 42, "antagonistic"
+        )
+        self.assertEqual(
+            [(e["number"], e["verdict"]) for e in ledger_after["entries"]],
+            [(1, "refused")],
+        )
+
     def test_each_mode_refuses_the_other_modes_verdicts(self) -> None:
         """An approval cannot hide in an antagonistic report, nor the reverse."""
         with self.assertRaises(ValueError):

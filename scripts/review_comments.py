@@ -235,6 +235,7 @@ def check(
     *,
     failure: str | None = None,
     usage: dict[str, Any] | None = None,
+    read: bool = False,
 ) -> dict[str, Any]:
     """Produce the antagonistic check.json for one pull request.
 
@@ -243,6 +244,14 @@ def check(
     would read as a clean review, and the review would stop the next run
     looking at the head again. A flagged summary is a finding in its
     own right, so it posts and can go back for revision.
+
+    ``read`` says the final message of a session whose agent step
+    succeeded was read. A refusal of one is ``settled``: the agent ran
+    to completion and its own verdict, absent, malformed or empty, gave
+    nothing to post, so the report records it and the head waits for a
+    push or ``reassess``. A session that left no message, an agent step
+    that failed or timed out, or an artifact the fetch refused, stays
+    unsettled and is looked at again.
     """
     inline: list[dict[str, Any]] = []
     unplaced: list[dict[str, Any]] = []
@@ -278,6 +287,7 @@ def check(
         "url": str(entry.get("url", "")),
         "title": policy.sanitise(entry.get("title"), policy.MAX_TITLE_CHARS),
         "commentable": commentable,
+        "settled": read and not commentable,
         "reasons": reasons,
         "summary": "" if verdict is None else verdict["summary"],
         "summary_finding": verdict is not None and verdict["summary_finding"] is True,
