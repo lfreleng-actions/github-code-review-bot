@@ -460,7 +460,6 @@ class PreflightContracts(ReusableWorkflowCase):
             self.position("apply", "Apply verdict"),
         )
 
-    @unittest.expectedFailure
     def test_preflight_python_comes_from_outside_the_workspace(self) -> None:
         """The gate's interpreter and environment are chosen outside the checkout."""
         step = self.step("select", "Pre-flight: workflow contracts and audit")
@@ -1052,7 +1051,6 @@ class TestingContracts(WorkflowCase):
         run = self.step("regression", "Run offline regression suite")["run"]
         self.assertIn("uv run --locked python -B -m unittest discover -s tests", run)
 
-    @unittest.expectedFailure
     def test_isolation_job_runs_copies_of_the_select_uv_steps(self) -> None:
         """The isolation job proves the select job's own uv steps, unedited."""
         select = cast(list[dict[str, Any]], load_jobs(REUSABLE)["select"]["steps"])
@@ -1062,7 +1060,6 @@ class TestingContracts(WorkflowCase):
                 self.assertEqual(len(originals), 1)
                 self.assertEqual(self.step(ISOLATION_JOB, name), originals[0])
 
-    @unittest.expectedFailure
     def test_isolation_job_fails_when_a_planted_interpreter_runs(self) -> None:
         """Interpreters planted in the workspace and assets must never run."""
         self.assertEqual(self.jobs[ISOLATION_JOB]["permissions"], {"contents": "read"})
@@ -1354,7 +1351,6 @@ class CommentPathContracts(unittest.TestCase):
 class SetupUvContracts(unittest.TestCase):
     """No uv setup picks a Python or a uv setting from the workspace."""
 
-    @unittest.expectedFailure
     def test_every_setup_uv_step_runs_outside_the_workspace(self) -> None:
         """Every setup-uv step runs in the runner's temp directory, config off."""
         for path in (REUSABLE, TESTING, DOCUMENTATION):

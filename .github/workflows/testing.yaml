@@ -138,10 +138,101 @@ jobs:
       - name: 'Install uv'
         # yamllint disable-line rule:line-length
         uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2  # v10.3.3
+        env:
+          UV_NO_CONFIG: '1'
+          UV_SYSTEM_PYTHON: '1'
+          UV_NO_PROJECT: '1'
         with:
           enable-cache: false
+          working-directory: "${{ runner.temp }}"
       - name: 'Run offline regression suite'
         run: uv run --locked python -B -m unittest discover -s tests -v
+
+  # The select job's uv steps must not run a Python interpreter that
+  # files in the workspace chose (docs/DESIGN.md section 4.4). This
+  # plants interpreters that record any run where uv would look for
+  # them, runs exact copies of those steps (the contract tests keep
+  # them identical), and fails if a planted interpreter ran.
+  uv-isolation:
+    name: 'uv interpreter isolation'
+    runs-on: 'ubuntu-latest'
+    timeout-minutes: 15
+    permissions:
+      contents: read  # Check out this repository as the assets
+    steps:
+      - name: 'Harden runner'
+        # yamllint disable-line rule:line-length
+        uses: step-security/harden-runner@46b06cea07f9e64621fdf066ba77ac6915163d43  # v2.22.3
+        with:
+          egress-policy: 'audit'
+
+      - name: 'Checkout trusted assets'
+        # yamllint disable-line rule:line-length
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: 'review-assets'
+          persist-credentials: false
+
+      # A .venv and a .python-version in the workspace root and in the
+      # assets checkout, each naming an interpreter that appends its
+      # own path to the mark and then runs the system Python; and a
+      # uv.toml in the root demanding a uv release that cannot run.
+      - name: 'Plant workspace interpreters'
+        run: |
+          mark="$RUNNER_TEMP/planted-interpreter-ran"
+          real="$(command -v python3)"
+          version="$("$real" -c \
+            'import sys; print("%d.%d.%d" % sys.version_info[:3])')"
+          for dir in "$GITHUB_WORKSPACE" "$GITHUB_WORKSPACE/review-assets"; do
+            mkdir -p "$dir/.venv/bin" "$dir/.planted"
+            for python in "$dir/.venv/bin/python" "$dir/.planted/python"; do
+              printf '#!/bin/sh\necho %q >> %q\nexec %q "$@"\n' \
+                "$python" "$mark" "$real" > "$python"
+              chmod +x "$python"
+            done
+            ln -s python "$dir/.venv/bin/python3"
+            printf 'home = %s\nversion = %s\n' \
+              "$(dirname "$real")" "$version" > "$dir/.venv/pyvenv.cfg"
+            echo "$dir/.planted/python" > "$dir/.python-version"
+          done
+          echo 'required-version = "==0.0.1"' > "$GITHUB_WORKSPACE/uv.toml"
+
+      - name: 'Set up uv'
+        # yamllint disable-line rule:line-length
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2  # v10.3.3
+        env:
+          UV_NO_CONFIG: '1'
+          UV_SYSTEM_PYTHON: '1'
+          UV_NO_PROJECT: '1'
+        with:
+          enable-cache: false
+          working-directory: "${{ runner.temp }}"
+
+      - name: 'Install zizmor'
+        run: uv tool install 'zizmor==1.30.1'
+
+      - name: 'Pre-flight: workflow contracts and audit'
+        env:
+          UV_PROJECT_ENVIRONMENT: "${{ runner.temp }}/preflight-venv"
+        run: |
+          python="$(cd "$RUNNER_TEMP" &&
+            UV_NO_CONFIG=1 uv python find --system --no-project)" &&
+            [ -n "$python" ] || {
+            echo '::error::No system Python found for the pre-flight'
+            exit 1; }
+          cd review-assets
+          uv run --locked --python "$python" \
+            python -B scripts/preflight.py workflow --root .
+
+      - name: 'Check no planted interpreter ran'
+        if: always()
+        run: |
+          mark="$RUNNER_TEMP/planted-interpreter-ran"
+          if [ -e "$mark" ]; then
+            echo '::error::A planted workspace interpreter ran'
+            cat "$mark"
+            exit 1
+          fi
 
   docs:
     name: 'Documentation build'
@@ -166,8 +257,13 @@ jobs:
       - name: 'Install uv'
         # yamllint disable-line rule:line-length
         uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2  # v10.3.3
+        env:
+          UV_NO_CONFIG: '1'
+          UV_SYSTEM_PYTHON: '1'
+          UV_NO_PROJECT: '1'
         with:
           enable-cache: false
+          working-directory: "${{ runner.temp }}"
 
       # Proves the site builds from the pull request head without
       # granting it any Pages permission; the deployment lives in

@@ -259,6 +259,20 @@ The gate is not where policy lives. It verifies that the
 workflow still has the shape the design and tests describe; the
 design and tests remain the place to change that shape.
 
+The gate's own interpreter is the workflow's choice, never the
+workspace's. `setup-uv` looks up a Python interpreter, and reads
+`required-version` and `cache-dir`, in its working directory, so
+every `setup-uv` step runs from `runner.temp` with `UV_NO_CONFIG`,
+`UV_SYSTEM_PYTHON` and `UV_NO_PROJECT` set. In project mode
+`uv run` executes the interpreter of an existing project
+environment, a `.venv` in the assets checkout or that of a uv
+workspace above it, even when given `--python`. So the gate
+finds a system interpreter from `RUNNER_TEMP`, fails without one,
+passes it with `--python`, and builds the environment under
+`RUNNER_TEMP` through `UV_PROJECT_ENVIRONMENT`. Nothing writes to
+the workspace before these steps today; this keeps the gate from
+depending on that.
+
 ## 5. Selection
 
 The select job runs `select_pulls.py` with the App read token, or
@@ -760,6 +774,12 @@ assets, block-mode egress and a cap of three; their namespaces
 also prove invocations never collide. A `regression` job runs the
 offline suite with `uv run --locked`, and a `docs` job builds the
 site with `mkdocs build --strict` without any Pages permission.
+A `uv-isolation` job plants a `.venv` and a `.python-version` in the
+workspace root and the assets checkout, each naming an interpreter
+that records it ran, plus a root `uv.toml` demanding uv 0.0.1. It
+then runs exact copies of the select job's uv steps (section 4.4)
+and fails if a planted interpreter ran; the contract tests keep the
+copies identical to the originals.
 
 The full agent session runs from `workflow_dispatch` alone: a
 maintainer dispatches `testing.yaml` against a chosen ref with a
@@ -972,7 +992,8 @@ requires; the next select job fetches the newest five by that name.
 .github/workflows/code-review-antagonistic.yaml
                                          antagonistic dispatch (§19)
 .github/workflows/testing.yaml           PR plumbing, manual dry-run,
-                                         regression, docs build
+                                         regression, uv isolation,
+                                         docs build
 .github/workflows/documentation.yaml     mkdocs to GitHub Pages
 prompt/review.md                         approve task (§7.3)
 prompt/antagonistic.md                   antagonistic task (§19.4)
