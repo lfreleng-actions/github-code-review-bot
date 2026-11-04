@@ -38,6 +38,7 @@ SKIP_REASONS = (
     "ci_none",
     "already_assessed",
     "too_large",
+    "moved",
     "cap",
 )
 # The CI rule: the rollup states that keep the approve mode waiting.

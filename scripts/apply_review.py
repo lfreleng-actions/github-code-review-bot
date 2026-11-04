@@ -120,8 +120,7 @@ def gate_reasons(check: dict[str, Any], state: dict[str, Any]) -> list[str]:
         reasons.append(f"pull request is {state.get('state')}")
     if state.get("is_draft"):
         reasons.append("pull request is a draft")
-    if state.get("head_sha") != check["head_sha"]:
-        reasons.append(f"head moved to {str(state.get('head_sha'))[:12]}")
+    reasons.extend(files.comparison_reasons(check, state))
     if state.get("ci") != "success":
         reasons.append(f"CI is {state.get('ci')}")
     if state.get("changes_requested"):
@@ -151,7 +150,7 @@ def validated_check(path: Path) -> dict[str, Any]:
     if not github.REPO_RE.fullmatch(repository):
         raise ValueError("check.json repository is malformed")
     github.require_int(check, "number", "check.json")
-    github.require_sha(check, "head_sha", "check.json")
+    files.require_comparison(check, "check.json")
     if check.get("approvable") is True and check.get("tier") not in OPENINGS:
         raise ValueError("check.json is approvable with a non-approvable tier")
     return check

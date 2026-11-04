@@ -151,21 +151,31 @@ def assess(
         if reason is not None:
             skips.add(current, reason)
             continue
-        files, diff_bytes, too_large = changes.pull_files(
-            state["repository"], state["number"]
+        files, diff_bytes, too_large, commits = changes.pull_comparison(
+            state["repository"], state["base_sha"], state["head_sha"]
         )
         if too_large:
             skips.add(current, "too_large")
             continue
+        if moved(state):
+            skips.add(current, "moved")
+            continue
         survivors.append(
-            {
-                **state,
-                "files": files,
-                "diff_bytes": diff_bytes,
-                "commits": changes.pull_commits(state["repository"], state["number"]),
-            }
+            {**state, "files": files, "diff_bytes": diff_bytes, "commits": commits}
         )
     return survivors
+
+
+def moved(state: dict[str, Any]) -> bool:
+    """Whether the pull request moved off the comparison the entry records.
+
+    The files and commits are read by SHA, so they always belong to the
+    recorded comparison; a pull request that has since moved would only
+    be refused at apply, so it is skipped now and the next run reads
+    the new comparison.
+    """
+    live = reads.pull_identity(state["repository"], state["number"])
+    return any(live[key] != state[key] for key in reads.IDENTITY_KEYS)
 
 
 def build_entry(state: dict[str, Any]) -> dict[str, Any]:

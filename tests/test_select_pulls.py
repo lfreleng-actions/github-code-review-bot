@@ -30,8 +30,9 @@ HEAD = "a" * 40
 BASE = "b" * 40
 OTHER = "c" * 40
 PATCH = "@@ -1 +1 @@\n-a\n+b"
-REST_PATH_RE = re.compile(
-    r"repos/([^/]+/[^/]+)/pulls/(\d+)/(files|commits|reviews)\?per_page=100"
+REST_PATH_RE = re.compile(r"repos/([^/]+/[^/]+)/pulls/(\d+)/reviews\?per_page=100")
+COMPARE_PATH_RE = re.compile(
+    r"repos/([^/]+/[^/]+)/compare/([0-9a-f]{40})\.\.\.([0-9a-f]{40})\?per_page=100"
 )
 
 
@@ -81,7 +82,7 @@ def pull_node(repo: str, number: int, **overrides: Any) -> dict[str, Any]:
         "headRefOid": HEAD,
         "headRefName": "fix/thing",
         "baseRefName": "main",
-        "baseRefOid": BASE,
+        "baseRef": {"target": {"oid": BASE}},
         "isCrossRepository": False,
         "headRepository": {"nameWithOwner": f"org/{repo}"},
         "labels": {"nodes": []},
@@ -158,8 +159,11 @@ class FakeGitHub:
         self.search: list[dict[str, Any]] = []
         self.pulls: dict[tuple[str, int], dict[str, Any]] = {}
         self.archived: set[str] = set()
-        self.files: dict[tuple[str, int], list[dict[str, Any]]] = {}
-        self.commits: dict[tuple[str, int], list[dict[str, Any]]] = {}
+        # Files and commits per comparison, keyed by repository, base SHA
+        # and head SHA; an unlisted comparison has one file and one commit.
+        self.diffs: dict[
+            tuple[str, str, str], tuple[list[dict[str, Any]], list[dict[str, Any]]]
+        ] = {}
         self.reviews: dict[tuple[str, int], list[dict[str, Any]]] = {}
         self.calls: list[list[str]] = []
 
@@ -189,15 +193,24 @@ class FakeGitHub:
                     }
                 }
             )
-        found = REST_PATH_RE.fullmatch(args[1]) if args[:1] == ["api"] else None
+        endpoint = args[1] if args[:1] == ["api"] else ""
+        compared = COMPARE_PATH_RE.fullmatch(endpoint)
+        if compared is not None:
+            files, commits = self.diff(*compared.groups())
+            return json.dumps([{"files": files, "commits": commits}])
+        found = REST_PATH_RE.fullmatch(endpoint)
         if found is None:
             raise AssertionError(f"unexpected gh call {args}")
         key = (found.group(1), int(found.group(2)))
-        if found.group(3) == "files":
-            return json.dumps([self.files.get(key, [rest_file()])])
-        if found.group(3) == "reviews":
-            return json.dumps([self.reviews.get(key, self.rest_reviews(key))])
-        return json.dumps([self.commits.get(key, [rest_commit()])])
+        return json.dumps([self.reviews.get(key, self.rest_reviews(key))])
+
+    def diff(
+        self, repository: str, base: str, head: str
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+        """The files and commits of one comparison."""
+        return self.diffs.get(
+            (repository, base, head), ([rest_file()], [rest_commit()])
+        )
 
     def rest_reviews(self, key: tuple[str, int]) -> list[dict[str, Any]]:
         """The REST form of the reviews the GraphQL node carries."""
@@ -625,15 +638,120 @@ class SkipRulesTest(SelectionCase):
         self.assertEqual(selection["skip_counts"]["already_assessed"], 0)
 
     def test_too_large(self) -> None:
-        """A diff over the byte cap is skipped after the files read."""
+        """A diff over the byte cap is skipped after the comparison read."""
         self.gh.add("alpha", 1)
-        self.gh.files[("org/alpha", 1)] = [
-            rest_file("big.txt", "x" * (reads.MAX_DIFF_BYTES + 1))
-        ]
+        self.gh.diffs[("org/alpha", BASE, HEAD)] = (
+            [rest_file("big.txt", "x" * (reads.MAX_DIFF_BYTES + 1))],
+            [rest_commit()],
+        )
         selection, _, _ = self.run_main()
         self.assert_only_skip(selection, "too_large")
-        self.assertFalse(
-            any("/commits" in args[1] for args in self.gh.calls if len(args) > 1)
+
+    def test_a_comparison_that_moves_during_the_reads_is_skipped(self) -> None:
+        """A pull request that moves after the state read is left to the next run."""
+        read_comparison = changes.pull_comparison
+        cases: list[dict[str, Any]] = [
+            {"headRefOid": OTHER},
+            {"baseRefName": "release"},
+            {"baseRef": {"target": {"oid": OTHER}}},
+        ]
+        for overrides in cases:
+
+            def moving(
+                repository: str,
+                base_sha: str,
+                head_sha: str,
+                moved: dict[str, Any] = overrides,
+            ) -> Any:
+                """Read the comparison, then move the pull request."""
+                self.gh.pulls[(repository, 1)].update(moved)
+                return read_comparison(repository, base_sha, head_sha)
+
+            with (
+                self.subTest(overrides=overrides),
+                patch.object(changes, "pull_comparison", side_effect=moving),
+            ):
+                self.install(FakeGitHub())
+                self.gh.add("alpha", 1)
+                selection, _, _ = self.run_main()
+                self.assert_only_skip(selection, "moved")
+
+    def test_a_change_and_restore_during_the_reads_keeps_the_selected_diff(
+        self,
+    ) -> None:
+        """The entry's diff is the selected comparison's, whatever the live one was.
+
+        A push or a retarget that is undone before the identity re-read
+        leaves that re-read unchanged, so only reads bound to the
+        selected head and base SHAs keep the other diff out of the entry.
+        """
+        cases: list[tuple[str, Any, tuple[str, str]]] = [
+            ("headRefOid", OTHER, (BASE, OTHER)),
+            ("baseRef", {"target": {"oid": OTHER}}, (OTHER, HEAD)),
+        ]
+        for field, moved, (base, head) in cases:
+            with self.subTest(field=field):
+                fake = FakeGitHub()
+                fake.add("alpha", 1)
+                fake.diffs[("org/alpha", base, head)] = (
+                    [rest_file("other.txt")],
+                    [{**rest_commit(), "sha": OTHER}],
+                )
+                node = fake.pulls[("org/alpha", 1)]
+
+                def racing(
+                    args: list[str],
+                    *,
+                    input: str | None = None,
+                    read: bool | None = None,
+                    field: str = field,
+                    moved: Any = moved,
+                    node: dict[str, Any] = node,
+                    fake: FakeGitHub = fake,
+                ) -> str:
+                    """Move the pull request for each REST read, then restore it."""
+                    if args[:1] != ["api"] or args[1] == "graphql":
+                        return fake(args, input=input, read=read)
+                    selected = node[field]
+                    node[field] = moved
+                    try:
+                        return fake(args, input=input, read=read)
+                    finally:
+                        node[field] = selected
+
+                self.install(fake)
+                with patch.object(github, "run_gh", side_effect=racing):
+                    selection, _, _ = self.run_main()
+                (entry,) = selection["pull_requests"]
+                self.assertEqual([f["path"] for f in entry["files"]], ["README.md"])
+                self.assertEqual([c["sha"] for c in entry["commits"]], [HEAD])
+
+    def test_a_stale_base_sha_cannot_hide_a_revert_of_newer_base_content(
+        self,
+    ) -> None:
+        """The diff runs from the base branch's tip, not the recorded base SHA.
+
+        The base added ``permissions: {}`` to a workflow after the base
+        SHA GitHub last recorded for the pull request; the head merged
+        that commit, then removed the block. Compared from the stale
+        SHA the addition and the removal cancel out, and only a README
+        edit is left for the vetoes and the agent to see.
+        """
+        self.gh.add("alpha", 1, baseRefOid=OTHER)
+        workflow = rest_file(
+            ".github/workflows/ci.yaml", "@@ -1,2 +1 @@\n name: CI\n-permissions: {}"
+        )
+        self.gh.diffs[("org/alpha", OTHER, HEAD)] = ([rest_file()], [rest_commit()])
+        self.gh.diffs[("org/alpha", BASE, HEAD)] = (
+            [rest_file(), workflow],
+            [rest_commit()],
+        )
+        selection, _, _ = self.run_main()
+        (entry,) = selection["pull_requests"]
+        self.assertEqual(entry["base_sha"], BASE)
+        self.assertEqual(
+            [f["path"] for f in entry["files"]],
+            ["README.md", ".github/workflows/ci.yaml"],
         )
 
     def test_cap_keeps_the_oldest_updated(self) -> None:

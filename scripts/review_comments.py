@@ -273,6 +273,8 @@ def check(
         "repository": str(entry.get("repository", "")),
         "number": entry.get("number"),
         "head_sha": str(entry.get("head_sha", "")),
+        "base_ref": str(entry.get("base_ref", "")),
+        "base_sha": str(entry.get("base_sha", "")),
         "url": str(entry.get("url", "")),
         "title": policy.sanitise(entry.get("title"), policy.MAX_TITLE_CHARS),
         "commentable": commentable,

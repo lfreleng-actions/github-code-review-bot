@@ -85,7 +85,7 @@ def pull_node(**overrides: Any) -> dict[str, Any]:
         "headRefOid": HEAD,
         "headRefName": "fix/thing",
         "baseRefName": "main",
-        "baseRefOid": BASE,
+        "baseRef": {"target": {"oid": BASE}},
         "isCrossRepository": True,
         "headRepository": {"nameWithOwner": "alice/alpha"},
         "labels": {"nodes": [{"name": "bug"}]},
@@ -124,9 +124,20 @@ def reply(
     return json.dumps({"data": {"repository": repo}})
 
 
-def pages(*entries: dict[str, Any]) -> str:
-    """The slurped single page ``api_list`` reads."""
-    return json.dumps([list(entries)])
+def compared(files: list[Any] | None = None, commits: list[Any] | None = None) -> str:
+    """One slurped comparison page; by default one commit and no files."""
+    page = {
+        "files": files or [],
+        "commits": commits
+        if commits is not None
+        else [{"sha": HEAD, "commit": {"message": "x"}, "author": None}],
+    }
+    return json.dumps([page])
+
+
+def read_comparison() -> tuple[list[dict[str, Any]], int, bool, list[dict[str, Any]]]:
+    """Read the fixed comparison the tests serve."""
+    return changes.pull_comparison("org/alpha", BASE, HEAD)
 
 
 class ReadsCase(unittest.TestCase):
@@ -504,7 +515,7 @@ class PullStateTest(ReadsCase):
             pull_node(isDraft="no"),
             pull_node(isCrossRepository=None),
             pull_node(headRefOid="short"),
-            pull_node(baseRefOid=None),
+            pull_node(baseRef={"target": None}),
             pull_node(headRepository={"nameWithOwner": "bad name"}),
             pull_node(body=["list"]),
             pull_node(author={"__typename": "User"}),
@@ -535,6 +546,60 @@ class PullStateTest(ReadsCase):
                 self.state_of(node)
 
 
+class PullStateBaseTest(ReadsCase):
+    """``pull_state`` takes the base SHA from the base branch's tip."""
+
+    def test_base_sha_is_the_base_branch_tip(self) -> None:
+        """A stale recorded base SHA is ignored in favour of the branch tip.
+
+        GitHub's ``baseRefOid`` can lag the base branch. Compared from
+        it, a head that merged newer base content and then removed some
+        of it would show no removal at all.
+        """
+        state = self.state_of(pull_node(baseRefOid=OLD_HEAD))
+        self.assertEqual(state["base_sha"], BASE)
+
+    def test_a_missing_or_malformed_base_branch_raises(self) -> None:
+        """A deleted base branch or a malformed tip is an error, not a match."""
+        for base in (None, "main", {"target": None}, {"target": {"oid": "short"}}):
+            with self.subTest(base=base), self.assertRaises(github.GitHubError):
+                self.state_of(pull_node(baseRef=base))
+
+
+class PullIdentityTest(ReadsCase):
+    """``pull_identity`` reads the two ends of the comparison and nothing else."""
+
+    def identity_of(self, node: dict[str, Any] | None, **kwargs: Any) -> dict[str, str]:
+        """Run ``pull_identity`` against one canned reply."""
+        with patch.object(github, "run_gh", return_value=reply(node, **kwargs)) as gh:
+            identity = reads.pull_identity("org/alpha", 7)
+        gh.assert_called_once()
+        self.assertIs(gh.call_args.kwargs.get("read"), True)
+        return identity
+
+    def test_extracts_the_comparison(self) -> None:
+        """The head SHA, base ref and base SHA come back under the state's keys."""
+        self.assertEqual(
+            self.identity_of(pull_node(baseRefOid=OLD_HEAD)),
+            {"head_sha": HEAD, "base_ref": "main", "base_sha": BASE},
+        )
+
+    def test_absent_or_invalid_fields_raise(self) -> None:
+        """A missing target or a malformed end is an error, not a match."""
+        cases: list[tuple[dict[str, Any] | None, dict[str, Any]]] = [
+            (pull_node(), {"repository": None}),
+            (None, {}),
+            (pull_node(headRefOid="short"), {}),
+            (pull_node(baseRefName=""), {}),
+            (pull_node(baseRef=None), {}),
+            (pull_node(baseRef={"target": {"oid": "short"}}), {}),
+        ]
+        for node, kwargs in cases:
+            with self.subTest(node=node, kwargs=kwargs):
+                with self.assertRaises(github.GitHubError):
+                    self.identity_of(node, **kwargs)
+
+
 def rest_file(
     path: str, patch_text: str | None = "@@ -1 +1 @@\n-a\n+b", **over: Any
 ) -> dict[str, Any]:
@@ -550,25 +615,27 @@ def rest_file(
     return entry
 
 
-class PullFilesTest(ReadsCase):
-    """``pull_files`` bounds patches, counts bytes and flags oversize changes."""
+class PullComparisonFilesTest(ReadsCase):
+    """``pull_comparison`` bounds patches, counts bytes and flags oversize changes."""
 
     def test_shape_and_bounds(self) -> None:
         """Patches are bounded per file; a missing patch and a rename are kept."""
         big = "x" * (reads.MAX_PATCH_BYTES + 5)
-        entries = pages(
-            rest_file("README.md"),
-            rest_file("big.txt", big),
-            rest_file("image.png", None, status="added", additions=0, deletions=0),
-            rest_file("new.py", status="renamed", previous_filename="old.py"),
+        entries = compared(
+            [
+                rest_file("README.md"),
+                rest_file("big.txt", big),
+                rest_file("image.png", None, status="added", additions=0, deletions=0),
+                rest_file("new.py", status="renamed", previous_filename="old.py"),
+            ]
         )
         with patch.object(github, "run_gh", return_value=entries) as gh:
-            files, diff_bytes, too_large = changes.pull_files("org/alpha", 7)
+            files, diff_bytes, too_large, _ = read_comparison()
         self.assertEqual(
             gh.call_args.args[0],
             [
                 "api",
-                "repos/org/alpha/pulls/7/files?per_page=100",
+                f"repos/org/alpha/compare/{BASE}...{HEAD}?per_page=100",
                 "--paginate",
                 "--slurp",
             ],
@@ -595,18 +662,18 @@ class PullFilesTest(ReadsCase):
 
     def test_too_many_files(self) -> None:
         """More than ``MAX_FILES`` files is too large; the read stops there."""
-        entries = pages(*(rest_file(f"f{i}.txt") for i in range(reads.MAX_FILES + 1)))
+        entries = compared([rest_file(f"f{i}.txt") for i in range(reads.MAX_FILES + 1)])
         with patch.object(github, "run_gh", return_value=entries):
-            files, _, too_large = changes.pull_files("org/alpha", 7)
+            files, _, too_large, _ = read_comparison()
         self.assertTrue(too_large)
         self.assertEqual(len(files), reads.MAX_FILES)
 
     def test_too_many_patch_bytes(self) -> None:
         """Patch bytes beyond ``MAX_DIFF_BYTES`` are too large even across small files."""
         chunk = "y" * (reads.MAX_DIFF_BYTES // 2 + 1)
-        entries = pages(rest_file("a.txt", chunk), rest_file("b.txt", chunk))
+        entries = compared([rest_file("a.txt", chunk), rest_file("b.txt", chunk)])
         with patch.object(github, "run_gh", return_value=entries):
-            files, diff_bytes, too_large = changes.pull_files("org/alpha", 7)
+            files, diff_bytes, too_large, _ = read_comparison()
         self.assertTrue(too_large)
         self.assertEqual(len(files), 1)
         self.assertGreater(diff_bytes, reads.MAX_DIFF_BYTES)
@@ -620,42 +687,76 @@ class PullFilesTest(ReadsCase):
             rest_file("a", filename=None),
             rest_file("a", status=""),
             rest_file("a", previous_filename=3),
+            "README.md",
         ):
             with (
                 self.subTest(entry=entry),
-                patch.object(github, "run_gh", return_value=pages(entry)),
+                patch.object(github, "run_gh", return_value=compared([entry])),
                 self.assertRaises(github.GitHubError),
             ):
-                changes.pull_files("org/alpha", 7)
+                read_comparison()
+
+    def test_pages_and_invalid_pages(self) -> None:
+        """Commits span every page, files the first; a malformed page is refused."""
+        commit = {"sha": HEAD, "commit": {"message": "x"}, "author": None}
+        later = {**commit, "sha": OLD_HEAD}
+        two = json.dumps(
+            [
+                {"files": [rest_file("a.txt")], "commits": [commit]},
+                {"commits": [later]},
+            ]
+        )
+        with patch.object(github, "run_gh", return_value=two):
+            files, _, too_large, commits = read_comparison()
+        self.assertEqual([f["path"] for f in files], ["a.txt"])
+        self.assertFalse(too_large)
+        self.assertEqual([c["sha"] for c in commits], [HEAD, OLD_HEAD])
+        for raw in (
+            "{}",
+            "[]",
+            "[[]]",
+            json.dumps([{"commits": [commit]}]),
+            json.dumps([{"files": "x", "commits": [commit]}]),
+            json.dumps([{"files": []}]),
+            json.dumps([{"files": [], "commits": [commit]}, {"files": None}]),
+        ):
+            with (
+                self.subTest(raw=raw),
+                patch.object(github, "run_gh", return_value=raw),
+                self.assertRaises(github.GitHubError),
+            ):
+                read_comparison()
 
 
-class PullCommitsTest(ReadsCase):
-    """``pull_commits`` reads SHAs, bounded messages, verification and authors."""
+class PullComparisonCommitsTest(ReadsCase):
+    """``pull_comparison`` reads SHAs, bounded messages, verification and authors."""
 
     def test_shape(self) -> None:
         """Each commit carries its SHA, message, verified flag and author login."""
         long_message = "m" * (reads.MAX_MESSAGE_BYTES + 1)
-        entries = pages(
-            {
-                "sha": HEAD,
-                "commit": {"message": "Fix: Thing", "verification": {"verified": True}},
-                "author": {"login": "alice"},
-            },
-            {
-                "sha": BASE,
-                "commit": {
-                    "message": long_message,
-                    "verification": {"verified": False},
+        entries = compared(
+            commits=[
+                {
+                    "sha": HEAD,
+                    "commit": {
+                        "message": "Fix: Thing",
+                        "verification": {"verified": True},
+                    },
+                    "author": {"login": "alice"},
                 },
-                "author": None,
-            },
-            {"sha": OLD_HEAD, "commit": {"message": "x"}, "author": {"login": 3}},
+                {
+                    "sha": BASE,
+                    "commit": {
+                        "message": long_message,
+                        "verification": {"verified": False},
+                    },
+                    "author": None,
+                },
+                {"sha": OLD_HEAD, "commit": {"message": "x"}, "author": {"login": 3}},
+            ]
         )
-        with patch.object(github, "run_gh", return_value=entries) as gh:
-            commits = changes.pull_commits("org/alpha", 7)
-        self.assertEqual(
-            gh.call_args.args[0][1], "repos/org/alpha/pulls/7/commits?per_page=100"
-        )
+        with patch.object(github, "run_gh", return_value=entries):
+            *_, commits = read_comparison()
         self.assertEqual(
             commits[0],
             {"sha": HEAD, "message": "Fix: Thing", "verified": True, "author": "alice"},
@@ -672,13 +773,14 @@ class PullCommitsTest(ReadsCase):
             {"sha": "short", "commit": {"message": "x"}},
             {"sha": HEAD, "commit": None},
             {"sha": HEAD, "commit": {"message": None}},
+            "commit",
         ):
             with (
                 self.subTest(entry=entry),
-                patch.object(github, "run_gh", return_value=pages(entry)),
+                patch.object(github, "run_gh", return_value=compared(commits=[entry])),
                 self.assertRaises(github.GitHubError),
             ):
-                changes.pull_commits("org/alpha", 7)
+                read_comparison()
 
 
 if __name__ == "__main__":

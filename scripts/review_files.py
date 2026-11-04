@@ -20,9 +20,11 @@ from typing import Any, cast
 
 import bot_evidence as evidence
 import bot_github as github
+import review_policy as policy
 from review_policy import Rejected
 
 MAX_CHECK_BYTES = 1024 * 1024
+MAX_REF_CHARS = 100
 
 
 def note(source: str, message: str) -> None:
@@ -55,6 +57,37 @@ def require_mode(data: dict[str, Any], mode: str, context: str) -> None:
     """Refuse a selection or check that another mode's run produced."""
     if data.get("mode") != mode:
         raise ValueError(f"{context} is not from a {mode} run")
+
+
+def require_comparison(check: dict[str, Any], context: str) -> None:
+    """Refuse a check that does not name both ends of the reviewed diff."""
+    github.require_sha(check, "head_sha", context)
+    github.require_str(check, "base_ref", context)
+    github.require_sha(check, "base_sha", context)
+
+
+def comparison_reasons(check: dict[str, Any], state: dict[str, Any]) -> list[str]:
+    """Reasons the live pull request no longer shows the comparison reviewed.
+
+    A pull request's diff runs from its base to its head, and the
+    evidence, the files the classifier corroborated and the patches the
+    comments anchor on, was read for one pair. Retargeting changes the
+    base without a push. A new commit on the same base ref leaves the
+    diff alone unless it moves the merge base, which a force push or a
+    merge of the head's own commits does; telling those apart takes
+    another read, so any change of base SHA refuses: the next run
+    reviews the pull request as it then stands.
+    """
+    reasons: list[str] = []
+    if state.get("head_sha") != check["head_sha"]:
+        reasons.append(f"head moved to {str(state.get('head_sha'))[:12]}")
+    base_ref = policy.sanitise(check["base_ref"], MAX_REF_CHARS)
+    if state.get("base_ref") != check["base_ref"]:
+        live_ref = policy.sanitise(state.get("base_ref"), MAX_REF_CHARS)
+        reasons.append(f"base retargeted from {base_ref} to {live_ref}")
+    elif state.get("base_sha") != check["base_sha"]:
+        reasons.append(f"base {base_ref} moved to {str(state.get('base_sha'))[:12]}")
+    return reasons
 
 
 def read_verdict(

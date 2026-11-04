@@ -56,7 +56,8 @@ query($owner: String!, $name: String!, $number: Int!) {
     pullRequest(number: $number) {
       number url title body state isDraft mergeable createdAt updatedAt
       authorAssociation author { __typename login }
-      headRefOid headRefName baseRefName baseRefOid isCrossRepository
+      headRefOid headRefName baseRefName baseRef { target { oid } }
+      isCrossRepository
       headRepository { nameWithOwner }
       labels(first: 50) { nodes { name } }
       commits(last: 1) { totalCount nodes { commit { statusCheckRollup { state
@@ -74,6 +75,17 @@ query($owner: String!, $name: String!, $number: Int!) {
   }
 }
 """
+
+IDENTITY_QUERY = """
+query($owner: String!, $name: String!, $number: Int!) {
+  repository(owner: $owner, name: $name) {
+    pullRequest(number: $number) {
+      headRefOid baseRefName baseRef { target { oid } } }
+  }
+}
+"""
+# The fields that name the comparison a pull request's diff shows.
+IDENTITY_KEYS = ("head_sha", "base_ref", "base_sha")
 
 
 class SelectionError(Exception):
@@ -302,6 +314,42 @@ def copilot_threads_of(connection: Any, context: str) -> int:
     return count
 
 
+def base_tip(pr: dict[str, Any], context: str) -> str:
+    """The base branch's current tip, the SHA the pull request's diff runs from.
+
+    ``baseRefOid`` is the base SHA GitHub last recorded for the pull
+    request, and it can lag the branch. Compared from that older SHA, a
+    head that merged newer base commits diffs from an older merge base,
+    so a change it makes to that newer content, a removed block the
+    base had just added, nets out of the diff. The pull request page
+    compares against the branch tip, and so does this.
+    """
+    ref = pr.get("baseRef")
+    if ref is None:
+        raise github.GitHubError(f"{context}: base branch is gone")
+    target = require_object(require_object(ref, context).get("target"), context)
+    return github.require_sha(target, "oid", context)
+
+
+def pull_identity(repository: str, number: int) -> dict[str, str]:
+    """Read the head SHA, base ref and base SHA alone, for a cheap re-read."""
+    owner, _, name = repository.partition("/")
+    context = f"{repository}#{number}"
+    variables = {"owner": owner, "name": name, "number": number}
+    repo_node = github.graphql(IDENTITY_QUERY, variables, read=True).get("repository")
+    if repo_node is None:
+        raise github.GitHubError(f"{context}: repository not found")
+    pull = require_object(repo_node, context).get("pullRequest")
+    if pull is None:
+        raise github.GitHubError(f"{context}: no such pull request")
+    pr = require_object(pull, context)
+    return {
+        "head_sha": github.require_sha(pr, "headRefOid", context),
+        "base_ref": github.require_str(pr, "baseRefName", context),
+        "base_sha": base_tip(pr, context),
+    }
+
+
 def pull_state(repository: str, number: int) -> dict[str, Any]:
     """Read everything the skip rules need about one pull request in one query."""
     owner, _, name = repository.partition("/")
@@ -359,7 +407,7 @@ def pull_state(repository: str, number: int) -> dict[str, Any]:
         "head_repository": head_repository,
         "head_ref": github.require_str(pr, "headRefName", context),
         "base_ref": github.require_str(pr, "baseRefName", context),
-        "base_sha": github.require_sha(pr, "baseRefOid", context),
+        "base_sha": base_tip(pr, context),
         "is_fork": require_bool(pr, "isCrossRepository", context),
         "labels": [
             github.require_str(node, "name", context)
