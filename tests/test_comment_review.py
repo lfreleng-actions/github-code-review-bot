@@ -13,7 +13,7 @@ import tempfile
 import unittest
 from importlib import import_module
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
@@ -28,6 +28,8 @@ REPO = "lfreleng-actions/repo"
 BOT = "lf-releng-antagonistic-review-bot[bot]"
 RUN_URL = "https://github.com/lfreleng-actions/bot/actions/runs/1"
 RUN_ID = 1
+LANDED_URL = "https://github.com/x/pull/157#pullrequestreview-7"
+BAD_GATEWAY = "gh: Bad Gateway (HTTP 502)"
 PATCH = "@@ -1,2 +1,3 @@\n one\n+two\n three\n"
 
 
@@ -102,6 +104,19 @@ def live_state(**overrides: Any) -> dict[str, Any]:
     }
     state.update(overrides)
     return state
+
+
+def rest_review(text: str, **overrides: Any) -> dict[str, Any]:
+    """One review as the REST listing returns it, by this App on the head."""
+    review: dict[str, Any] = {
+        "user": {"login": BOT, "type": "Bot"},
+        "commit_id": HEAD,
+        "state": "COMMENTED",
+        "body": text,
+        "html_url": LANDED_URL,
+    }
+    review.update(overrides)
+    return review
 
 
 def run(argv: list[str]) -> str:
@@ -275,7 +290,25 @@ class CommentCommandTests(Tree):
         self.write = patch.object(
             comment_review.github, "api_write", side_effect=self.serve
         ).start()
+        # The REST review listing the applier reads its own review back
+        # from: a list, a function of what was posted, or a failure.
+        self.listing: Any = []
+        self.listed = patch.object(
+            comment_review.github, "api_list", side_effect=self.list_reviews
+        ).start()
         self.addCleanup(patch.stopall)
+
+    def list_reviews(self, _endpoint: str) -> list[dict[str, Any]]:
+        """Answer the review listing from ``self.listing``."""
+        if isinstance(self.listing, BaseException):
+            raise self.listing
+        if callable(self.listing):
+            return cast("list[dict[str, Any]]", self.listing())
+        return cast("list[dict[str, Any]]", self.listing)
+
+    def posted(self) -> list[dict[str, Any]]:
+        """The listing after the last write landed despite its failure."""
+        return [rest_review(self.write.call_args.args[2]["body"])]
 
     def serve(self, method: str, endpoint: str, payload: dict[str, Any]) -> Any:
         """Answer one write from ``self.replies``, refusing any other event."""
@@ -1002,6 +1035,133 @@ class CommentCommandTests(Tree):
         ):
             self.comment()
         self.write.assert_not_called()
+
+    def live_comment(self, *extra: str) -> dict[str, Any]:
+        """Run comment against a pull request still fit to review."""
+        with patch.object(
+            comment_review.pull_reads, "pull_state", return_value=live_state()
+        ):
+            return self.comment(*extra)
+
+    def failed_comment(self, *extra: str) -> None:
+        """Run comment and expect it to fail the run with exit 1."""
+        with self.assertRaises(SystemExit) as caught:
+            self.live_comment(*extra)
+        self.assertEqual(caught.exception.code, 1)
+
+    @unittest.expectedFailure
+    def test_a_review_without_a_hand_back_ends_with_the_run_marker(self) -> None:
+        """The marker names the round, the head and the run, and closes the body."""
+        self.live_comment()
+        posted = self.write.call_args.args[2]["body"]
+        self.assertTrue(
+            posted.endswith(
+                f"\n\n<!-- antagonistic-review round=1 head={HEAD} run={RUN_ID} -->"
+            )
+        )
+        self.assertEqual(posted.count("<!--"), 1)
+
+    @unittest.expectedFailure
+    def test_a_lost_review_that_did_not_land_fails_without_a_second_post(
+        self,
+    ) -> None:
+        """A 502 whose review is not found fails the run and never resends."""
+        self.replies = [comment_review.github.GitHubError(BAD_GATEWAY)]
+        self.failed_comment("--handback")
+        self.write.assert_called_once()
+        self.listed.assert_called_once_with(
+            f"repos/{REPO}/pulls/157/reviews?per_page=100"
+        )
+
+    @unittest.expectedFailure
+    def test_a_lost_review_that_landed_is_recorded_without_a_second_post(
+        self,
+    ) -> None:
+        """A 502 whose review is found, by this run's marker, is a posted review."""
+        for extra, handback in (((), False), (("--handback",), True)):
+            with self.subTest(handback=handback):
+                self.write.reset_mock()
+                self.replies = [comment_review.github.GitHubError(BAD_GATEWAY)]
+                self.listing = self.posted
+                result = self.live_comment(*extra)
+                self.write.assert_called_once()
+                self.assertEqual(result["verdict"], "commented")
+                self.assertEqual(result["review_url"], LANDED_URL)
+                self.assertIs(result["inline"], True)
+                self.assertIs(result["handback"], handback)
+                self.assertEqual(result["round"], 1)
+
+    @unittest.expectedFailure
+    def test_a_rerun_after_a_landed_review_posts_nothing(self) -> None:
+        """An earlier attempt's review naming this run is this run's outcome."""
+        self.history = [self.own_review(HEAD)]
+        cases = (
+            ("antagonistic-review", False),
+            ("antagonistic-handback", True),
+        )
+        for kind, handback in cases:
+            with self.subTest(kind=kind):
+                marker = f"<!-- {kind} round=2 head={HEAD} run={RUN_ID} -->"
+                self.listing = [rest_review(f"Earlier attempt.\n\n{marker}\n")]
+                result = self.live_comment("--handback")
+                self.write.assert_not_called()
+                self.assertEqual(result["verdict"], "commented")
+                self.assertEqual(result["review_url"], LANDED_URL)
+                self.assertEqual(result["reasons"], [])
+                self.assertEqual(result["round"], 2)
+                self.assertIs(result["handback"], handback)
+                self.assertIsNone(result["inline"])
+
+    def test_a_dry_run_never_looks_for_an_earlier_review(self) -> None:
+        """A dry run posts nothing, so no earlier attempt of it posted either."""
+        self.history = [self.own_review(HEAD)]
+        result = self.live_comment("--dry-run")
+        self.listed.assert_not_called()
+        self.assertEqual(result["verdict"], "refused")
+
+    def others(self) -> list[dict[str, Any]]:
+        """Reviews carrying this run's marker that are not this run's own."""
+        mark = f"<!-- antagonistic-review round=1 head={HEAD} run={RUN_ID} -->"
+        return [
+            rest_review(
+                mark, user={"login": BOT.removesuffix("[bot]"), "type": "User"}
+            ),
+            rest_review(mark, user={"login": "other-bot[bot]", "type": "Bot"}),
+            rest_review(mark, commit_id=MOVED),
+            rest_review(mark.replace(HEAD, MOVED)),
+            rest_review(mark.replace(f"run={RUN_ID}", "run=2")),
+            rest_review(f"{mark}\n\nagent text after the marker"),
+            rest_review(mark, body=None),
+        ]
+
+    @unittest.expectedFailure
+    def test_another_actors_or_runs_review_is_never_this_runs(self) -> None:
+        """Only this App's review of this head ending in this run's marker counts."""
+        self.listing = self.others()
+        self.replies = [comment_review.github.GitHubError(BAD_GATEWAY)]
+        self.failed_comment()
+        self.write.assert_called_once()
+        self.listed.assert_called_once()
+        self.history = [self.own_review(HEAD)]
+        result = self.live_comment()
+        self.write.assert_called_once()
+        self.assertEqual(result["verdict"], "refused")
+        self.assertEqual(
+            result["reasons"], ["this head already carries an antagonistic review"]
+        )
+
+    @unittest.expectedFailure
+    def test_a_failed_read_back_fails_the_run(self) -> None:
+        """When the look cannot say whether the review landed, nothing resends."""
+        self.replies = [comment_review.github.GitHubError(BAD_GATEWAY)]
+        self.listing = comment_review.github.GitHubError(BAD_GATEWAY)
+        self.failed_comment()
+        self.write.assert_called_once()
+        self.listed.assert_called_once()
+        self.history = [self.own_review(HEAD)]
+        self.failed_comment()
+        self.write.assert_called_once()
+        self.assertEqual(self.listed.call_count, 2)
 
 
 if __name__ == "__main__":

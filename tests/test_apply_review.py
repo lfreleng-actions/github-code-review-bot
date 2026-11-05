@@ -13,8 +13,8 @@ import tempfile
 import unittest
 from importlib import import_module
 from pathlib import Path
-from typing import Any
-from unittest.mock import patch
+from typing import Any, cast
+from unittest.mock import MagicMock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 apply_review = import_module("apply_review")
@@ -26,6 +26,10 @@ BASE = "c" * 40
 REPO = "lfreleng-actions/repo"
 BOT = "lf-releng-code-review-bot[bot]"
 RUN_URL = "https://github.com/lfreleng-actions/bot/actions/runs/1"
+RUN_ID = 1
+LANDED_URL = "https://github.com/x/pull/157#pullrequestreview-7"
+BAD_GATEWAY = "gh: Bad Gateway (HTTP 502)"
+MARKER = f"<!-- code-review-approval head={HEAD} run={RUN_ID} -->"
 
 
 def entry() -> dict[str, Any]:
@@ -97,6 +101,19 @@ def live_state(**overrides: Any) -> dict[str, Any]:
     }
     state.update(overrides)
     return state
+
+
+def rest_review(text: str | None, **overrides: Any) -> dict[str, Any]:
+    """One review as the REST listing returns it, by this App on the head."""
+    review: dict[str, Any] = {
+        "user": {"login": BOT, "type": "Bot"},
+        "commit_id": HEAD,
+        "state": "APPROVED",
+        "body": text,
+        "html_url": LANDED_URL,
+    }
+    review.update(overrides)
+    return review
 
 
 def run(argv: list[str]) -> str:
@@ -206,10 +223,25 @@ class ApplyCommandTests(unittest.TestCase):
             ),
         }
         self.write_check()
+        # The REST review listing the applier reads its own approval
+        # back from: a list, a function of what was posted, or a failure.
+        self.listing: Any = []
+        self.listed = patch.object(
+            apply_review.github, "api_list", side_effect=self.list_reviews
+        ).start()
+        self.addCleanup(patch.stopall)
 
     def tearDown(self) -> None:
         """Remove the temp tree."""
         self.tmp.cleanup()
+
+    def list_reviews(self, _endpoint: str) -> list[dict[str, Any]]:
+        """Answer the review listing from ``self.listing``."""
+        if isinstance(self.listing, BaseException):
+            raise self.listing
+        if callable(self.listing):
+            return cast("list[dict[str, Any]]", self.listing())
+        return cast("list[dict[str, Any]]", self.listing)
 
     def write_check(self) -> None:
         """Persist the current check object."""
@@ -481,6 +513,147 @@ class ApplyCommandTests(unittest.TestCase):
             self.assertRaises(SystemExit),
         ):
             self.apply()
+        write.assert_not_called()
+
+    def live_apply(
+        self, write: Any, state: dict[str, Any] | None = None
+    ) -> dict[str, Any]:
+        """Run apply against a live pull request with ``write`` as the POST."""
+        with (
+            patch.object(
+                apply_review.pull_reads,
+                "pull_state",
+                return_value=state or live_state(),
+            ),
+            patch.object(apply_review.github, "api_write", write),
+        ):
+            return self.apply()
+
+    def failed_apply(self, write: Any, state: dict[str, Any] | None = None) -> None:
+        """Run apply and expect it to fail the run with exit 1."""
+        with self.assertRaises(SystemExit) as caught:
+            self.live_apply(write, state)
+        self.assertEqual(caught.exception.code, 1)
+
+    @unittest.expectedFailure
+    def test_the_approval_ends_with_the_run_marker(self) -> None:
+        """The marker names the head and the run, after the footer."""
+        write = MagicMock(return_value={})
+        self.live_apply(write)
+        body = write.call_args.args[2]["body"]
+        self.assertTrue(body.endswith(f"This is not a human review.\n\n{MARKER}"))
+
+    @unittest.expectedFailure
+    def test_a_run_url_that_names_no_run_fails_before_writing(self) -> None:
+        """The marker needs the run, so an unrecognised URL is an error."""
+        write = MagicMock(return_value={})
+        argv_url = "https://github.com/lfreleng-actions/bot/actions"
+        with (
+            patch.object(
+                apply_review.pull_reads, "pull_state", return_value=live_state()
+            ),
+            patch.object(apply_review.github, "api_write", write),
+            self.assertRaises(SystemExit) as caught,
+        ):
+            run(
+                [
+                    "apply",
+                    "--check",
+                    str(self.root / "check.json"),
+                    "--selection",
+                    str(self.root / "selection.json"),
+                    "--output",
+                    str(self.root / "out" / "result.json"),
+                    "--run-url",
+                    argv_url,
+                    "--run-attempt",
+                    "1",
+                ]
+            )
+        self.assertEqual(caught.exception.code, 1)
+        write.assert_not_called()
+
+    @unittest.expectedFailure
+    def test_a_lost_approval_that_did_not_land_fails_without_a_second_post(
+        self,
+    ) -> None:
+        """A 502 whose approval is not found fails the run and never resends."""
+        write = MagicMock(side_effect=apply_review.github.GitHubError(BAD_GATEWAY))
+        self.failed_apply(write)
+        write.assert_called_once()
+        self.listed.assert_called_once_with(
+            f"repos/{REPO}/pulls/157/reviews?per_page=100"
+        )
+
+    @unittest.expectedFailure
+    def test_a_lost_approval_that_landed_is_recorded_without_a_second_post(
+        self,
+    ) -> None:
+        """A 502 whose approval is found, by this run's marker, is an approval."""
+        write = MagicMock(side_effect=apply_review.github.GitHubError(BAD_GATEWAY))
+        self.listing = lambda: [rest_review(write.call_args.args[2]["body"])]
+        result = self.live_apply(write)
+        write.assert_called_once()
+        self.assertEqual(result["verdict"], "approved")
+        self.assertEqual(result["review_url"], LANDED_URL)
+
+    @unittest.expectedFailure
+    def test_a_rerun_after_a_landed_approval_records_it(self) -> None:
+        """An earlier attempt's approval naming this run is this run's outcome."""
+        self.listing = [rest_review(f"Earlier attempt.\n\n{MARKER}\n")]
+        write = MagicMock(return_value={})
+        result = self.live_apply(write, live_state(approved_by=[BOT]))
+        write.assert_not_called()
+        self.assertEqual(result["verdict"], "approved")
+        self.assertEqual(result["review_url"], LANDED_URL)
+        self.assertEqual(result["reasons"], [])
+
+    def others(self) -> list[dict[str, Any]]:
+        """Reviews carrying this run's marker that are not this run's own."""
+        return [
+            rest_review(
+                MARKER, user={"login": BOT.removesuffix("[bot]"), "type": "User"}
+            ),
+            rest_review(MARKER, user={"login": "other-bot[bot]", "type": "Bot"}),
+            rest_review(MARKER, commit_id=MOVED),
+            rest_review(MARKER.replace(HEAD, MOVED)),
+            rest_review(MARKER.replace(f"run={RUN_ID}", "run=2")),
+            rest_review(f"{MARKER}\n\nagent text after the marker"),
+            rest_review(None),
+        ]
+
+    @unittest.expectedFailure
+    def test_another_actors_or_runs_approval_is_never_this_runs(self) -> None:
+        """Only this App's approval of this head ending in this run's marker counts."""
+        self.listing = self.others()
+        write = MagicMock(side_effect=apply_review.github.GitHubError(BAD_GATEWAY))
+        self.failed_apply(write)
+        write.assert_called_once()
+        self.listed.assert_called_once()
+        write = MagicMock(return_value={})
+        result = self.live_apply(write, live_state(approved_by=[BOT]))
+        write.assert_not_called()
+        self.assertEqual(self.listed.call_count, 2)
+        self.assertEqual(result["verdict"], "needs-human")
+        self.assertEqual(result["reasons"], [f"already approved by {BOT}"])
+
+    def test_another_approver_needs_no_look(self) -> None:
+        """Only this App's standing approval can be an earlier attempt's."""
+        write = MagicMock(return_value={})
+        result = self.live_apply(write, live_state(approved_by=["octocat"]))
+        self.listed.assert_not_called()
+        self.assertEqual(result["verdict"], "needs-human")
+
+    @unittest.expectedFailure
+    def test_a_failed_read_back_fails_the_run(self) -> None:
+        """When the look cannot say whether the approval landed, nothing resends."""
+        self.listing = apply_review.github.GitHubError(BAD_GATEWAY)
+        write = MagicMock(side_effect=apply_review.github.GitHubError(BAD_GATEWAY))
+        self.failed_apply(write)
+        write.assert_called_once()
+        self.listed.assert_called_once()
+        write = MagicMock(return_value={})
+        self.failed_apply(write, live_state(approved_by=[BOT]))
         write.assert_not_called()
 
 
