@@ -638,6 +638,8 @@ composes the body; the agent never writes to GitHub:
 ---
 Automated review by `lf-releng-code-review-bot[bot]` using model
 `claude-opus-5.5`; see the [run](<run_url>). This is not a human review.
+
+<!-- code-review-approval head=<head_sha> run=<run_id> -->
 ```
 
 The opening lines live in `OPENINGS` in `apply_review.py`, one per
@@ -683,10 +685,38 @@ The reviewer name is the App login from the selection, or
 "the code review bot" in a secretless run; the model name comes
 from the selection, not from the session.
 
-A GitHub failure during the write is an operational error: `apply`
-exits 1 and the workflow's fallback step writes a `failed` result
-whose reason names the step outcomes. A policy refusal is the code
-working: a typed `needs-human` result and exit 0.
+The last line is a hidden marker naming the head and the run, after
+the footer `apply` writes, so agent text cannot stand in for it (the
+sanitiser disarms `<`). `apply` takes the run from the run URL the
+workflow builds from `github.run_id`, and refuses a URL that names
+none.
+
+A transient failure of the write (a 5xx, or gh's own timeout) is
+ambiguous: GitHub may have created the review and lost the reply.
+`apply` makes the write through `bot_github.write_with_recovery` with
+`repeat_safe=False`, and `scripts/review_recovery.py` reads it back:
+it lists the pull request's reviews and takes the one GitHub marks
+as this App's, on `commit_id` equal to the head, whose body ends
+with this run's marker. Found, the write landed, and `apply` records
+`approved` with that review's link. Not found, the write's own
+failure stands and `apply` never sends it again: a review that a
+marker identifies is not repeat-safe, since a timed-out request can
+still land after the look, and a resend could approve twice. A
+failed read-back fails the run too. A review by anyone else, of
+another head, or naming another run never counts as this run's.
+
+A re-run of a failed attempt keeps the run id, so its marker is the
+same. When the live re-read finds this App's own approval standing on
+the head, `apply` looks for that marker first: an earlier attempt's
+approval that landed despite its failure becomes this run's
+`approved` outcome, rather than `needs-human` "already approved".
+Any other standing approval, the App's own from another run
+included, still refuses.
+
+Any other GitHub failure during the write is an operational error:
+`apply` exits 1 and the workflow's fallback step writes a `failed`
+result whose reason names the step outcomes. A policy refusal is the
+code working: a typed `needs-human` result and exit 0.
 
 ## 9. Inputs
 
@@ -977,7 +1007,7 @@ requires; the next select job fetches the newest five by that name.
 | Head or base changes while selection reads the diff      | Selection reads the diff by base and head  | The entry keeps the selected diff; an identity re-read skips a lasting change as `moved` for the next run          |
 | Human approves or requests changes during the run        | Live re-read sees it                       | `needs-human`; no duplicate or conflicting review                                                                  |
 | App token mint fails                                     | Apply step skipped                         | Fallback writes a `failed` result, a report row, no ledger entry; next run retries                                 |
-| GitHub unreachable during the write                      | `apply` exits 1                            | Same fallback; the run shows the failed entry                                                                      |
+| GitHub unreachable during the write                      | `apply` exits 1 unless the review landed   | Read back by the run's marker (§8.3), recorded if found, never resent; otherwise the same fallback                 |
 | Ledger artifact unreadable                               | Prior memory incomplete                    | Reported and left out of the merge; heads re-assessed                                                              |
 | Model PAT expired                                        | Every session fails at start               | Prefix guard cannot detect; rotation owner (§10.2); report shows uniform failures                                  |
 | Search hits the 1,000 ceiling                            | Selection fails before filtering           | Restrict `repositories` rather than review a subset                                                                |
@@ -1028,6 +1058,7 @@ scripts/review_comments.py               comment extraction, anchors (§19.5)
 scripts/comment_markdown.py              comment Markdown pass (§19.5)
 scripts/comment_review.py                check and comment (§19.5)
 scripts/comment_body.py                  review body and inline comments
+scripts/review_recovery.py               review read-back by marker (§8.3)
 scripts/handback.py                      hand-back list (§19.9)
 scripts/review_report.py                 report and new ledger
 scripts/review_verdict.py                Copilot review classifier (§19.2)
@@ -1419,7 +1450,8 @@ An antagonistic `result.json` has the same identity, `reasons`,
 `verdict` is `commented`, `would-comment`, `refused` or `failed`.
 `comment_count` counts inline and unplaced findings together;
 `inline` is `true` when GitHub placed the comments, `false` when they
-went into the body, and `null` when nothing posted. `settled` copies
+went into the body, and `null` when nothing posted or the review is
+an earlier attempt's, recorded on a re-run (§19.5). `settled` copies
 the check's flag onto a refusal of a check that was not commentable;
 a refusal at a live gate is never settled.
 
@@ -1674,6 +1706,22 @@ the review happened. Should GitHub refuse the inline placement anyway
 every finding listed in the body. Any other failure is operational:
 exit 1 and the `failed` fallback.
 
+The body ends with a hidden marker naming the round, the head and the
+run: the hand-back marker (§19.9) when the review goes back for
+revision, and otherwise
+`<!-- antagonistic-review round=N head=SHA run=RUN_ID -->`, which
+the hand-back job never reads as a hand-back. Each write recovers
+from a transient failure as the approval does (§8.3): the applier
+reads it back by that marker, records `commented` when it finds the
+review, and never sends it again when not. The 422 fallback does
+not change, since a 422 creates nothing. Before it posts, a live run
+whose re-read finds this App's review on the head looks for this
+run's marker too, so a
+re-run after an earlier attempt's ambiguous failure records that
+attempt's review, with the round and hand-back its marker names,
+and posts nothing; without the marker, the head's review refuses as
+before.
+
 `COMMENT` is the applier's one event, and `comment_review.post`, the
 one place it writes, refuses any other at the call. The tests check
 that behaviour: every write the applier makes in
@@ -1783,7 +1831,8 @@ when a maintainer takes over.
   names the round and says whether it went back; the third says a
   maintainer takes it from there. A review that hands back ends with a
   hidden marker,
-  `<!-- antagonistic-handback round=N head=SHA run=RUN_ID -->`.
+  `<!-- antagonistic-handback round=N head=SHA run=RUN_ID -->`;
+  one that does not ends with the run's review marker (§19.5).
   The gate refuses a fourth review, and the selection skips such a
   pull request as `round_cap` (§19.2).
 - **What authorises the dispatch.** The report finds result

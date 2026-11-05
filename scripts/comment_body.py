@@ -213,6 +213,19 @@ def handback_marker(round_number: int, head_sha: str, run_id: int) -> str:
     )
 
 
+def review_marker(round_number: int, head_sha: str, run_id: int) -> str:
+    """The hidden last line of a review that hands nothing back.
+
+    It names the run as the hand-back marker does, so the applier can
+    recognise its own review after an ambiguous write or on a re-run;
+    the hand-back job never reads it as a hand-back.
+    """
+    return (
+        f"<!-- antagonistic-review round={round_number} head={head_sha} "
+        f"run={run_id} -->"
+    )
+
+
 def round_note(round_number: int, handing_back: bool) -> str:
     """The line that says which round this is and what happens next."""
     where = f"Antagonistic round {round_number} of {MAX_ROUNDS}."

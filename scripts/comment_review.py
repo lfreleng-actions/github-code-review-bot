@@ -16,6 +16,7 @@ typed ``refused`` result and exit 0; a GitHub failure is exit 1.
 from __future__ import annotations
 
 import argparse
+import re
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any, cast
@@ -27,6 +28,7 @@ import pull_changes
 import pull_reads
 import review_comments as comments
 import review_files as files
+import review_recovery as recovery
 from selection_inputs import bot_identity
 from selection_rules import MAX_ROUNDS, author_skip, reviewed_by, rounds_by
 
@@ -198,10 +200,26 @@ def post(endpoint: str, payload: dict[str, Any]) -> dict[str, Any]:
     return github.api_write("POST", endpoint, payload)
 
 
+def earlier_review(
+    check: dict[str, Any], selection: dict[str, Any], run_id: int
+) -> tuple[dict[str, Any], re.Match[str]] | None:
+    """This App's review of the checked head that names this run, or None."""
+    bot_login = selection.get("bot_login")
+    return recovery.own_review(
+        str(check["repository"]),
+        int(check["number"]),
+        bot_login if isinstance(bot_login, str) else None,
+        str(check["head_sha"]),
+        run_id,
+        recovery.ANTAGONISTIC_RE,
+    )
+
+
 def submit(
     check: dict[str, Any],
     selection: dict[str, Any],
     run_url: str,
+    run_id: int,
     note: str = "",
     marker: str = "",
 ) -> tuple[dict[str, Any], bool]:
@@ -210,9 +228,24 @@ def submit(
     GitHub refuses the whole review with 422 when it cannot place one
     comment, and creates nothing; the comments then travel in the
     body, so a stale anchor costs its placement and not the review.
+    A transient failure is ambiguous instead: the review is looked for
+    by the marker that names this run, taken as the reply when found,
+    and never sent again.
     """
     repository, number = str(check["repository"]), int(check["number"])
     endpoint = f"repos/{repository}/pulls/{number}/reviews"
+
+    def landed() -> dict[str, Any] | None:
+        found = earlier_review(check, selection, run_id)
+        return found[0] if found is not None else None
+
+    def send(payload: dict[str, Any]) -> dict[str, Any]:
+        return recovery.post_once(
+            lambda: post(endpoint, payload),
+            landed,
+            f"review of {repository}#{number}",
+        )
+
     found = body.findings_of(check, "comments")
     unplaced = body.findings_of(check, "unplaced")
     payload: dict[str, Any] = {
@@ -226,7 +259,7 @@ def submit(
         org = repository.partition("/")[0]
         payload["comments"] = [body.inline(comment, org) for comment in found]
     try:
-        return post(endpoint, payload), bool(found)
+        return send(payload), bool(found)
     except github.GitHubError as exc:
         if exc.status != UNPROCESSABLE or not found:
             raise
@@ -246,7 +279,71 @@ def submit(
             marker=marker,
         ),
     }
-    return post(endpoint, payload), False
+    return send(payload), False
+
+
+def review_url_of(reply: dict[str, Any]) -> str | None:
+    """The review's link from a reply or a read-back, when it carries one."""
+    url = reply.get("html_url")
+    return url if isinstance(url, str) else None
+
+
+def comment_live(
+    args: argparse.Namespace,
+    check: dict[str, Any],
+    selection: dict[str, Any],
+    result: dict[str, Any],
+) -> None:
+    """Re-read the pull request, then post the review or record why not.
+
+    A re-run after an ambiguous write looks first for an earlier
+    attempt's review that names this run, and records that review as
+    this run's outcome instead of posting a second one.
+    """
+    repository, number = str(check["repository"]), int(check["number"])
+    reasons = cast("list[str]", result["reasons"])
+    state = pull_reads.pull_state(repository, number)
+    history = pull_changes.pull_reviews(repository, number)
+    bot_login = selection.get("bot_login")
+    own = bot_login if isinstance(bot_login, str) and bot_login else None
+    earlier = (
+        earlier_review(check, selection, args.run_id)
+        if not args.dry_run and own and reviewed_by(history, own, check["head_sha"])
+        else None
+    )
+    if earlier is not None:
+        review, marker = earlier
+        result["review_url"] = review_url_of(review)
+        result["round"] = int(marker.group("round"))
+        result["verdict"] = "commented"
+        result["handback"] = marker.group("kind") == "handback"
+        return
+    reasons.extend(gate_reasons(check, state, history, selection))
+    round_number = 1 + (rounds_by(history, own) if own else 0)
+    handing_back = bool(args.handback) and handback_due(
+        check, state, selection, round_number
+    )
+    result["round"] = round_number
+    if reasons:
+        result["verdict"] = "refused"
+    elif args.dry_run:
+        result["verdict"] = "would-comment"
+    else:
+        head = str(check["head_sha"])
+        reply, placed = submit(
+            check,
+            selection,
+            args.run_url,
+            args.run_id,
+            body.round_note(round_number, handing_back),
+            body.handback_marker(round_number, head, args.run_id)
+            if handing_back
+            else body.review_marker(round_number, head, args.run_id),
+        )
+        result["review_url"] = review_url_of(reply)
+        result["inline"] = placed
+        result["verdict"] = "commented"
+        result["handback"] = handing_back
 
 
 def run_comment(args: argparse.Namespace) -> None:
@@ -286,38 +383,7 @@ def run_comment(args: argparse.Namespace) -> None:
     }
     reasons = cast("list[str]", result["reasons"])
     if check.get("commentable") is True:
-        state = pull_reads.pull_state(repository, number)
-        history = pull_changes.pull_reviews(repository, number)
-        reasons.extend(gate_reasons(check, state, history, selection))
-        bot_login = selection.get("bot_login")
-        round_number = 1 + (
-            rounds_by(history, bot_login)
-            if isinstance(bot_login, str) and bot_login
-            else 0
-        )
-        handing_back = bool(args.handback) and handback_due(
-            check, state, selection, round_number
-        )
-        result["round"] = round_number
-        if reasons:
-            result["verdict"] = "refused"
-        elif args.dry_run:
-            result["verdict"] = "would-comment"
-        else:
-            reply, placed = submit(
-                check,
-                selection,
-                args.run_url,
-                body.round_note(round_number, handing_back),
-                body.handback_marker(round_number, check["head_sha"], args.run_id)
-                if handing_back
-                else "",
-            )
-            url = reply.get("html_url")
-            result["review_url"] = url if isinstance(url, str) else None
-            result["inline"] = placed
-            result["verdict"] = "commented"
-            result["handback"] = handing_back
+        comment_live(args, check, selection, result)
     elif not reasons:
         reasons.append("check found no usable verdict")
     if check.get("commentable") is not True:
