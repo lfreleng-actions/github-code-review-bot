@@ -1205,6 +1205,9 @@ jobs:
             artefacts/result.json
           retention-days: 90
           if-no-files-found: 'warn'
+          # Replaces any artifact a review leg uploaded first under this
+          # name: the report trusts only one made inside this step.
+          overwrite: true
 
   report:
     name: 'Report'
@@ -1213,7 +1216,7 @@ jobs:
     runs-on: 'ubuntu-latest'
     timeout-minutes: 10
     permissions:
-      actions: read  # Gather per-pull-request result artifacts
+      actions: read  # Gather result artifacts and their apply jobs
       contents: read  # Checkout the report script
     outputs:
       handback_pulls: "${{ steps.handback.outputs.pulls }}"
@@ -1282,13 +1285,24 @@ jobs:
             --directory evidence --expect "selection.json=$SELECTION_SHA" \
             --expect "ledger.json=$LEDGER_SHA"
 
+      # A bounded fetch, never download-artifact, which would expand a
+      # forged archive before anything checked its size. Each result
+      # counts as verified only when the run's jobs show the matching
+      # apply leg's upload step made it (docs/DESIGN.md section 12);
+      # the report keeps every other result out of the ledger.
       - name: 'Gather results'
         if: needs.select.outputs.run_agent == 'true'
-        # yamllint disable-line rule:line-length
-        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
-        with:
-          pattern: "code-review-result-${{ needs.select.outputs.namespace }}-*"
-          path: 'results'
+        env:
+          GH_TOKEN: "${{ github.token }}"
+          REPOSITORY: "${{ github.repository }}"
+          RUN_ID: "${{ github.run_id }}"
+          RUN_ATTEMPT: "${{ github.run_attempt }}"
+          NAMESPACE: "${{ needs.select.outputs.namespace }}"
+        run: |
+          python3 review-assets/scripts/result_fetch.py \
+            --repository "$REPOSITORY" --run-id "$RUN_ID" \
+            --run-attempt "$RUN_ATTEMPT" --namespace "$NAMESPACE" \
+            --selection evidence/selection.json --output results
 
       - name: 'Build report and ledger'
         env:

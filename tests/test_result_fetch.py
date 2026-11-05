@@ -187,7 +187,6 @@ class GatherCase(unittest.TestCase):
 class ProvenanceTest(GatherCase):
     """An artifact is verified only inside its own apply leg's upload step."""
 
-    @unittest.expectedFailure
     def test_a_normal_run_verifies_every_genuine_result(self) -> None:
         """Both job-name forms match, so a real run records its results."""
         fake = FakeGitHub(
@@ -226,7 +225,6 @@ class ProvenanceTest(GatherCase):
             fake.endpoints,
         )
 
-    @unittest.expectedFailure
     def test_job_names_match_exactly_or_by_the_caller_suffix(self) -> None:
         """A name that merely contains the apply name is not the apply leg."""
         module = gather_module()
@@ -246,7 +244,6 @@ class ProvenanceTest(GatherCase):
             with self.subTest(name=name):
                 self.assertIsNone(module.job_key(name, keys))
 
-    @unittest.expectedFailure
     def test_a_forgery_before_the_apply_step_is_unverified(self) -> None:
         """A review leg's upload under a selected key cannot be trusted."""
         fake = FakeGitHub(
@@ -264,7 +261,6 @@ class ProvenanceTest(GatherCase):
             self.verdicts(self.gather(fake)), {f"{PREFIX}repo-157-1": False}
         )
 
-    @unittest.expectedFailure
     def test_skew_is_tolerated_and_no_further(self) -> None:
         """A few seconds either side of the step count; more does not."""
         module = gather_module()
@@ -284,7 +280,6 @@ class ProvenanceTest(GatherCase):
         self.assertFalse(module.verified(None, windows))
         self.assertIsNone(module.timestamp("2026-11-05T10:01:00"))
 
-    @unittest.expectedFailure
     def test_another_keys_window_does_not_verify(self) -> None:
         """A name claiming one key gains nothing from another key's window."""
         fake = FakeGitHub(
@@ -307,7 +302,6 @@ class ProvenanceTest(GatherCase):
             self.verdicts(self.gather(fake)), {f"{PREFIX}repo-157-1": False}
         )
 
-    @unittest.expectedFailure
     def test_a_review_rerun_cannot_replace_another_keys_result(self) -> None:
         """A second attempt's review leg re-uploads key 157's attempt-1 name.
 
@@ -344,7 +338,6 @@ class ProvenanceTest(GatherCase):
             {f"{PREFIX}repo-157-2": True, f"{PREFIX}repo-157-1": False},
         )
 
-    @unittest.expectedFailure
     def test_a_job_listed_again_keeps_its_own_attempt(self) -> None:
         """An attempt-1 leg listed under attempt 2 still verifies attempt 1 alone."""
         leg = apply_job("repo-157", "2026-11-05T10:01:00Z", "2026-11-05T10:01:04Z")
@@ -360,7 +353,6 @@ class ProvenanceTest(GatherCase):
             {f"{PREFIX}repo-157-1": True, f"{PREFIX}repo-157-2": False},
         )
 
-    @unittest.expectedFailure
     def test_a_jobs_listing_failure_verifies_nothing(self) -> None:
         """Fail closed: the results are fetched, noted, and none is verified."""
         fake = FakeGitHub(
@@ -374,7 +366,6 @@ class ProvenanceTest(GatherCase):
             any("jobs listing failed" in note for note in manifest["notes"])
         )
 
-    @unittest.expectedFailure
     def test_a_skipped_upload_step_verifies_nothing(self) -> None:
         """An apply leg whose upload step never ran has no window."""
         leg = apply_job("repo-157", "2026-11-05T10:01:00Z", "2026-11-05T10:01:04Z")
@@ -386,7 +377,6 @@ class ProvenanceTest(GatherCase):
             self.verdicts(self.gather(fake)), {f"{PREFIX}repo-157-1": False}
         )
 
-    @unittest.expectedFailure
     def test_review_legs_match_under_any_key_or_caller(self) -> None:
         """Every invocation's review legs count, whatever key they carry."""
         module = gather_module()
@@ -411,7 +401,6 @@ class ProvenanceTest(GatherCase):
             with self.subTest(name=other):
                 self.assertFalse(module.review_leg(other))
 
-    @unittest.expectedFailure
     def test_another_invocations_review_leg_unverifies_an_upload(self) -> None:
         """Two calls in one run: a review leg overlapping the upload wins nothing.
 
@@ -456,7 +445,6 @@ class ProvenanceTest(GatherCase):
                     not expected,
                 )
 
-    @unittest.expectedFailure
     def test_a_review_leg_in_an_earlier_attempt_counts(self) -> None:
         """A review leg listed only under attempt 1 still blocks attempt 2."""
         leg = review_job("other-9", job_id=700)
@@ -482,7 +470,6 @@ class ProvenanceTest(GatherCase):
             {f"{PREFIX}repo-157-2": False},
         )
 
-    @unittest.expectedFailure
     def test_a_jobs_listing_not_read_in_full_verifies_nothing(self) -> None:
         """An entry that is not a job could hide a review leg."""
         fake = FakeGitHub(
@@ -506,7 +493,6 @@ class ProvenanceTest(GatherCase):
 class BoundTest(GatherCase):
     """Only selected keys are fetched, within a bound, and never unbounded."""
 
-    @unittest.expectedFailure
     def test_an_unselected_key_is_never_fetched(self) -> None:
         """A forged name for a key outside the selection is noted and ignored."""
         fake = FakeGitHub(
@@ -522,7 +508,6 @@ class BoundTest(GatherCase):
         self.assertFalse(self.output.exists() and any(self.output.iterdir()))
         self.assertEqual(len(manifest["notes"]), 2)
 
-    @unittest.expectedFailure
     def test_artifacts_past_the_bound_are_refused(self) -> None:
         """One per selected key per attempt, plus a margin, and no more."""
         module = gather_module()
@@ -537,7 +522,6 @@ class BoundTest(GatherCase):
         self.assertEqual(len(notes), 10 - 1 - module.MARGIN)
         self.assertTrue(all("over the bound" in note for note in notes))
 
-    @unittest.expectedFailure
     def test_an_oversized_compressible_result_is_refused_unextracted(self) -> None:
         """A small zip that would expand past the cap writes nothing."""
         module = gather_module()
@@ -558,7 +542,6 @@ class BoundTest(GatherCase):
         self.assertTrue(outcome.startswith("refused"))
         self.assertFalse((target / "result.json").exists())
 
-    @unittest.expectedFailure
     def test_an_unsupported_zip_version_is_refused(self) -> None:
         """zipfile's NotImplementedError is a refusal, not a crash."""
         module = gather_module()
@@ -580,7 +563,6 @@ class BoundTest(GatherCase):
         self.assertTrue(outcome.startswith("refused"))
         self.assertFalse((target / "result.json").exists())
 
-    @unittest.expectedFailure
     def test_an_invalid_utf8_filename_is_refused(self) -> None:
         """A UTF-8-flagged name that does not decode is a refusal."""
         module = gather_module()
@@ -604,7 +586,6 @@ class BoundTest(GatherCase):
         self.assertTrue(str(outcome).startswith("refused: UnicodeDecodeError"))
         self.assertFalse((target / "result.json").exists())
 
-    @unittest.expectedFailure
     def test_an_unexpected_exception_refuses_one_artifact(self) -> None:
         """Any exception from one fetch is a refusal; the rest still stand."""
         module = gather_module()
@@ -645,7 +626,6 @@ class BoundTest(GatherCase):
             f"{PREFIX}repo-157-1: refused: Unforeseen: 'surprise'", manifest["notes"]
         )
 
-    @unittest.expectedFailure
     def test_an_interrupt_still_stops_the_fetch(self) -> None:
         """Only Exception is caught: KeyboardInterrupt and SystemExit escape."""
         module = gather_module()
@@ -658,7 +638,6 @@ class BoundTest(GatherCase):
             ):
                 module.fetch_one(REPOSITORY, entry, self.output / "x")
 
-    @unittest.expectedFailure
     def test_a_reported_oversize_is_never_downloaded(self) -> None:
         """GitHub's own size stops the fetch before any transfer."""
         module = gather_module()
@@ -669,7 +648,6 @@ class BoundTest(GatherCase):
         self.assertTrue(str(outcome).startswith("refused"))
         download.assert_not_called()
 
-    @unittest.expectedFailure
     def test_a_failed_fetch_is_noted_and_the_rest_stand(self) -> None:
         """One artifact that cannot be fetched never fails the gather."""
         module = gather_module()
@@ -706,7 +684,6 @@ class BoundTest(GatherCase):
             any("refused: GitHubError" in note for note in manifest["notes"])
         )
 
-    @unittest.expectedFailure
     def test_an_artifact_listing_failure_gathers_nothing(self) -> None:
         """No listing means no results, with a note, not a failed run."""
         manifest = self.gather(FakeGitHub([], {}, artifacts_fail=True))
@@ -717,7 +694,6 @@ class BoundTest(GatherCase):
 class MainTest(GatherCase):
     """The CLI writes the manifest and never fails on an artifact."""
 
-    @unittest.expectedFailure
     def test_manifest_written_beside_the_results(self) -> None:
         """The report reads provenance.json from the results directory."""
         module = gather_module()
@@ -770,7 +746,6 @@ class MainTest(GatherCase):
         )
         self.assertIn("1 fetched, 1 verified", out.getvalue())
 
-    @unittest.expectedFailure
     def test_a_bad_selection_or_argument_fails(self) -> None:
         """Without a usable selection there is nothing to bound by."""
         module = gather_module()

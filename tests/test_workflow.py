@@ -878,19 +878,13 @@ class ApplyContracts(ReusableWorkflowCase):
 class ReportContracts(ReusableWorkflowCase):
     """The report job gathers results and publishes the next run's ledger."""
 
-    def test_report_gathers_namespaced_results(self) -> None:
-        """Only this invocation's results feed the report."""
-        gather = self.step("report", "Gather results")
-        self.assertEqual(
-            gather["with"]["pattern"],
-            "code-review-result-${{ needs.select.outputs.namespace }}-*",
-        )
+    def test_report_builds_from_the_gathered_results(self) -> None:
+        """The report reads the gathered results and carries the ledger."""
         run = flatten(self.step("report", "Build report and ledger")["run"])
         self.assertIn("review_report.py", run)
         self.assertIn("--ledger evidence/ledger.json", run)
         self.assertIn("--output-ledger ledger/ledger.json", run)
 
-    @unittest.expectedFailure
     def test_results_arrive_through_the_bounded_fetch(self) -> None:
         """No archive expands unbounded, and provenance is judged on arrival."""
         self.assertEqual(
@@ -926,7 +920,6 @@ class ReportContracts(ReusableWorkflowCase):
             {"actions": "read", "contents": "read"},
         )
 
-    @unittest.expectedFailure
     def test_the_apply_upload_replaces_a_squatted_name(self) -> None:
         """A review leg that uploads first under the name cannot keep it."""
         upload = self.action("apply", UPLOAD)

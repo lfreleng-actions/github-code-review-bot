@@ -1106,6 +1106,7 @@ class AntagonisticSelectionTest(SelectionCase):
                 "tier": None,
                 "dry_run": False,
                 "settled": True,
+                "verified": True,
             }
             for repo, number, verdict in (
                 ("alpha", 1, "refused"),
