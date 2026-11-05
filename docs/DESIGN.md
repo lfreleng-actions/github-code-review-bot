@@ -1839,7 +1839,9 @@ gh workflow run code-review-antagonistic.yaml \
    against one pull request with `handback` off; confirm the review
    lands as `COMMENT` on the right lines, under the antagonistic
    App's name.
-4. Once Code Monkey's revision rounds read this App's threads (§19.9),
+4. Code Monkey's revision rounds read this App's threads (§19.9).
+   After the end-to-end acceptance run
+   ([issue 28](https://github.com/lfreleng-actions/github-code-review-bot/issues/28)),
    create `CODE_MONKEY_DISPATCH_TOKEN`, then enable Code Monkey's
    dispatch of this workflow.
 
@@ -1979,9 +1981,14 @@ when a maintainer takes over.
   Monkey's ten-round Copilot cap applies within each antagonistic
   round (resetting it per round is Code Monkey's side), so the loop
   stays bounded at both levels.
-- **What Code Monkey must do.** A named pull request gets a revision
-  round whatever its threads, but Code Monkey's packet reads the
-  threads Copilot or a maintainer opened, and no others. Until it
-  reads this App's threads too, a hand-back starts a round that
-  cannot see the findings; keep `CODE_MONKEY_DISPATCH_TOKEN` unset
-  until then.
+- **What Code Monkey does.** A named pull request gets a revision
+  round whatever its threads. Code Monkey reads this App's inline
+  threads and review body as a revision source, beside the threads
+  Copilot or a maintainer opened, so a hand-back starts a round that
+  sees the findings. When a round answers one of this App's reviews,
+  its footer on the issue ends with `antagonistic=<review id>`, the
+  record the report and `handback` jobs read to skip an answered
+  hand-back. Keep `CODE_MONKEY_DISPATCH_TOKEN` unset until the
+  end-to-end acceptance run
+  ([issue 28](https://github.com/lfreleng-actions/github-code-review-bot/issues/28))
+  passes.
