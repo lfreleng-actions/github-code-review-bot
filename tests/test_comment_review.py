@@ -624,8 +624,7 @@ class CommentCommandTests(Tree):
             result = self.comment("--handback")
         body = self.write.call_args.args[2]["body"]
         self.assertIn(
-            "_Antagonistic round 1 of 3. Handed back to Code Monkey for a "
-            "revision round._",
+            "_Antagonistic round 1 of 3. Revision requested from Code Monkey._",
             body,
         )
         self.assertEqual(result["round"], 1)
