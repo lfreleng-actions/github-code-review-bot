@@ -174,8 +174,12 @@ once every review entry ends. It lists the run's jobs once and hands
 the apply matrix a map from each key to its leg's session outcome
 (§18.5).
 
-The **report** job gathers every result, renders the step summary,
-writes `report.json` and `report.md`, and publishes the new ledger.
+The **report** job gathers every result through the same bounded
+extractor, renders the step summary, writes `report.json` and
+`report.md`, and publishes the new ledger. A result enters the ledger
+when the run's jobs show that the apply leg for its key and attempt
+uploaded it, and never otherwise (§12); the review job can upload
+artifacts in the same run, so a name alone proves nothing.
 
 ### 4.1 Why tool policy cannot contain the review job
 
@@ -1019,11 +1023,69 @@ request cost and API seconds per session, which the report sums.
 `<key>` the pull request key. Trusted evidence downloads use the
 producer's artifact ID and verify the digests; the session download
 uses the name within the run and the bounded extractor (§8.1); the
-report job gathers results by name pattern within the namespace.
+report job gathers results through the bounded extractor too.
 Result and report names append the run attempt so a rerun avoids
 immutable-name conflicts while producer artifacts survive. The
 ledger's fixed name is unique within a run, which is all the upload
 requires; the next select job fetches the newest five by that name.
+
+**Gathering results.** `scripts/result_fetch.py` lists the run's
+artifacts through the API and takes those named
+`code-review-result-<ns>-<key>-<attempt>` for a key the
+digest-verified selection holds and an attempt that has run. It
+never fetches a name for any other key, and past one artifact per
+selected key per attempt, plus a margin of two, it refuses the
+oldest. Each one it fetches through `artifact_fetch.fetch_artifact`
+under its own cap table: `result.json` (required, 1 MiB), `check.json`
+and `check-summary.md` (optional, 1 MiB each, the size the apply step
+reads `check.json` under). The gather refuses an archive the fetch
+refuses, and one whose fetch or extraction raises any other exception
+(a zip feature or filename encoding Python's `zipfile` cannot read, a
+failed download), names the exception's type in a note in the report,
+and leaves the archive out; it never fails the run. It catches
+`Exception` and nothing wider, so an interrupt or exit still stops it.
+
+**Provenance.** Any job in the run can upload an artifact under any
+name, the review job included, so a result's name says nothing about
+who made it. The gather lists the run's jobs for every attempt, finds
+the apply leg named `Apply (<key>)` (or `<caller job> / Apply (<key>)`,
+the name GitHub gives a reusable workflow's job) and its `Attach apply
+result` step, and marks an artifact **verified** when its `created_at`
+falls inside that step's window for the same key and attempt, give or
+take five seconds of clock skew, and no review leg was in progress
+during that window. A review leg is any job named `Review (<key>)` or
+`<caller job> / Review (<key>)`, under any key, of any invocation in
+the run, in any attempt; one with no start or end time, one still running
+included, counts as in progress. Within one invocation every review
+leg finishes before any apply leg starts, since `apply` needs
+`review`, and an earlier attempt's jobs have all finished before a
+later one starts, so a run with one invocation (the scheduled and
+antagonistic callers) always passes the check. A caller that runs
+this workflow more than once in a run (`testing.yaml` does) shares
+the run's artifacts between its invocations, and one invocation's
+review leg can overlap another's upload; the check marks that upload
+unverified. The apply upload sets `overwrite`, so the genuine upload
+replaces any artifact a review leg made first under its name, and its
+newer `created_at` falls in the window.
+
+The proof rests on one premise: **no job but a review leg runs
+untrusted code**. Every other job runs trusted code. A change that
+adds another job running agent or pull-request code must name it a
+review leg here and in `scripts/result_fetch.py`, or the proof
+breaks.
+
+**Fail closed.** A result with no proven producer (the jobs listing
+failed or held an entry that is not a job, no apply leg or upload step
+matches, a review leg overlapped the upload, or GitHub dates the
+artifact outside the window) is **unverified**: the report
+shows it as such and adds no ledger entry, so it cannot suppress a
+future review. The report also binds every result to the selection:
+its key, repository, number and head must match the selected entry
+and its attempt the artifact name; `dry_run` comes from the
+selection; and one result stands per key, the latest verified
+attempt, else the latest unverified one. A hand-back still needs this
+App's own review on GitHub, with the marker naming this run (§19.9),
+whatever the result's provenance.
 
 ## 13. Failure Modes
 
@@ -1094,6 +1156,8 @@ scripts/comment_review.py                check and comment (§19.5)
 scripts/comment_body.py                  review body and inline comments
 scripts/review_recovery.py               review read-back by marker (§8.3)
 scripts/handback.py                      hand-back list (§19.9)
+scripts/result_fetch.py                  bounded result gather, provenance (§12)
+scripts/result_binding.py                results bound to the selection
 scripts/review_report.py                 report and new ledger
 scripts/review_verdict.py                Copilot review classifier (§19.2)
 scripts/review_sections.py               its section counts
@@ -1504,8 +1568,11 @@ a refusal at a live gate is never settled.
 `counts` names the verdicts of the selection's mode, so an
 antagonistic report counts `commented`, `would-comment`, `refused`
 and `failed`, and the report leaves out a result carrying the other
-mode's verdict as unreadable. `report.md` carries a heading with the
-mode, a one-line count summary, a table of
+mode's verdict as unreadable. Each result carries `verified` (§12),
+and `unverified` counts those without it, which the ledger leaves
+out. `report.md` carries a heading with the
+mode, a one-line count summary, a line naming any unverified result,
+the gather's notes on artifacts it left out, a table of
 results (pull request link, title, author, tier or comment count,
 verdict, review link or first reason), a table of skipped pull
 requests grouped by
@@ -1871,9 +1938,11 @@ when a maintainer takes over.
   one that does not ends with the run's review marker (§19.5).
   The gate refuses a fourth review, and the selection skips such a
   pull request as `round_cap` (§19.2).
-- **What authorises the dispatch.** The report finds result
-  artifacts by name, so a compromised review runner could upload one;
-  a result nominates and decides nothing. `scripts/handback.py` keeps
+- **What authorises the dispatch.** A compromised review runner could
+  upload a result artifact; the report marks one made outside the
+  apply leg's upload step unverified and keeps it out of the ledger
+  (§12), but a result, verified or not, nominates and decides
+  nothing. `scripts/handback.py` keeps
   a nominee when the
   digest-verified selection holds it, at the head the review read, by
   a hand-back author, and when this App's own review of that head,

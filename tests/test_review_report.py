@@ -18,6 +18,7 @@ from typing import Any
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 
 report = import_module("review_report")
+binding = import_module("result_binding")
 ledger = import_module("ledger")
 
 SHA = "a" * 40
@@ -74,7 +75,22 @@ def make_selection(**overrides: Any) -> dict[str, Any]:
                 "reason": "ci_failing",
             },
         ],
-        "pull_requests": [{"key": "repo-157", "author": "octocat"}],
+        "pull_requests": [
+            {
+                "key": "repo-157",
+                "author": "octocat",
+                "repository": "lfreleng-actions/repo",
+                "number": 157,
+                "head_sha": SHA,
+            },
+            {
+                "key": "repo-9",
+                "author": "hubot",
+                "repository": "lfreleng-actions/repo",
+                "number": 9,
+                "head_sha": SHA,
+            },
+        ],
     }
     selection.update(overrides)
     return selection
@@ -114,7 +130,7 @@ class CheckResultTest(unittest.TestCase):
     def test_valid_result_returned(self) -> None:
         """A conforming result comes back unchanged."""
         result = make_result()
-        self.assertIs(report.check_result(result, APPROVE), result)
+        self.assertIs(binding.check_result(result, APPROVE), result)
 
     def test_invalid_shapes_rejected(self) -> None:
         """Each contract field is checked."""
@@ -130,9 +146,9 @@ class CheckResultTest(unittest.TestCase):
         ]
         for overrides in bad:
             with self.subTest(overrides=overrides), self.assertRaises(ValueError):
-                report.check_result(make_result(**overrides), APPROVE)
+                binding.check_result(make_result(**overrides), APPROVE)
         with self.assertRaises(ValueError):
-            report.check_result(["not", "an", "object"], APPROVE)
+            binding.check_result(["not", "an", "object"], APPROVE)
 
 
 class LoadResultsTest(unittest.TestCase):
@@ -143,21 +159,32 @@ class LoadResultsTest(unittest.TestCase):
         holder = tempfile.TemporaryDirectory()
         self.addCleanup(holder.cleanup)
         self.root = Path(holder.name)
+        self.artifacts: list[dict[str, Any]] = []
 
-    def place(self, name: str, content: bytes) -> Path:
-        """Write ``name/result.json``."""
+    def place(self, name: str, content: bytes, key: str = "repo-157") -> Path:
+        """Write ``name/result.json`` and list it in the manifest."""
         directory = self.root / name
         directory.mkdir()
         path = directory / "result.json"
         path.write_bytes(content)
+        self.artifacts.append(
+            {"directory": name, "key": key, "attempt": 1, "verified": True}
+        )
+        (self.root / "provenance.json").write_text(
+            json.dumps({"schema": 1, "artifacts": self.artifacts, "notes": []})
+        )
         return path
 
     def test_results_ordered_by_key(self) -> None:
         """Directory names do not decide the order; keys do."""
-        self.place("z-dir", json.dumps(make_result(key="alpha-1")).encode())
-        self.place("a-dir", json.dumps(make_result(key="beta-2")).encode())
-        results, unreadable = report.load_results(self.root, APPROVE)
-        self.assertEqual([r["key"] for r in results], ["alpha-1", "beta-2"])
+        self.place(
+            "z-dir", json.dumps(make_result(key="repo-9", number=9)).encode(), "repo-9"
+        )
+        self.place("a-dir", json.dumps(make_result()).encode())
+        results, unreadable, _ = binding.load_results(
+            self.root, make_selection(), APPROVE
+        )
+        self.assertEqual([r["key"] for r in results], ["repo-157", "repo-9"])
         self.assertEqual(unreadable, [])
 
     def test_broken_files_noted_not_fatal(self) -> None:
@@ -165,32 +192,198 @@ class LoadResultsTest(unittest.TestCase):
         self.place("good", json.dumps(make_result()).encode())
         self.place("garbage", b"{not json")
         self.place("shape", json.dumps(make_result(verdict="meh")).encode())
-        self.place("big", b" " * (report.MAX_RESULT_BYTES + 1))
+        self.place("big", b" " * (binding.MAX_RESULT_BYTES + 1))
         (self.root / "linked").mkdir()
         (self.root / "linked" / "result.json").symlink_to(
             self.root / "good" / "result.json"
         )
-        results, unreadable = report.load_results(self.root, APPROVE)
+        self.place("missing", b"{}")
+        (self.root / "missing" / "result.json").unlink()
+        self.artifacts.append(
+            {"directory": "linked", "key": "repo-157", "attempt": 1, "verified": True}
+        )
+        (self.root / "provenance.json").write_text(
+            json.dumps({"schema": 1, "artifacts": self.artifacts, "notes": []})
+        )
+        results, unreadable, _ = binding.load_results(
+            self.root, make_selection(), APPROVE
+        )
         self.assertEqual(len(results), 1)
-        self.assertEqual(unreadable, ["big", "garbage", "linked", "shape"])
+        self.assertEqual(
+            sorted(unreadable), ["big", "garbage", "linked", "missing", "shape"]
+        )
 
     def test_missing_directory_is_empty(self) -> None:
         """No results dir means no results, not a failure."""
-        self.assertEqual(report.load_results(self.root / "absent", APPROVE), ([], []))
+        self.assertEqual(
+            binding.load_results(self.root / "absent", make_selection(), APPROVE),
+            ([], [], []),
+        )
 
-    def test_single_artifact_extracted_flat_is_read(self) -> None:
-        """download-artifact writes one match straight into the path."""
-        (self.root / "result.json").write_bytes(json.dumps(make_result()).encode())
-        (self.root / "check.json").write_text("{}")
-        results, unreadable = report.load_results(self.root, APPROVE)
-        self.assertEqual([r["key"] for r in results], ["repo-157"])
-        self.assertEqual(unreadable, [])
+    def test_an_unreadable_manifest_trusts_nothing(self) -> None:
+        """A manifest that cannot be read leaves every result out, with a note."""
+        self.place("good", json.dumps(make_result()).encode())
+        (self.root / "provenance.json").write_text("[]")
+        self.assertEqual(
+            binding.load_results(self.root, make_selection(), APPROVE),
+            ([], [], ["provenance manifest unreadable"]),
+        )
 
-    def test_subdirectories_without_a_result_are_ignored(self) -> None:
-        """Only ``*/result.json`` counts; other files are not results."""
-        (self.root / "other").mkdir()
-        (self.root / "other" / "check.json").write_text("{}")
-        self.assertEqual(report.load_results(self.root, APPROVE), ([], []))
+
+class ProvenanceTest(unittest.TestCase):
+    """Results bind to the selection, and only verified ones are recorded."""
+
+    def setUp(self) -> None:
+        """A results directory laid out as result_fetch.py writes it."""
+        holder = tempfile.TemporaryDirectory()
+        self.addCleanup(holder.cleanup)
+        self.root = Path(holder.name)
+        self.artifacts: list[dict[str, Any]] = []
+        self.notes: list[str] = []
+
+    def place(self, result: dict[str, Any], *, verified: bool, attempt: int = 1) -> str:
+        """Write one artifact's result and its manifest entry."""
+        key = str(result["key"])
+        name = f"code-review-result-ns-{key}-{attempt}"
+        (self.root / name).mkdir()
+        (self.root / name / "result.json").write_text(json.dumps(result))
+        self.artifacts.append(
+            {
+                "name": name,
+                "directory": name,
+                "key": key,
+                "attempt": attempt,
+                "verified": verified,
+            }
+        )
+        (self.root / "provenance.json").write_text(
+            json.dumps({"schema": 1, "artifacts": self.artifacts, "notes": self.notes})
+        )
+        return name
+
+    def load(self, selection: dict[str, Any] | None = None) -> Any:
+        """Load the results against the selection."""
+        return binding.load_results(self.root, selection or make_selection(), APPROVE)
+
+    def recorded(self, results: list[dict[str, Any]]) -> list[tuple[int, str]]:
+        """The (number, verdict) pairs a ledger built from the results holds."""
+        built = report.build_ledger(ledger.empty_ledger(), results, 42, "approve")
+        return [(entry["number"], entry["verdict"]) for entry in built["entries"]]
+
+    def test_a_verified_result_is_recorded(self) -> None:
+        """A normal run's genuine results reach the ledger."""
+        self.place(make_result(), verified=True)
+        results, unreadable, notes = self.load()
+        self.assertEqual((unreadable, notes), ([], []))
+        self.assertTrue(results[0]["verified"])
+        self.assertEqual(self.recorded(results), [(157, "approved")])
+
+    def test_a_result_for_an_unselected_key_is_ignored(self) -> None:
+        """A forged key outside the selection never reaches the report."""
+        name = self.place(make_result(key="other-1", number=1), verified=True)
+        results, unreadable, _ = self.load()
+        self.assertEqual(results, [])
+        self.assertEqual(unreadable, [name])
+
+    def test_a_forged_result_for_a_selected_key_suppresses_nothing(self) -> None:
+        """An unverified needs-human is shown but kept out of the ledger."""
+        self.place(make_result(verdict="needs-human", review_url=None), verified=False)
+        results, _, _ = self.load()
+        self.assertEqual([r["verdict"] for r in results], ["needs-human"])
+        self.assertFalse(results[0]["verified"])
+        self.assertEqual(self.recorded(results), [])
+        built = report.build_report(make_selection(), results, 0)
+        self.assertEqual(built["unverified"], 1)
+        rendered = report.render_markdown(built, make_selection(), [])
+        self.assertIn("1 result(s) unverified, kept out of the ledger", rendered)
+
+    def test_a_forged_verified_flag_in_the_file_is_overruled(self) -> None:
+        """Only the manifest says verified; the result file cannot."""
+        self.place(make_result(verified=True), verified=False)
+        results, _, _ = self.load()
+        self.assertFalse(results[0]["verified"])
+
+    def test_a_result_must_match_the_selected_pull_request(self) -> None:
+        """Repository, number, head and attempt all have to agree."""
+        for overrides in (
+            {"repository": "lfreleng-actions/other"},
+            {"number": 158},
+            {"head_sha": "b" * 40},
+            {"run_attempt": 2},
+            {"run_attempt": True},
+        ):
+            with self.subTest(overrides=overrides):
+                for child in self.root.iterdir():
+                    if child.is_dir():
+                        (child / "result.json").unlink()
+                        child.rmdir()
+                self.artifacts.clear()
+                self.place(make_result(**overrides), verified=True)
+                results, unreadable, _ = self.load()
+                self.assertEqual(results, [])
+                self.assertEqual(len(unreadable), 1)
+
+    def test_dry_run_comes_from_the_selection(self) -> None:
+        """A result cannot make a live run's verdict look like a dry one."""
+        self.place(make_result(dry_run=True), verified=True)
+        results, _, _ = self.load(make_selection(dry_run=False))
+        self.assertIs(results[0]["dry_run"], False)
+
+    def test_a_legitimate_retry_is_recorded_once(self) -> None:
+        """Two verified attempts of one key: the latest stands, once."""
+        self.place(make_result(verdict="needs-human", run_attempt=1), verified=True)
+        self.place(make_result(run_attempt=2), verified=True, attempt=2)
+        results, _, _ = self.load()
+        self.assertEqual(
+            [(r["run_attempt"], r["verdict"]) for r in results], [(2, "approved")]
+        )
+        self.assertEqual(self.recorded(results), [(157, "approved")])
+
+    def test_a_later_forgery_cannot_displace_a_verified_result(self) -> None:
+        """The latest verified attempt wins over a later unverified one."""
+        self.place(make_result(run_attempt=1), verified=True)
+        self.place(
+            make_result(verdict="needs-human", run_attempt=2),
+            verified=False,
+            attempt=2,
+        )
+        results, _, _ = self.load()
+        self.assertEqual(
+            [(r["run_attempt"], r["verified"]) for r in results], [(1, True)]
+        )
+
+    def test_a_jobs_listing_failure_records_nothing(self) -> None:
+        """With provenance unknown, every result stays out of the ledger."""
+        self.notes.append("jobs listing failed, so no result is verified: HTTP 403")
+        self.place(make_result(), verified=False)
+        self.place(make_result(key="repo-9", number=9), verified=False)
+        results, _, notes = self.load()
+        self.assertEqual(len(results), 2)
+        self.assertEqual(self.recorded(results), [])
+        rendered = report.render_markdown(
+            report.build_report(make_selection(), results, 0),
+            make_selection(),
+            [],
+            notes,
+        )
+        self.assertIn("- jobs listing failed", rendered)
+
+    def test_no_manifest_means_no_results(self) -> None:
+        """A result.json without the gather's manifest is never read."""
+        (self.root / "loose").mkdir()
+        (self.root / "loose" / "result.json").write_text(json.dumps(make_result()))
+        self.assertEqual(self.load(), ([], [], []))
+
+    def test_a_manifest_directory_must_be_a_plain_name(self) -> None:
+        """A manifest cannot point the read outside the results directory."""
+        self.artifacts.append(
+            {"directory": "../x", "key": "repo-157", "attempt": 1, "verified": True}
+        )
+        (self.root / "provenance.json").write_text(
+            json.dumps({"schema": 1, "artifacts": self.artifacts, "notes": []})
+        )
+        results, unreadable, _ = self.load()
+        self.assertEqual((results, unreadable), ([], ["../x"]))
 
 
 class ReportShapeTest(unittest.TestCase):
@@ -288,6 +481,8 @@ class AntagonisticReportTest(unittest.TestCase):
             make_result(key="c-3", number=3, verdict="refused", review_url=None),
             make_result(key="d-4", number=4, verdict="failed", review_url=None),
         ]
+        for result in results:
+            result["verified"] = True
         built = report.build_report(selection, results, 0)
         self.assertEqual(built["mode"], "antagonistic")
         self.assertEqual(
@@ -315,6 +510,8 @@ class AntagonisticReportTest(unittest.TestCase):
             make_result(key="c-3", number=3, verdict="refused"),
             make_result(key="d-4", number=4, verdict="failed", settled=True),
         ]
+        for result in results:
+            result["verified"] = True
         ledger_after = report.build_ledger(
             ledger.empty_ledger(), results, 42, "antagonistic"
         )
@@ -326,12 +523,12 @@ class AntagonisticReportTest(unittest.TestCase):
     def test_each_mode_refuses_the_other_modes_verdicts(self) -> None:
         """An approval cannot hide in an antagonistic report, nor the reverse."""
         with self.assertRaises(ValueError):
-            report.check_result(
+            binding.check_result(
                 make_result(verdict="approved"),
                 report.VERDICTS_BY_MODE["antagonistic"],
             )
         with self.assertRaises(ValueError):
-            report.check_result(make_result(verdict="commented"), APPROVE)
+            binding.check_result(make_result(verdict="commented"), APPROVE)
 
     def test_a_selection_without_a_known_mode_is_refused(self) -> None:
         """The report cannot guess which verdicts and ledger apply."""
@@ -384,12 +581,24 @@ class MainTest(unittest.TestCase):
 
     def test_outputs_written_and_ledger_extended(self) -> None:
         """Recorded verdicts join the prior ledger; failures do not."""
+        artifacts: list[dict[str, Any]] = []
         for name, result in (
             ("r1", make_result()),
             ("r2", make_result(key="repo-9", number=9, verdict="failed")),
         ):
             (self.results / name).mkdir()
             (self.results / name / "result.json").write_text(json.dumps(result))
+            artifacts.append(
+                {
+                    "directory": name,
+                    "key": result["key"],
+                    "attempt": 1,
+                    "verified": True,
+                }
+            )
+        (self.results / "provenance.json").write_text(
+            json.dumps({"schema": 1, "artifacts": artifacts, "notes": []})
+        )
         with redirect_stdout(io.StringIO()) as out:
             report.main(self.argv())
         written = json.loads((self.root / "out" / "report.json").read_text())
@@ -402,7 +611,7 @@ class MainTest(unittest.TestCase):
         self.assertEqual([e["run_id"] for e in new_ledger["entries"]], [1, 42])
         self.assertEqual(new_ledger["entries"][1]["head_sha"], SHA)
         self.assertIn("## Results", (self.root / "out" / "report.md").read_text())
-        self.assertIn("2 result(s), 2 skipped", out.getvalue())
+        self.assertIn("2 result(s), 0 unverified, 2 skipped", out.getvalue())
 
     def test_no_results_keeps_the_prior_ledger(self) -> None:
         """An absent results dir still yields a report and the same ledger."""

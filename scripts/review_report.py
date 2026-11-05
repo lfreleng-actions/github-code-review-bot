@@ -3,14 +3,18 @@
 
 """Summarise one run's results and carry the ledger forward.
 
-The report job downloads every ``code-review-result-*`` artifact into
-one directory, one subdirectory each, and this script folds them into
-``report.json`` (machine-readable), ``report.md`` (for the step
-summary) and the ledger the next run's select job will read.
+The report job gathers every ``code-review-result-<namespace>-*``
+artifact through ``result_fetch.py``, which writes each into its own
+subdirectory with a ``provenance.json`` manifest, and this script
+folds them into ``report.json`` (machine-readable), ``report.md`` (for
+the step summary) and the ledger the next run's select job will read.
 
-Result files are written by the apply job and are trusted, but one
-that is unreadable or malformed must not cost the run: it is left out
-with a note, so a single broken matrix leg cannot hide every other
+Results are read and bound to the selection by ``result_binding``;
+only one whose artifact the gather verified enters the ledger, so a
+forged result cannot suppress a future review.
+
+A result that is unreadable or malformed must not cost the run: it is
+left out with a note, so a single broken matrix leg cannot hide every other
 verdict or stop the ledger from being carried forward.
 """
 
@@ -26,6 +30,7 @@ from typing import Any, cast
 import bot_github as github
 import ledger
 from bot_evidence import MAX_EVIDENCE_BYTES, read_regular
+from result_binding import load_results, rows_of
 from review_policy import defuse
 
 SCHEMA = 1
@@ -41,7 +46,6 @@ RECORDED_BY_MODE = {
     "approve": frozenset({"approved", "would-approve", "needs-human"}),
     "antagonistic": frozenset({"commented", "would-comment", "refused"}),
 }
-MAX_RESULT_BYTES = 1024 * 1024
 LINE_LIMIT = 120
 # C0 and C1 controls plus the Unicode line separators: any of them
 # could break a table row or smuggle a workflow command into a log.
@@ -90,84 +94,12 @@ def mode_of(selection: dict[str, Any]) -> str:
     return mode
 
 
-def check_result(raw: Any, verdicts: tuple[str, ...]) -> dict[str, Any]:
-    """Validate one result file's shape, raising ValueError when it is off."""
-    if not isinstance(raw, dict):
-        raise ValueError("result is not an object")
-    result = cast("dict[str, Any]", raw)
-    repository = result.get("repository")
-    number = result.get("number")
-    head_sha = result.get("head_sha")
-    key = result.get("key")
-    if result.get("schema") != SCHEMA:
-        raise ValueError(f"result schema is not {SCHEMA}")
-    if result.get("verdict") not in verdicts:
-        raise ValueError("result verdict is not one this mode produces")
-    if (
-        not isinstance(key, str)
-        or not key
-        or not isinstance(repository, str)
-        or not github.REPO_RE.fullmatch(repository)
-        or type(number) is not int
-        or number <= 0
-        or not isinstance(head_sha, str)
-        or not github.SHA_RE.fullmatch(head_sha)
-    ):
-        raise ValueError("result has an invalid key, repository, number or head")
-    # The ledger needs the mode; checking here keeps a bad file out of
-    # the report rather than failing the ledger write later.
-    if not isinstance(result.get("dry_run"), bool):
-        raise ValueError("result dry_run is not a boolean")
-    return result
-
-
-def result_files(directory: Path) -> list[Path]:
-    """Locate ``result.json`` at the top level and one level down.
-
-    download-artifact lays several matching artifacts out one per
-    subdirectory, but writes a single match straight into the path
-    with no subdirectory, so both shapes are read.
-    """
-    found = [directory / "result.json"]
-    found.extend(child / "result.json" for child in sorted(directory.iterdir()))
-    return [path for path in found if path.is_file()]
-
-
-def load_results(
-    directory: Path, verdicts: tuple[str, ...]
-) -> tuple[list[dict[str, Any]], list[str]]:
-    """Read every result file, ordered by key, naming the ones left out."""
-    results: list[dict[str, Any]] = []
-    unreadable: list[str] = []
-    if not directory.is_dir():
-        return results, unreadable
-    for path in result_files(directory):
-        try:
-            content = read_regular(path, MAX_RESULT_BYTES)
-            results.append(check_result(json.loads(content), verdicts))
-        except (OSError, ValueError, RecursionError):
-            unreadable.append(path.parent.name)
-    results.sort(key=lambda result: str(result["key"]))
-    return results, unreadable
-
-
 def load_selection(path: Path) -> dict[str, Any]:
     """Read the trusted selection, which must be a JSON object."""
     parsed: Any = json.loads(read_regular(path, MAX_EVIDENCE_BYTES))
     if not isinstance(parsed, dict):
         raise ValueError("selection is not an object")
     return cast("dict[str, Any]", parsed)
-
-
-def rows_of(value: Any) -> list[dict[str, Any]]:
-    """The object entries of a list field, or nothing when it is not a list."""
-    if not isinstance(value, list):
-        return []
-    return [
-        cast("dict[str, Any]", item)
-        for item in cast("list[Any]", value)
-        if isinstance(item, dict)
-    ]
 
 
 def skipped_rows(selection: dict[str, Any]) -> list[dict[str, Any]]:
@@ -221,11 +153,16 @@ def spend(results: list[dict[str, Any]]) -> tuple[float, int]:
 def recordable(result: dict[str, Any]) -> bool:
     """Whether a result may enter the ledger at all.
 
+    Only a verified result may: one whose provenance is unknown could be
+    a forgery written to make the next run skip a head.
+
     A refusal is recorded only when the applier marked it settled: the
     session's own verdict gave nothing to post, and a second paid
     session reads the same head with the same prompt. A gate refusal
     (a draft, a moved head) is left out, so the head is looked at again.
     """
+    if result.get("verified") is not True:
+        return False
     return result.get("verdict") != "refused" or result.get("settled") is True
 
 
@@ -252,6 +189,9 @@ def build_report(
         "dry_run": selection.get("dry_run") is True,
         "counts": count_verdicts(selection, results),
         "results": results,
+        "unverified": sum(
+            1 for result in results if result.get("verified") is not True
+        ),
         "skipped": skipped_rows(selection),
         "premium_requests": premium_requests,
         "agent_seconds": agent_seconds,
@@ -291,7 +231,10 @@ def table(headers: list[str], rows: list[list[str]]) -> list[str]:
 
 
 def render_markdown(
-    report: dict[str, Any], selection: dict[str, Any], unreadable: list[str]
+    report: dict[str, Any],
+    selection: dict[str, Any],
+    unreadable: list[str],
+    notes: tuple[str, ...] | list[str] = (),
 ) -> str:
     """The step-summary view of the report."""
     authors = {
@@ -313,6 +256,23 @@ def render_markdown(
     if unreadable:
         names = ", ".join(one_line(name, 60) for name in unreadable)
         lines.extend(["", f"{len(unreadable)} result file(s) unreadable: {names}"])
+    unverified = [
+        pull_label(result)
+        for result in cast("list[dict[str, Any]]", report["results"])
+        if result.get("verified") is not True
+    ]
+    if unverified:
+        names = ", ".join(one_line(name, 60) for name in unverified)
+        lines.extend(
+            [
+                "",
+                f"{len(unverified)} result(s) unverified, kept out of the ledger:"
+                f" {names}",
+            ]
+        )
+    if notes:
+        lines.extend(["", "Left out while gathering:", ""])
+        lines.extend(f"- {one_line(note, 200)}" for note in notes)
     result_rows = [
         [
             link(pull_label(result), result.get("url")),
@@ -378,21 +338,24 @@ def main(argv: list[str] | None = None) -> None:
         selection = load_selection(args.selection)
         mode = mode_of(selection)
         prior = ledger.load_ledger(args.ledger)
-        results, unreadable = load_results(args.results, VERDICTS_BY_MODE[mode])
+        results, unreadable, notes = load_results(
+            args.results, selection, VERDICTS_BY_MODE[mode]
+        )
         new_ledger = build_ledger(prior, results, run_id, mode)
         report = build_report(selection, results, len(new_ledger["entries"]))
         write_json(args.output_json, report)
         write_json(args.output_ledger, new_ledger)
         args.output_md.parent.mkdir(parents=True, exist_ok=True)
         args.output_md.write_text(
-            render_markdown(report, selection, unreadable), encoding="utf-8"
+            render_markdown(report, selection, unreadable, notes), encoding="utf-8"
         )
     except (OSError, ValueError, RecursionError, ledger.LedgerError) as exc:
         parser.exit(1, f"report: {github.safe_message(exc)}\n")
     counts = cast("dict[str, int]", report["counts"])
     print(
-        f"report: {len(results)} result(s), {counts['skipped']} skipped, "
-        f"{len(unreadable)} unreadable -> {args.output_md}"
+        f"report: {len(results)} result(s), {report['unverified']} unverified, "
+        f"{counts['skipped']} skipped, {len(unreadable)} unreadable"
+        f" -> {args.output_md}"
     )
 
 

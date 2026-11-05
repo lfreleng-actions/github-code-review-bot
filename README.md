@@ -63,8 +63,9 @@ select (trusted)       review (untrusted, matrix)      apply (trusted, matrix)
    and, on the live path alone, mints a `pull-requests: write` token
    for that one repository and posts an APPROVE review marked as
    automated.
-4. **Report** gathers every result into a run report and publishes the
-   next run's ledger.
+4. **Report** gathers every result through a bounded fetch into a run
+   report and publishes the next run's ledger, which records a result
+   when the run's apply job provably uploaded it.
 
 In the antagonistic mode, Select keeps the listed bots' pull
 requests instead of humans', the agent emits findings anchored to

@@ -878,17 +878,52 @@ class ApplyContracts(ReusableWorkflowCase):
 class ReportContracts(ReusableWorkflowCase):
     """The report job gathers results and publishes the next run's ledger."""
 
-    def test_report_gathers_namespaced_results(self) -> None:
-        """Only this invocation's results feed the report."""
-        gather = self.step("report", "Gather results")
-        self.assertEqual(
-            gather["with"]["pattern"],
-            "code-review-result-${{ needs.select.outputs.namespace }}-*",
-        )
+    def test_report_builds_from_the_gathered_results(self) -> None:
+        """The report reads the gathered results and carries the ledger."""
         run = flatten(self.step("report", "Build report and ledger")["run"])
         self.assertIn("review_report.py", run)
         self.assertIn("--ledger evidence/ledger.json", run)
         self.assertIn("--output-ledger ledger/ledger.json", run)
+
+    def test_results_arrive_through_the_bounded_fetch(self) -> None:
+        """No archive expands unbounded, and provenance is judged on arrival."""
+        self.assertEqual(
+            self.actions("report", DOWNLOAD),
+            [self.step("report", "Fetch selection evidence")],
+        )
+        gather = self.step("report", "Gather results")
+        self.assertFalse(is_action(gather, DOWNLOAD))
+        self.assertEqual(gather["if"], "needs.select.outputs.run_agent == 'true'")
+        self.assertEqual(
+            gather["env"],
+            {
+                "GH_TOKEN": "${{ github.token }}",
+                "REPOSITORY": "${{ github.repository }}",
+                "RUN_ID": "${{ github.run_id }}",
+                "RUN_ATTEMPT": "${{ github.run_attempt }}",
+                "NAMESPACE": "${{ needs.select.outputs.namespace }}",
+            },
+        )
+        self.assertIn(
+            "python3 review-assets/scripts/result_fetch.py"
+            ' --repository "$REPOSITORY" --run-id "$RUN_ID"'
+            ' --run-attempt "$RUN_ATTEMPT" --namespace "$NAMESPACE"'
+            " --selection evidence/selection.json --output results",
+            flatten(gather["run"]),
+        )
+        self.assertLess(
+            self.position("report", "Verify evidence bytes"),
+            self.position("report", "Gather results"),
+        )
+        self.assertEqual(
+            self.jobs["report"]["permissions"],
+            {"actions": "read", "contents": "read"},
+        )
+
+    def test_the_apply_upload_replaces_a_squatted_name(self) -> None:
+        """A review leg that uploads first under the name cannot keep it."""
+        upload = self.action("apply", UPLOAD)
+        self.assertIs(upload["with"]["overwrite"], True)
 
     def test_ledger_artifact_has_a_fixed_name_and_long_retention(self) -> None:
         """The next select job finds the mode's ledger by name across runs."""
