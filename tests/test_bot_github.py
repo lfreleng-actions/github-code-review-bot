@@ -316,6 +316,67 @@ class WriteWithRecoveryTest(unittest.TestCase):
         landed.assert_not_called()
         sleep.assert_not_called()
 
+    def test_rejected_retry_after_a_late_landing_is_recovered(self) -> None:
+        """A timed-out first copy can land during the backoff.
+
+        A compare-and-swap retry is then refused, since the head moved
+        to the first copy's commit. That refusal is looked at, and the
+        write that landed is returned; nothing is sent a third time.
+        """
+        refused = github.GitHubError("gh: Expected head mismatch (HTTP 422)")
+        write, calls = self.fake([github.GitHubError(self.BAD_GATEWAY), refused])
+        looks = iter([None, {"oid": "late"}])
+        with (
+            patch.object(github.time, "sleep") as sleep,
+            patch("sys.stderr", new_callable=io.StringIO) as err,
+        ):
+            got = github.write_with_recovery(
+                write, lambda: next(looks), label="commit", repeat_safe=True
+            )
+        self.assertEqual(got, {"oid": "late"})
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(sleep.call_count, 1)
+        self.assertIn("commit: landed despite", err.getvalue())
+        self.assertIn("HTTP 422", err.getvalue())
+
+    def test_rejected_retry_that_did_not_land_is_not_sent_again(self) -> None:
+        """A refused retry with nothing landed raises the refusal at once."""
+        refused = github.GitHubError("gh: Expected head mismatch (HTTP 422)")
+        write, calls = self.fake([github.GitHubError(self.BAD_GATEWAY), refused])
+        landed = unittest.mock.Mock(return_value=None)
+        with (
+            patch.object(github.time, "sleep") as sleep,
+            patch("sys.stderr", new_callable=io.StringIO),
+            self.assertRaises(github.GitHubError) as caught,
+        ):
+            github.write_with_recovery(write, landed, repeat_safe=True)
+        self.assertIs(caught.exception, refused)
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(landed.call_count, 2)
+        self.assertEqual(sleep.call_count, 1)
+
+    def test_rejected_retry_whose_look_fails_keeps_both_errors(self) -> None:
+        """A refused retry that cannot be checked fails with both errors."""
+        refused = github.GitHubError("gh: Expected head mismatch (HTTP 422)")
+        write, _ = self.fake([github.GitHubError(self.BAD_GATEWAY), refused])
+        looks = iter([None])
+
+        def landed() -> Any:
+            for outcome in looks:
+                return outcome
+            raise github.GitHubError("gh: Server Error (HTTP 500)")
+
+        with (
+            patch.object(github.time, "sleep"),
+            patch("sys.stderr", new_callable=io.StringIO),
+            self.assertRaises(github.GitHubError) as caught,
+        ):
+            github.write_with_recovery(write, landed, repeat_safe=True)
+        message = str(caught.exception)
+        self.assertIn("HTTP 422", message)
+        self.assertIn("HTTP 500", message)
+        self.assertEqual(caught.exception.status, 422)
+
     def test_status_outranks_timeout_wording(self) -> None:
         """A 422 whose detail says "timed out" is rejected, not retried."""
         rejected = github.GitHubError(
