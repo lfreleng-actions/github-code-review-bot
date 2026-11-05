@@ -535,7 +535,6 @@ class ApplyCommandTests(unittest.TestCase):
             self.live_apply(write, state)
         self.assertEqual(caught.exception.code, 1)
 
-    @unittest.expectedFailure
     def test_the_approval_ends_with_the_run_marker(self) -> None:
         """The marker names the head and the run, after the footer."""
         write = MagicMock(return_value={})
@@ -543,7 +542,6 @@ class ApplyCommandTests(unittest.TestCase):
         body = write.call_args.args[2]["body"]
         self.assertTrue(body.endswith(f"This is not a human review.\n\n{MARKER}"))
 
-    @unittest.expectedFailure
     def test_a_run_url_that_names_no_run_fails_before_writing(self) -> None:
         """The marker needs the run, so an unrecognised URL is an error."""
         write = MagicMock(return_value={})
@@ -573,7 +571,6 @@ class ApplyCommandTests(unittest.TestCase):
         self.assertEqual(caught.exception.code, 1)
         write.assert_not_called()
 
-    @unittest.expectedFailure
     def test_a_lost_approval_that_did_not_land_fails_without_a_second_post(
         self,
     ) -> None:
@@ -585,7 +582,6 @@ class ApplyCommandTests(unittest.TestCase):
             f"repos/{REPO}/pulls/157/reviews?per_page=100"
         )
 
-    @unittest.expectedFailure
     def test_a_lost_approval_that_landed_is_recorded_without_a_second_post(
         self,
     ) -> None:
@@ -597,7 +593,6 @@ class ApplyCommandTests(unittest.TestCase):
         self.assertEqual(result["verdict"], "approved")
         self.assertEqual(result["review_url"], LANDED_URL)
 
-    @unittest.expectedFailure
     def test_a_rerun_after_a_landed_approval_records_it(self) -> None:
         """An earlier attempt's approval naming this run is this run's outcome."""
         self.listing = [rest_review(f"Earlier attempt.\n\n{MARKER}\n")]
@@ -622,7 +617,6 @@ class ApplyCommandTests(unittest.TestCase):
             rest_review(None),
         ]
 
-    @unittest.expectedFailure
     def test_another_actors_or_runs_approval_is_never_this_runs(self) -> None:
         """Only this App's approval of this head ending in this run's marker counts."""
         self.listing = self.others()
@@ -644,7 +638,6 @@ class ApplyCommandTests(unittest.TestCase):
         self.listed.assert_not_called()
         self.assertEqual(result["verdict"], "needs-human")
 
-    @unittest.expectedFailure
     def test_a_failed_read_back_fails_the_run(self) -> None:
         """When the look cannot say whether the approval landed, nothing resends."""
         self.listing = apply_review.github.GitHubError(BAD_GATEWAY)

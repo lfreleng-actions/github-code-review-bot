@@ -16,6 +16,7 @@ approves.
 from __future__ import annotations
 
 import argparse
+import re
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any, cast
@@ -25,11 +26,16 @@ import bot_github as github
 import pull_reads
 import review_files as files
 import review_policy as policy
+import review_recovery as recovery
+from selection_inputs import bot_identity
 
 SCHEMA = 1
 MODE = "approve"
 SOURCE = "apply_review"
 DEFAULT_BOT = "the code review bot"
+# The workflow builds the run URL from github.run_id, so the run the
+# approval marker names is the last segment.
+RUN_URL_RE = re.compile(r"/actions/runs/(?P<run>[1-9][0-9]*)\Z")
 OPENINGS = {
     "trivial": (
         "🤖 Auto-approved by agent: trivial change (dependency/docs/formatting only)."
@@ -91,13 +97,23 @@ def run_check(args: argparse.Namespace) -> None:
     print(f"tier={check['tier']}")
 
 
+def run_id_of(run_url: str) -> int:
+    """The workflow run the URL names, which the approval marker records."""
+    found = RUN_URL_RE.search(run_url)
+    if found is None:
+        raise ValueError("--run-url does not name a workflow run")
+    return int(found.group("run"))
+
+
 def approval_body(
     check: dict[str, Any], selection: dict[str, Any], run_url: str
 ) -> str:
     """Compose the review body; the agent never writes to GitHub itself.
 
     The summary is the agent's text: it links nowhere outside the
-    organisation the pull request belongs to.
+    organisation the pull request belongs to. The body ends with the
+    hidden marker naming the head and the run, after the footer this
+    function writes, so the applier can recognise its own approval.
     """
     bot_login = selection.get("bot_login")
     reviewer = bot_login if isinstance(bot_login, str) and bot_login else DEFAULT_BOT
@@ -109,7 +125,8 @@ def approval_body(
     return (
         f"{OPENINGS[str(check['tier'])]}\n\n{summary}\n\n---\n"
         f"Automated review by `{reviewer}` using model `{model}`; "
-        f"see the [run]({run_url}). This is not a human review."
+        f"see the [run]({run_url}). This is not a human review.\n\n"
+        f"{recovery.approval_marker(str(check['head_sha']), run_id_of(run_url))}"
     )
 
 
@@ -156,6 +173,82 @@ def validated_check(path: Path) -> dict[str, Any]:
     return check
 
 
+def own_approval(
+    check: dict[str, Any], selection: dict[str, Any], run_url: str
+) -> dict[str, Any] | None:
+    """This App's approval of the checked head that names this run, or None."""
+    bot_login = selection.get("bot_login")
+    found = recovery.own_review(
+        str(check["repository"]),
+        int(check["number"]),
+        bot_login if isinstance(bot_login, str) else None,
+        str(check["head_sha"]),
+        run_id_of(run_url),
+        recovery.APPROVE_RE,
+    )
+    return found[0] if found is not None else None
+
+
+def approved_by_self(selection: dict[str, Any], state: dict[str, Any]) -> bool:
+    """Whether this App's approval stands on the live head."""
+    bot_login = selection.get("bot_login")
+    if not isinstance(bot_login, str) or not bot_login:
+        return False
+    approved_by = cast("list[Any]", state.get("approved_by") or [])
+    return bot_identity(bot_login) in {
+        bot_identity(str(login)) for login in approved_by
+    }
+
+
+def approve_live(
+    args: argparse.Namespace,
+    check: dict[str, Any],
+    selection: dict[str, Any],
+    result: dict[str, Any],
+) -> None:
+    """Re-read the pull request, then approve it or record why not.
+
+    A standing approval from this App that names this run is an
+    earlier attempt's, whose reply a transient failure lost: it is
+    recorded as this run's outcome rather than as a refusal. A
+    transient failure of the write itself is settled the same way,
+    by reading the approval back, never by sending it again.
+    """
+    repository, number = str(check["repository"]), int(check["number"])
+    reasons = cast("list[str]", result["reasons"])
+    state = pull_reads.pull_state(repository, number)
+    earlier = (
+        own_approval(check, selection, args.run_url)
+        if not args.dry_run and approved_by_self(selection, state)
+        else None
+    )
+    if earlier is not None:
+        reply = earlier
+    else:
+        reasons.extend(gate_reasons(check, state))
+        if reasons:
+            result["verdict"] = "needs-human"
+            return
+        if args.dry_run:
+            result["verdict"] = "would-approve"
+            return
+        payload = {
+            "commit_id": check["head_sha"],
+            "event": "APPROVE",
+            "body": approval_body(check, selection, args.run_url),
+        }
+        reply = recovery.post_once(
+            lambda: github.api_write(
+                "POST", f"repos/{repository}/pulls/{number}/reviews", payload
+            ),
+            lambda: own_approval(check, selection, args.run_url),
+            f"approval of {repository}#{number}",
+        )
+    url = reply.get("html_url")
+    result["review_url"] = url if isinstance(url, str) else None
+    result["verdict"] = "approved"
+
+
 def run_apply(args: argparse.Namespace) -> None:
     """Gate the live pull request, then approve or record why not."""
     check = validated_check(args.check)
@@ -186,25 +279,7 @@ def run_apply(args: argparse.Namespace) -> None:
     }
     reasons = cast("list[str]", result["reasons"])
     if check.get("approvable") is True:
-        state = pull_reads.pull_state(repository, number)
-        reasons.extend(gate_reasons(check, state))
-        if reasons:
-            result["verdict"] = "needs-human"
-        elif args.dry_run:
-            result["verdict"] = "would-approve"
-        else:
-            reply = github.api_write(
-                "POST",
-                f"repos/{repository}/pulls/{number}/reviews",
-                {
-                    "commit_id": check["head_sha"],
-                    "event": "APPROVE",
-                    "body": approval_body(check, selection, args.run_url),
-                },
-            )
-            url = reply.get("html_url")
-            result["review_url"] = url if isinstance(url, str) else None
-            result["verdict"] = "approved"
+        approve_live(args, check, selection, result)
     elif not reasons:
         reasons.append("check judged the change not approvable")
     files.write_json(args.output, result)

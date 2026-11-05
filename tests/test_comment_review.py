@@ -1049,7 +1049,6 @@ class CommentCommandTests(Tree):
             self.live_comment(*extra)
         self.assertEqual(caught.exception.code, 1)
 
-    @unittest.expectedFailure
     def test_a_review_without_a_hand_back_ends_with_the_run_marker(self) -> None:
         """The marker names the round, the head and the run, and closes the body."""
         self.live_comment()
@@ -1061,7 +1060,6 @@ class CommentCommandTests(Tree):
         )
         self.assertEqual(posted.count("<!--"), 1)
 
-    @unittest.expectedFailure
     def test_a_lost_review_that_did_not_land_fails_without_a_second_post(
         self,
     ) -> None:
@@ -1073,7 +1071,6 @@ class CommentCommandTests(Tree):
             f"repos/{REPO}/pulls/157/reviews?per_page=100"
         )
 
-    @unittest.expectedFailure
     def test_a_lost_review_that_landed_is_recorded_without_a_second_post(
         self,
     ) -> None:
@@ -1091,7 +1088,6 @@ class CommentCommandTests(Tree):
                 self.assertIs(result["handback"], handback)
                 self.assertEqual(result["round"], 1)
 
-    @unittest.expectedFailure
     def test_a_rerun_after_a_landed_review_posts_nothing(self) -> None:
         """An earlier attempt's review naming this run is this run's outcome."""
         self.history = [self.own_review(HEAD)]
@@ -1134,7 +1130,6 @@ class CommentCommandTests(Tree):
             rest_review(mark, body=None),
         ]
 
-    @unittest.expectedFailure
     def test_another_actors_or_runs_review_is_never_this_runs(self) -> None:
         """Only this App's review of this head ending in this run's marker counts."""
         self.listing = self.others()
@@ -1150,7 +1145,6 @@ class CommentCommandTests(Tree):
             result["reasons"], ["this head already carries an antagonistic review"]
         )
 
-    @unittest.expectedFailure
     def test_a_failed_read_back_fails_the_run(self) -> None:
         """When the look cannot say whether the review landed, nothing resends."""
         self.replies = [comment_review.github.GitHubError(BAD_GATEWAY)]
