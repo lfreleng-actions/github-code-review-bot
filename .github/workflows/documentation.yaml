@@ -59,21 +59,68 @@ jobs:
         with:
           persist-credentials: false
 
+      # Set up exactly as the select job in code-review.yaml does
+      # (docs/DESIGN.md section 4.4), so neither the checkout nor the
+      # job's environment chooses the interpreter the build runs.
       - name: 'Install uv'
+        id: setup-uv
         # yamllint disable-line rule:line-length
         uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2  # v10.3.3
-        # Set up as the select job does in code-review.yaml, outside
-        # the workspace with uv's own discovery off.
+        with:
+          working-directory: "${{ runner.temp }}"
+          tool-bin-dir: "${{ runner.temp }}/uv-tool-bin"
+          # The post-step cache prune would hit the invalid preference.
+          # Caching stays off on a publishing path in any case: a
+          # restored cache that a lower-privileged run could populate
+          # buys little here and widens the supply chain for the
+          # deployed artefact.
+          enable-cache: false
         env:
           UV_NO_CONFIG: '1'
-          UV_SYSTEM_PYTHON: '1'
           UV_NO_PROJECT: '1'
-        with:
-          # No caching on a publishing path: a restored cache that a
-          # lower-privileged run could populate buys little here and
-          # widens the supply chain for the deployed artefact.
-          enable-cache: false
-          working-directory: "${{ runner.temp }}"
+          # setup-uv's only uv call here is "uv python find", whose
+          # result it executes; an invalid preference makes uv refuse
+          # its arguments before any lookup.
+          UV_PYTHON_PREFERENCE: 'lookup-disabled'
+          # Inherited, it makes setup-uv probe uv, which the line above
+          # fails.
+          UV_PYTHON_ARCH: ''
+          # setup-uv puts this directory on PATH ahead of its own uv and
+          # then runs a bare uv, so an inherited value could name a
+          # directory holding another uv; pin it to the one the
+          # "Install Python" step installs into.
+          UV_PYTHON_INSTALL_DIR: "${{ runner.temp }}/uv-python"
+
+      # The one interpreter every later uv call names by absolute path.
+      # uv installs it with an emptied environment, so no variable the
+      # job carries can steer the install or the lookup, and the result
+      # must sit in the directory it was installed to. It runs outside
+      # the checkout: uv python find starts a .venv/bin/python in its
+      # working directory to query it, even under env -i.
+      - name: 'Install Python'
+        id: python
+        shell: bash
+        working-directory: "${{ runner.temp }}"
+        env:
+          UV: "${{ steps.setup-uv.outputs.uv-path }}"
+          INSTALL_DIR: "${{ runner.temp }}/uv-python"
+        run: |
+          clean=(UV_NO_CONFIG=1 UV_NO_PROJECT=1
+            "UV_PYTHON_INSTALL_DIR=$INSTALL_DIR"
+            "UV_CACHE_DIR=$RUNNER_TEMP/uv-cache")
+          for name in HTTP_PROXY HTTPS_PROXY ALL_PROXY NO_PROXY http_proxy \
+              https_proxy all_proxy no_proxy SSL_CERT_FILE SSL_CERT_DIR \
+              UV_NATIVE_TLS; do
+            if value="$(printenv "$name")"; then clean+=("$name=$value"); fi
+          done
+          env -i "${clean[@]}" "$UV" python install --quiet --no-bin 3.13
+          py="$(env -i "${clean[@]}" "$UV" python find --managed-python 3.13)"
+          case "$py" in
+            "$INSTALL_DIR"/*) ;;
+            *) echo "::error::uv found Python outside its install directory"
+               exit 1 ;;
+          esac
+          echo "path=$py" >> "$GITHUB_OUTPUT"
 
       - name: 'Build documentation'
         shell: bash
@@ -83,11 +130,17 @@ jobs:
         # anything outside the compiled lock, so the deployed site
         # comes from one reviewed dependency tree; --strict promotes
         # MkDocs warnings (broken links, orphaned pages) to failures.
+        env:
+          UV: "${{ steps.setup-uv.outputs.uv-path }}"
+          PYTHON: "${{ steps.python.outputs.path }}"
+          UV_NO_CONFIG: '1'
+          UV_NO_PROJECT: '1'
         run: |
-          uv venv --python 3.13
-          uv pip install --require-hashes \
+          venv="$RUNNER_TEMP/docs-venv"
+          "$UV" venv --python "$PYTHON" "$venv"
+          "$UV" pip install --python "$venv/bin/python" --require-hashes \
             --requirement docs/requirements.txt
-          .venv/bin/mkdocs build --strict
+          "$venv/bin/mkdocs" build --strict
 
       - name: 'Upload Pages artifact'
         # yamllint disable-line rule:line-length

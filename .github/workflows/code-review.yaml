@@ -366,38 +366,87 @@ jobs:
       # The config check reads the credential shapes from the
       # environment and prints nothing it read.
       #
-      # No uv step may run a Python interpreter that files in the
-      # workspace chose (docs/DESIGN.md section 4.4): setup-uv looks one
-      # up, and reads uv settings, in its working directory, so it runs
-      # from the runner's temporary directory with discovery off.
+      # No uv step may run a Python interpreter that the workspace or
+      # the job's environment chose (docs/DESIGN.md section 4.4).
+      # setup-uv reads uv settings in its working directory, so it runs
+      # from the runner's temporary directory with config and project
+      # discovery off, and installs tools outside the workspace.
       - name: 'Set up uv'
+        id: setup-uv
         # yamllint disable-line rule:line-length
         uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2  # v10.3.3
+        with:
+          working-directory: "${{ runner.temp }}"
+          tool-bin-dir: "${{ runner.temp }}/uv-tool-bin"
+          # The post-step cache prune would hit the invalid preference.
+          enable-cache: false
         env:
           UV_NO_CONFIG: '1'
-          UV_SYSTEM_PYTHON: '1'
           UV_NO_PROJECT: '1'
-        with:
-          enable-cache: false
-          working-directory: "${{ runner.temp }}"
+          # setup-uv's only uv call here is "uv python find", whose
+          # result it executes; an invalid preference makes uv refuse
+          # its arguments before any lookup.
+          UV_PYTHON_PREFERENCE: 'lookup-disabled'
+          # Inherited, it makes setup-uv probe uv, which the line above
+          # fails.
+          UV_PYTHON_ARCH: ''
+          # setup-uv puts this directory on PATH ahead of its own uv and
+          # then runs a bare uv, so an inherited value could name a
+          # directory holding another uv; pin it to the one the
+          # "Install Python" step installs into.
+          UV_PYTHON_INSTALL_DIR: "${{ runner.temp }}/uv-python"
+
+      # The one interpreter every later uv call names by absolute path.
+      # uv installs it with an emptied environment, so no variable the
+      # job carries can steer the install or the lookup, and the result
+      # must sit in the directory it was installed to. It runs outside
+      # the checkout: uv python find starts a .venv/bin/python in its
+      # working directory to query it, even under env -i.
+      - name: 'Install Python'
+        id: python
+        shell: bash
+        working-directory: "${{ runner.temp }}"
+        env:
+          UV: "${{ steps.setup-uv.outputs.uv-path }}"
+          INSTALL_DIR: "${{ runner.temp }}/uv-python"
+        run: |
+          clean=(UV_NO_CONFIG=1 UV_NO_PROJECT=1
+            "UV_PYTHON_INSTALL_DIR=$INSTALL_DIR"
+            "UV_CACHE_DIR=$RUNNER_TEMP/uv-cache")
+          for name in HTTP_PROXY HTTPS_PROXY ALL_PROXY NO_PROXY http_proxy \
+              https_proxy all_proxy no_proxy SSL_CERT_FILE SSL_CERT_DIR \
+              UV_NATIVE_TLS; do
+            if value="$(printenv "$name")"; then clean+=("$name=$value"); fi
+          done
+          env -i "${clean[@]}" "$UV" python install --quiet --no-bin 3.13
+          py="$(env -i "${clean[@]}" "$UV" python find --managed-python 3.13)"
+          case "$py" in
+            "$INSTALL_DIR"/*) ;;
+            *) echo "::error::uv found Python outside its install directory"
+               exit 1 ;;
+          esac
+          echo "path=$py" >> "$GITHUB_OUTPUT"
 
       - name: 'Install zizmor'
-        run: uv tool install 'zizmor==1.30.1'
+        env:
+          UV: "${{ steps.setup-uv.outputs.uv-path }}"
+          PYTHON: "${{ steps.python.outputs.path }}"
+          UV_NO_CONFIG: '1'
+          UV_NO_PROJECT: '1'
+        run: |
+          "$UV" tool install --python "$PYTHON" 'zizmor==1.30.1'
 
       # uv run uses the interpreter of an existing project environment,
       # whatever --python says, so the environment lives outside the
-      # workspace and the interpreter is found from there too.
+      # workspace too.
       - name: 'Pre-flight: workflow contracts and audit'
         env:
+          UV: "${{ steps.setup-uv.outputs.uv-path }}"
+          PYTHON: "${{ steps.python.outputs.path }}"
           UV_PROJECT_ENVIRONMENT: "${{ runner.temp }}/preflight-venv"
         run: |
-          python="$(cd "$RUNNER_TEMP" &&
-            UV_NO_CONFIG=1 uv python find --system --no-project)" &&
-            [ -n "$python" ] || {
-            echo '::error::No system Python found for the pre-flight'
-            exit 1; }
           cd review-assets
-          uv run --locked --python "$python" \
+          "$UV" run --locked --python "$PYTHON" \
             python -B scripts/preflight.py workflow --root .
 
       - name: 'Pre-flight: configuration and credentials'

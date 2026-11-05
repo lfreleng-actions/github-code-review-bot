@@ -136,25 +136,82 @@ jobs:
         with:
           persist-credentials: false
       - name: 'Install uv'
+        id: setup-uv
         # yamllint disable-line rule:line-length
         uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2  # v10.3.3
+        with:
+          working-directory: "${{ runner.temp }}"
+          tool-bin-dir: "${{ runner.temp }}/uv-tool-bin"
+          # The post-step cache prune would hit the invalid preference.
+          enable-cache: false
         env:
           UV_NO_CONFIG: '1'
-          UV_SYSTEM_PYTHON: '1'
           UV_NO_PROJECT: '1'
-        with:
-          enable-cache: false
-          working-directory: "${{ runner.temp }}"
+          # setup-uv's only uv call here is "uv python find", whose
+          # result it executes; an invalid preference makes uv refuse
+          # its arguments before any lookup.
+          UV_PYTHON_PREFERENCE: 'lookup-disabled'
+          # Inherited, it makes setup-uv probe uv, which the line above
+          # fails.
+          UV_PYTHON_ARCH: ''
+          # setup-uv puts this directory on PATH ahead of its own uv and
+          # then runs a bare uv, so an inherited value could name a
+          # directory holding another uv; pin it to the one the
+          # "Install Python" step installs into.
+          UV_PYTHON_INSTALL_DIR: "${{ runner.temp }}/uv-python"
+
+      # The one interpreter every later uv call names by absolute path.
+      # uv installs it with an emptied environment, so no variable the
+      # job carries can steer the install or the lookup, and the result
+      # must sit in the directory it was installed to. It runs outside
+      # the checkout: uv python find starts a .venv/bin/python in its
+      # working directory to query it, even under env -i.
+      - name: 'Install Python'
+        id: python
+        shell: bash
+        working-directory: "${{ runner.temp }}"
+        env:
+          UV: "${{ steps.setup-uv.outputs.uv-path }}"
+          INSTALL_DIR: "${{ runner.temp }}/uv-python"
+        run: |
+          clean=(UV_NO_CONFIG=1 UV_NO_PROJECT=1
+            "UV_PYTHON_INSTALL_DIR=$INSTALL_DIR"
+            "UV_CACHE_DIR=$RUNNER_TEMP/uv-cache")
+          for name in HTTP_PROXY HTTPS_PROXY ALL_PROXY NO_PROXY http_proxy \
+              https_proxy all_proxy no_proxy SSL_CERT_FILE SSL_CERT_DIR \
+              UV_NATIVE_TLS; do
+            if value="$(printenv "$name")"; then clean+=("$name=$value"); fi
+          done
+          env -i "${clean[@]}" "$UV" python install --quiet --no-bin 3.13
+          py="$(env -i "${clean[@]}" "$UV" python find --managed-python 3.13)"
+          case "$py" in
+            "$INSTALL_DIR"/*) ;;
+            *) echo "::error::uv found Python outside its install directory"
+               exit 1 ;;
+          esac
+          echo "path=$py" >> "$GITHUB_OUTPUT"
+
       - name: 'Run offline regression suite'
-        run: uv run --locked python -B -m unittest discover -s tests -v
+        env:
+          UV: "${{ steps.setup-uv.outputs.uv-path }}"
+          PYTHON: "${{ steps.python.outputs.path }}"
+        run: |
+          "$UV" run --locked --python "$PYTHON" \
+            python -B -m unittest discover -s tests -v
 
   # The select job's uv steps must not run a Python interpreter that
-  # files in the workspace chose (docs/DESIGN.md section 4.4). This
-  # plants interpreters that record any run where uv would look for
-  # them, runs exact copies of those steps (the contract tests keep
-  # them identical), and fails if a planted interpreter ran.
+  # the workspace or the job's environment chose (docs/DESIGN.md
+  # section 4.4). This plants interpreters that record any run where
+  # uv would look for them, runs exact copies of those steps (the
+  # contract tests keep them identical), and fails if a planted
+  # interpreter ran. Each leg plants one set of the variables a
+  # caller-controlled step could export to later ones.
   uv-isolation:
-    name: 'uv interpreter isolation'
+    name: 'uv interpreter isolation (${{ matrix.route }})'
+    strategy:
+      fail-fast: false
+      matrix:
+        route: ['uv-python', 'virtual-env']
     runs-on: 'ubuntu-latest'
     timeout-minutes: 15
     permissions:
@@ -177,7 +234,14 @@ jobs:
       # assets checkout, each naming an interpreter that appends its
       # own path to the mark and then runs the system Python; and a
       # uv.toml in the root demanding a uv release that cannot run.
+      # The root .venv/bin also holds a python3.13 and a uv that
+      # append to the mark and fail, and goes on PATH for later steps,
+      # with the leg's variables naming it through GITHUB_ENV. A root
+      # .uv-python holds another such uv, and UV_PYTHON_INSTALL_DIR
+      # names it in both legs.
       - name: 'Plant workspace interpreters'
+        env:
+          ROUTE: "${{ matrix.route }}"
         run: |
           mark="$RUNNER_TEMP/planted-interpreter-ran"
           real="$(command -v python3)"
@@ -196,32 +260,106 @@ jobs:
             echo "$dir/.planted/python" > "$dir/.python-version"
           done
           echo 'required-version = "==0.0.1"' > "$GITHUB_WORKSPACE/uv.toml"
+          venv="$GITHUB_WORKSPACE/.venv"
+          pydir="$GITHUB_WORKSPACE/.uv-python"
+          mkdir -p "$pydir"
+          for bait in "$venv/bin/python3.13" "$venv/bin/uv" "$pydir/uv"; do
+            printf '#!/bin/sh\necho %q >> %q\nexit 1\n' \
+              "$bait" "$mark" > "$bait"
+            chmod +x "$bait"
+          done
+          mkdir -p "$venv/conda-meta"
+          echo "$venv/bin" >> "$GITHUB_PATH"
+          {
+            case "$ROUTE" in
+              uv-python)
+                echo "UV_PYTHON=$venv/bin/python3.13"
+                echo "UV_PYTHON_SEARCH_PATH=$venv/bin" ;;
+              virtual-env)
+                echo "VIRTUAL_ENV=$venv"
+                echo "CONDA_PREFIX=$venv"
+                echo "UV_INTERNAL__PARENT_INTERPRETER=$venv/bin/python3.13" ;;
+              *) echo "::error::Unknown route $ROUTE" >&2
+                 exit 1 ;;
+            esac
+            echo "UV_PYTHON_ARCH=$(uname -m)"
+            echo "UV_PYTHON_INSTALL_DIR=$pydir"
+            echo 'UV_NO_CACHE=1'
+          } >> "$GITHUB_ENV"
 
       - name: 'Set up uv'
+        id: setup-uv
         # yamllint disable-line rule:line-length
         uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2  # v10.3.3
+        with:
+          working-directory: "${{ runner.temp }}"
+          tool-bin-dir: "${{ runner.temp }}/uv-tool-bin"
+          # The post-step cache prune would hit the invalid preference.
+          enable-cache: false
         env:
           UV_NO_CONFIG: '1'
-          UV_SYSTEM_PYTHON: '1'
           UV_NO_PROJECT: '1'
-        with:
-          enable-cache: false
-          working-directory: "${{ runner.temp }}"
+          # setup-uv's only uv call here is "uv python find", whose
+          # result it executes; an invalid preference makes uv refuse
+          # its arguments before any lookup.
+          UV_PYTHON_PREFERENCE: 'lookup-disabled'
+          # Inherited, it makes setup-uv probe uv, which the line above
+          # fails.
+          UV_PYTHON_ARCH: ''
+          # setup-uv puts this directory on PATH ahead of its own uv and
+          # then runs a bare uv, so an inherited value could name a
+          # directory holding another uv; pin it to the one the
+          # "Install Python" step installs into.
+          UV_PYTHON_INSTALL_DIR: "${{ runner.temp }}/uv-python"
+
+      # The one interpreter every later uv call names by absolute path.
+      # uv installs it with an emptied environment, so no variable the
+      # job carries can steer the install or the lookup, and the result
+      # must sit in the directory it was installed to. It runs outside
+      # the checkout: uv python find starts a .venv/bin/python in its
+      # working directory to query it, even under env -i.
+      - name: 'Install Python'
+        id: python
+        shell: bash
+        working-directory: "${{ runner.temp }}"
+        env:
+          UV: "${{ steps.setup-uv.outputs.uv-path }}"
+          INSTALL_DIR: "${{ runner.temp }}/uv-python"
+        run: |
+          clean=(UV_NO_CONFIG=1 UV_NO_PROJECT=1
+            "UV_PYTHON_INSTALL_DIR=$INSTALL_DIR"
+            "UV_CACHE_DIR=$RUNNER_TEMP/uv-cache")
+          for name in HTTP_PROXY HTTPS_PROXY ALL_PROXY NO_PROXY http_proxy \
+              https_proxy all_proxy no_proxy SSL_CERT_FILE SSL_CERT_DIR \
+              UV_NATIVE_TLS; do
+            if value="$(printenv "$name")"; then clean+=("$name=$value"); fi
+          done
+          env -i "${clean[@]}" "$UV" python install --quiet --no-bin 3.13
+          py="$(env -i "${clean[@]}" "$UV" python find --managed-python 3.13)"
+          case "$py" in
+            "$INSTALL_DIR"/*) ;;
+            *) echo "::error::uv found Python outside its install directory"
+               exit 1 ;;
+          esac
+          echo "path=$py" >> "$GITHUB_OUTPUT"
 
       - name: 'Install zizmor'
-        run: uv tool install 'zizmor==1.30.1'
+        env:
+          UV: "${{ steps.setup-uv.outputs.uv-path }}"
+          PYTHON: "${{ steps.python.outputs.path }}"
+          UV_NO_CONFIG: '1'
+          UV_NO_PROJECT: '1'
+        run: |
+          "$UV" tool install --python "$PYTHON" 'zizmor==1.30.1'
 
       - name: 'Pre-flight: workflow contracts and audit'
         env:
+          UV: "${{ steps.setup-uv.outputs.uv-path }}"
+          PYTHON: "${{ steps.python.outputs.path }}"
           UV_PROJECT_ENVIRONMENT: "${{ runner.temp }}/preflight-venv"
         run: |
-          python="$(cd "$RUNNER_TEMP" &&
-            UV_NO_CONFIG=1 uv python find --system --no-project)" &&
-            [ -n "$python" ] || {
-            echo '::error::No system Python found for the pre-flight'
-            exit 1; }
           cd review-assets
-          uv run --locked --python "$python" \
+          "$UV" run --locked --python "$PYTHON" \
             python -B scripts/preflight.py workflow --root .
 
       - name: 'Check no planted interpreter ran'
@@ -233,6 +371,22 @@ jobs:
             cat "$mark"
             exit 1
           fi
+
+      # The control: the same lookups without an absolute --python
+      # must start the bait, or the check above proved nothing.
+      - name: 'Control: unguarded uv starts the bait'
+        env:
+          UV: "${{ steps.setup-uv.outputs.uv-path }}"
+        run: |
+          mark="$RUNNER_TEMP/planted-interpreter-ran"
+          cd "$RUNNER_TEMP"
+          "$UV" python find --system --no-project --no-config || true
+          "$UV" run --no-config --no-project python -c pass || true
+          if [ ! -e "$mark" ]; then
+            echo '::error::No planted interpreter ran; the bait is dead'
+            exit 1
+          fi
+          cat "$mark"
 
   docs:
     name: 'Documentation build'
@@ -255,23 +409,74 @@ jobs:
           persist-credentials: false
 
       - name: 'Install uv'
+        id: setup-uv
         # yamllint disable-line rule:line-length
         uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2  # v10.3.3
+        with:
+          working-directory: "${{ runner.temp }}"
+          tool-bin-dir: "${{ runner.temp }}/uv-tool-bin"
+          # The post-step cache prune would hit the invalid preference.
+          enable-cache: false
         env:
           UV_NO_CONFIG: '1'
-          UV_SYSTEM_PYTHON: '1'
           UV_NO_PROJECT: '1'
-        with:
-          enable-cache: false
-          working-directory: "${{ runner.temp }}"
+          # setup-uv's only uv call here is "uv python find", whose
+          # result it executes; an invalid preference makes uv refuse
+          # its arguments before any lookup.
+          UV_PYTHON_PREFERENCE: 'lookup-disabled'
+          # Inherited, it makes setup-uv probe uv, which the line above
+          # fails.
+          UV_PYTHON_ARCH: ''
+          # setup-uv puts this directory on PATH ahead of its own uv and
+          # then runs a bare uv, so an inherited value could name a
+          # directory holding another uv; pin it to the one the
+          # "Install Python" step installs into.
+          UV_PYTHON_INSTALL_DIR: "${{ runner.temp }}/uv-python"
+
+      # The one interpreter every later uv call names by absolute path.
+      # uv installs it with an emptied environment, so no variable the
+      # job carries can steer the install or the lookup, and the result
+      # must sit in the directory it was installed to. It runs outside
+      # the checkout: uv python find starts a .venv/bin/python in its
+      # working directory to query it, even under env -i.
+      - name: 'Install Python'
+        id: python
+        shell: bash
+        working-directory: "${{ runner.temp }}"
+        env:
+          UV: "${{ steps.setup-uv.outputs.uv-path }}"
+          INSTALL_DIR: "${{ runner.temp }}/uv-python"
+        run: |
+          clean=(UV_NO_CONFIG=1 UV_NO_PROJECT=1
+            "UV_PYTHON_INSTALL_DIR=$INSTALL_DIR"
+            "UV_CACHE_DIR=$RUNNER_TEMP/uv-cache")
+          for name in HTTP_PROXY HTTPS_PROXY ALL_PROXY NO_PROXY http_proxy \
+              https_proxy all_proxy no_proxy SSL_CERT_FILE SSL_CERT_DIR \
+              UV_NATIVE_TLS; do
+            if value="$(printenv "$name")"; then clean+=("$name=$value"); fi
+          done
+          env -i "${clean[@]}" "$UV" python install --quiet --no-bin 3.13
+          py="$(env -i "${clean[@]}" "$UV" python find --managed-python 3.13)"
+          case "$py" in
+            "$INSTALL_DIR"/*) ;;
+            *) echo "::error::uv found Python outside its install directory"
+               exit 1 ;;
+          esac
+          echo "path=$py" >> "$GITHUB_OUTPUT"
 
       # Proves the site builds from the pull request head without
       # granting it any Pages permission; the deployment lives in
       # documentation.yaml and runs from the default branch alone.
       - name: 'Build documentation'
         shell: bash
+        env:
+          UV: "${{ steps.setup-uv.outputs.uv-path }}"
+          PYTHON: "${{ steps.python.outputs.path }}"
+          UV_NO_CONFIG: '1'
+          UV_NO_PROJECT: '1'
         run: |
-          uv venv --python 3.13
-          uv pip install --require-hashes \
+          venv="$RUNNER_TEMP/docs-venv"
+          "$UV" venv --python "$PYTHON" "$venv"
+          "$UV" pip install --python "$venv/bin/python" --require-hashes \
             --requirement docs/requirements.txt
-          .venv/bin/mkdocs build --strict
+          "$venv/bin/mkdocs" build --strict
