@@ -231,8 +231,11 @@ def write_with_recovery(
     ``landed`` is consulted after the last failure too, since that
     write may also have landed. A failure ``landed`` cannot settle is
     never read as "not landed": when it raises, the write fails with
-    both errors and keeps the write's own status. A failure that is not
-    transient raises at once, without a look, as it always has.
+    both errors and keeps the write's own status. A first attempt that
+    fails without a transient error raises at once, without a look, as
+    it always has. A retry that does is looked at, and never sent
+    again: an earlier timed-out copy may have landed during the wait,
+    and a compare-and-swap retry is then refused because of it.
     ``landed`` must recognise this write's own effect, not merely some
     change.
 
@@ -252,7 +255,8 @@ def write_with_recovery(
         try:
             return write()
         except GitHubError as exc:
-            if not is_transient(exc):
+            transient = is_transient(exc)
+            if not transient and attempt == 1:
                 raise
             try:
                 outcome = landed()
@@ -269,7 +273,7 @@ def write_with_recovery(
             if outcome is not None:
                 note(f"{label}: landed despite {safe_message(exc)}")
                 return outcome
-            if attempt == attempts:
+            if attempt == attempts or not transient:
                 raise
             delay = WRITE_RETRY_DELAYS_SECONDS[attempt - 1]
             note(
