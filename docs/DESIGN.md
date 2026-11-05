@@ -392,7 +392,8 @@ keeps its own, `code-review-antagonistic-ledger` (§19.6). The next
 run's select
 job fetches the newest five of those artifacts through the bounded
 `ledger` profile of `artifact_fetch.py`, merges them keeping the
-newest assessment per `(repository, number, head_sha)` and dropping
+newest assessment per `(repository, number, head_sha)` and mode,
+live or dry, and dropping
 entries older than the retention, and writes the result as
 `artefacts/ledger.json`. The merged file travels inside the evidence
 artifact with its own digest, so the report job that extends it
@@ -407,7 +408,9 @@ dry, the run id and a timestamp.
 Dry runs record too, so a rollout in dry-run does not re-review the
 same heads every run. A live run ignores dry-run entries: the first
 live run after the flip must still approve what dry runs reported
-without acting. A dry run honours both kinds.
+without acting. A dry run honours both kinds. Because the merge keeps
+each mode's newest entry, a dry run after a live one never erases the
+live assessment, so the next live run still skips that head.
 
 When a prior artifact fails to download or fails the bounded
 acceptance, the fetch notes it and leaves it out of the merge.
@@ -1320,7 +1323,7 @@ checkout.
 
 `verdict` is one of `approved`, `would-approve` or `needs-human`.
 The merge keeps the newest entry per `(repository, number,
-head_sha)` within 90 days. The select job reads the merged prior
+head_sha)` and mode within 90 days. The select job reads the merged prior
 ledger and never writes it; the report job extends it.
 
 ### 18.4 Agent verdict (review to apply; untrusted)
