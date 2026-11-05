@@ -22,7 +22,11 @@ from __future__ import annotations
 
 import ast
 import json
+import os
 import re
+import shutil
+import subprocess
+import tempfile
 import unittest
 from pathlib import Path
 from typing import Any, ClassVar, cast
@@ -1480,6 +1484,550 @@ class HandbackContracts(ReusableWorkflowCase):
             text = dumped(loaded["jobs"])
             with self.subTest(workflow=path.name):
                 self.assertNotIn("handback", text)
+
+
+class HandbackDeliveryContracts(ReusableWorkflowCase):
+    """The hand-back records each delivery and a re-run reads that record."""
+
+    @unittest.expectedFailure
+    def test_report_passes_a_record_of_each_hand_back(self) -> None:
+        """The records carry each confirmed hand-back's review and state."""
+        self.assertEqual(
+            self.jobs["report"]["outputs"]["handback_records"],
+            "${{ steps.handback.outputs.records }}",
+        )
+        step = self.step("handback", "Dispatch the revision round")
+        self.assertEqual(
+            step["env"]["RECORDS"], "${{ needs.report.outputs.handback_records }}"
+        )
+
+    @unittest.expectedFailure
+    def test_a_re_run_reads_the_earlier_record_alone(self) -> None:
+        """The first attempt reads nothing; a later one reads this run's record
+        before it dispatches, and a failed fetch never blocks a dispatch.
+        """
+        step = self.step("handback", "Fetch the delivery record")
+        self.assertTrue(is_action(step, DOWNLOAD))
+        self.assertEqual(step["if"], "github.run_attempt != '1'")
+        self.assertIs(step["continue-on-error"], True)
+        self.assertEqual(
+            step["with"],
+            {
+                "pattern": "code-review-handback",
+                "merge-multiple": True,
+                "path": "delivery-prior",
+            },
+        )
+        self.assertLess(
+            self.position("handback", "Fetch the delivery record"),
+            self.position("handback", "Dispatch the revision round"),
+        )
+        self.assertEqual(self.actions("handback", CHECKOUT), [])
+
+    @unittest.expectedFailure
+    def test_the_dispatch_time_check_reads_with_the_job_token(self) -> None:
+        """Each read before a dispatch uses the job's own token, which holds
+        no permission; handback_token dispatches and does nothing else.
+        """
+        step = self.step("handback", "Dispatch the revision round")
+        self.assertEqual(step["env"]["READ_TOKEN"], "${{ github.token }}")
+        run = flatten(step["run"])
+        reads = run.count("gh api")
+        self.assertGreaterEqual(reads, 2)
+        self.assertEqual(run.count('GH_TOKEN="$READ_TOKEN" gh api'), reads)
+        self.assertEqual(len(re.findall(r"(?<![\w-])gh ", run)), reads + 1)
+        self.assertEqual(self.jobs["handback"]["permissions"], {})
+
+    @unittest.expectedFailure
+    def test_the_record_uploads_whatever_the_dispatch_did(self) -> None:
+        """One name per run, replaced by each attempt, after any outcome."""
+        step = self.step("handback", "Record the deliveries")
+        self.assertTrue(is_action(step, UPLOAD))
+        self.assertEqual(step["if"], "always()")
+        self.assertEqual(step["with"]["name"], "code-review-handback")
+        self.assertEqual(step["with"]["path"], "delivery/handback.json")
+        self.assertIs(step["with"]["overwrite"], True)
+        self.assertEqual(step["with"]["if-no-files-found"], "ignore")
+        self.assertLess(
+            self.position("handback", "Dispatch the revision round"),
+            self.position("handback", "Record the deliveries"),
+        )
+
+
+FAKE_GH = """#!/bin/bash
+if [ "$1" = api ]; then
+  shift
+  filter=. path=
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --jq) filter=$2; shift 2 ;;
+      --paginate) shift ;;
+      *) path=$1; shift ;;
+    esac
+  done
+  printf '%s %s\\n' "$GH_TOKEN" "$path" >> "$GH_API_LOG"
+  file="$GH_API_DIR/${path%%\\?*}.json"
+  [ -f "$file" ] || exit 1
+  exec "$REAL_JQ" -r "$filter" "$file"
+fi
+printf '%s\\n' "$*" >> "$GH_LOG"
+for arg; do
+  case "$arg" in pull_requests=*) pull="${arg#pull_requests=}" ;; esac
+done
+case " $GH_ABORT " in *" $pull "*) kill -KILL "$PPID"; exit 1 ;; esac
+case " $GH_FAIL " in *" $pull "*) exit 1 ;; esac
+"""
+
+# Stands for jq, and kills the step part-way through writing the Nth
+# checkpoint, the one jq call that takes --argjson prior.
+FAKE_JQ = """#!/bin/bash
+case " $* " in
+  *" --argjson prior "*)
+    count=$(( $(cat "$JQ_COUNT" 2>/dev/null || echo 0) + 1 ))
+    echo "$count" > "$JQ_COUNT"
+    if [ "$count" = "$JQ_ABORT_AT" ]; then
+      printf '{"schema": 1, "deliv'
+      kill -KILL "$PPID"
+      exit 1
+    fi ;;
+esac
+exec "$REAL_JQ" "$@"
+"""
+HEAD = "a" * 40
+MOVED = "b" * 40
+
+
+@unittest.skipUnless(shutil.which("jq"), "the dispatch step needs jq")
+class HandbackDeliveryRuns(ReusableWorkflowCase):
+    """Run the dispatch step's script against a fake ``gh``."""
+
+    def setUp(self) -> None:
+        """Lay out a workspace with a fake ``gh`` ahead of the real one."""
+        super().setUp()
+        self.tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.tmp)
+        bin_dir = self.tmp / "bin"
+        bin_dir.mkdir()
+        gh = bin_dir / "gh"
+        gh.write_text(FAKE_GH, encoding="utf-8")
+        gh.chmod(0o755)
+        jq = bin_dir / "jq"
+        jq.write_text(FAKE_JQ, encoding="utf-8")
+        jq.chmod(0o755)
+        self.real_jq = str(shutil.which("jq"))
+        self.path = f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}"
+        self.api = self.tmp / "api"
+        self.script = self.tmp / "dispatch.sh"
+        self.script.write_text(
+            self.step("handback", "Dispatch the revision round")["run"],
+            encoding="utf-8",
+        )
+
+    def serve(self, path: str, body: object) -> None:
+        """Answer the fake ``gh api`` read of ``path`` with ``body``."""
+        file = self.api / f"{path}.json"
+        file.parent.mkdir(parents=True, exist_ok=True)
+        file.write_text(json.dumps(body), encoding="utf-8")
+
+    def reads(self) -> list[str]:
+        """Each ``gh api`` read of the last run, as ``token path``."""
+        log = self.tmp / "api.log"
+        return log.read_text().splitlines() if log.exists() else []
+
+    def dispatch(
+        self,
+        records: list[dict[str, Any]],
+        fail: str = "",
+        abort: str = "",
+        jq_abort_at: int = 0,
+    ) -> tuple[int, list[str], dict[str, Any] | None, str]:
+        """Run once: the exit code, the pull requests sent, the record, and
+        the step summary.
+        """
+        log = self.tmp / "gh.log"
+        log.unlink(missing_ok=True)
+        (self.tmp / "api.log").unlink(missing_ok=True)
+        (self.tmp / "jq.count").unlink(missing_ok=True)
+        self.output = ""
+        summary = self.tmp / "summary.md"
+        summary.write_text("", encoding="utf-8")
+        pulls = " ".join(r["pull"] for r in records if r["state"] == "pending")
+        env = {
+            "PATH": self.path,
+            "GH_TOKEN": "token",
+            "READ_TOKEN": "read-token",
+            "GH_LOG": str(log),
+            "GH_API_LOG": str(self.tmp / "api.log"),
+            "GH_API_DIR": str(self.api),
+            "REAL_JQ": self.real_jq,
+            "JQ_COUNT": str(self.tmp / "jq.count"),
+            "JQ_ABORT_AT": str(jq_abort_at),
+            "GH_FAIL": fail,
+            "GH_ABORT": abort,
+            "REPOSITORY": "org/github-code-monkey-bot",
+            "PULLS": pulls,
+            "RECORDS": json.dumps(records),
+            "GITHUB_STEP_SUMMARY": str(summary),
+        }
+        done = subprocess.run(
+            ["bash", "-eo", "pipefail", str(self.script)],
+            cwd=self.tmp,
+            env=env,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.output = done.stdout + done.stderr
+        sent = [
+            line.rsplit("pull_requests=", 1)[1]
+            for line in (log.read_text().splitlines() if log.exists() else [])
+        ]
+        record_path = self.tmp / "delivery" / "handback.json"
+        record = json.loads(record_path.read_text()) if record_path.exists() else None
+        return done.returncode, sent, record, summary.read_text()
+
+    def carry_forward(self, record: dict[str, Any] | None) -> None:
+        """Stand the uploaded record where a re-run's fetch puts it."""
+        assert record is not None
+        prior = self.tmp / "delivery-prior"
+        prior.mkdir(exist_ok=True)
+        (prior / "handback.json").write_text(json.dumps(record), encoding="utf-8")
+        shutil.rmtree(self.tmp / "delivery")
+
+    @staticmethod
+    def pending(*numbers: int) -> list[dict[str, Any]]:
+        """Records of pending hand-backs, review id 500 + N."""
+        return [
+            {
+                "pull": f"org/repo#{n}",
+                "review": 500 + n,
+                "head": HEAD,
+                "state": "pending",
+            }
+            for n in numbers
+        ]
+
+    def states(self, record: dict[str, Any] | None) -> dict[str, str]:
+        """Each pull request's recorded state."""
+        assert record is not None
+        self.assertEqual(record["schema"], 1)
+        return {d["pull"]: d["state"] for d in record["deliveries"]}
+
+    @unittest.expectedFailure
+    def test_each_pull_request_is_one_dispatch(self) -> None:
+        """One live, uncapped dispatch per pull request, each recorded."""
+        code, sent, record, summary = self.dispatch(self.pending(1, 2))
+        self.assertEqual(code, 0)
+        self.assertEqual(sent, ["org/repo#1", "org/repo#2"])
+        self.assertEqual(
+            self.states(record),
+            {"org/repo#1": "dispatched", "org/repo#2": "dispatched"},
+        )
+        self.assertIn("- `org/repo#1` (review 501): dispatched", summary)
+
+    @unittest.expectedFailure
+    def test_a_failed_dispatch_fails_the_job_and_a_re_run_sends_it_alone(
+        self,
+    ) -> None:
+        """One failure costs that pull request alone, and the re-run reads the
+        record to send only what has not gone.
+        """
+        records = self.pending(1, 2, 3)
+        code, sent, record, _ = self.dispatch(records, fail="org/repo#2")
+        self.assertEqual(code, 1)
+        self.assertEqual(sent, ["org/repo#1", "org/repo#2", "org/repo#3"])
+        self.assertEqual(
+            self.states(record),
+            {
+                "org/repo#1": "dispatched",
+                "org/repo#2": "failed",
+                "org/repo#3": "dispatched",
+            },
+        )
+        self.carry_forward(record)
+        code, sent, record, _ = self.dispatch(records)
+        self.assertEqual(code, 0)
+        self.assertEqual(sent, ["org/repo#2"])
+        self.assertEqual(set(self.states(record).values()), {"dispatched"})
+
+    @unittest.expectedFailure
+    def test_a_re_run_after_a_late_failure_sends_nothing(self) -> None:
+        """Every dispatch went before the job failed: the re-run repeats none."""
+        records = self.pending(1, 2)
+        _, _, record, _ = self.dispatch(records)
+        self.carry_forward(record)
+        code, sent, record, summary = self.dispatch(records)
+        self.assertEqual(code, 0)
+        self.assertEqual(sent, [])
+        self.assertEqual(set(self.states(record).values()), {"dispatched"})
+        self.assertIn("dispatched by an earlier attempt of this run", summary)
+
+    @unittest.expectedFailure
+    def test_a_shorter_list_forgets_no_earlier_dispatch(self) -> None:
+        """Three attempts: the second lists less than the first dispatched,
+        and the third still sends nothing the first sent.
+        """
+        _, sent, record, _ = self.dispatch(self.pending(1, 2, 3), fail="org/repo#3")
+        self.assertEqual(sent, ["org/repo#1", "org/repo#2", "org/repo#3"])
+        self.carry_forward(record)
+        code, sent, record, _ = self.dispatch(self.pending(1, 3))
+        self.assertEqual((code, sent), (0, ["org/repo#3"]))
+        self.assertEqual(
+            self.states(record),
+            {
+                "org/repo#1": "dispatched",
+                "org/repo#2": "dispatched",
+                "org/repo#3": "dispatched",
+            },
+        )
+        self.carry_forward(record)
+        code, sent, record, _ = self.dispatch(self.pending(1, 2, 3))
+        self.assertEqual((code, sent), (0, []))
+        self.assertEqual(len((record or {})["deliveries"]), 3)
+
+    @unittest.expectedFailure
+    def test_an_interrupted_attempt_forgets_no_earlier_dispatch(self) -> None:
+        """Three attempts: the second dies mid-dispatch, and its record still
+        names what the first sent, so the third sends the rest alone.
+        """
+        _, _, record, _ = self.dispatch(
+            self.pending(1, 2, 3, 4), fail="org/repo#3 org/repo#4"
+        )
+        self.carry_forward(record)
+        code, sent, record, _ = self.dispatch(
+            self.pending(3, 1, 4, 2), abort="org/repo#4"
+        )
+        self.assertNotEqual(code, 0)
+        self.assertEqual(sent, ["org/repo#3", "org/repo#4"])
+        self.assertEqual(
+            self.states(record),
+            {
+                "org/repo#1": "dispatched",
+                "org/repo#2": "dispatched",
+                "org/repo#3": "dispatched",
+            },
+        )
+        self.carry_forward(record)
+        code, sent, _, _ = self.dispatch(self.pending(1, 2, 3, 4))
+        self.assertEqual((code, sent), (0, ["org/repo#4"]))
+
+    @unittest.expectedFailure
+    def test_a_new_review_is_a_new_delivery(self) -> None:
+        """The earlier record stands for the same review alone."""
+        _, _, record, _ = self.dispatch(self.pending(1))
+        self.carry_forward(record)
+        newer = [
+            {"pull": "org/repo#1", "review": 999, "head": HEAD, "state": "pending"}
+        ]
+        code, sent, _, _ = self.dispatch(newer)
+        self.assertEqual((code, sent), (0, ["org/repo#1"]))
+
+    @unittest.expectedFailure
+    def test_skipped_hand_backs_are_recorded_and_not_sent(self) -> None:
+        """The report's skips reach the record and the summary with their reason."""
+        skipped = {
+            "pull": "org/repo#9",
+            "review": 509,
+            "head": HEAD,
+            "state": "skipped",
+            "reason": "the head moved",
+        }
+        code, sent, record, summary = self.dispatch([*self.pending(1), skipped])
+        self.assertEqual((code, sent), (0, ["org/repo#1"]))
+        self.assertIn(skipped, (record or {})["deliveries"])
+        self.assertIn("- `org/repo#9` (review 509): skipped; the head moved", summary)
+
+    @unittest.expectedFailure
+    def test_an_unreadable_earlier_record_counts_as_none(self) -> None:
+        """A malformed record cannot suppress a dispatch it does not name."""
+        prior = self.tmp / "delivery-prior"
+        prior.mkdir()
+        (prior / "handback.json").write_text("[1, 2]", encoding="utf-8")
+        code, sent, record, _ = self.dispatch(self.pending(1))
+        self.assertEqual((code, sent), (0, ["org/repo#1"]))
+        self.assertEqual(self.states(record), {"org/repo#1": "dispatched"})
+
+    @unittest.expectedFailure
+    def test_a_pull_request_without_a_review_dispatches_nothing(self) -> None:
+        """Every dispatch names the review that requested it."""
+        records = [{"pull": "org/repo#1", "head": HEAD, "state": "pending"}]
+        code, sent, _, _ = self.dispatch(records)
+        self.assertEqual((code, sent), (1, []))
+
+    @unittest.expectedFailure
+    def test_a_pull_request_without_a_reviewed_head_dispatches_nothing(
+        self,
+    ) -> None:
+        """The dispatch-time check needs the head the review read."""
+        for head in (None, "HEAD", "a" * 39):
+            records = [{"pull": "org/repo#1", "review": 501, "state": "pending"}]
+            if head is not None:
+                records[0]["head"] = head
+            with self.subTest(head=head):
+                code, sent, _, _ = self.dispatch(records)
+                self.assertEqual((code, sent), (1, []))
+
+    @unittest.expectedFailure
+    def test_a_delayed_retry_after_the_head_moved_sends_nothing(self) -> None:
+        """An accepted dispatch left no readable record; by the retry the
+        round has published a new head, so the retry sends nothing.
+        """
+        records = self.pending(1)
+        _, sent, record, _ = self.dispatch(records)
+        self.assertEqual(sent, ["org/repo#1"])
+        self.assertIsNotNone(record)
+        shutil.rmtree(self.tmp / "delivery")
+        self.serve(
+            "repos/org/repo/pulls/1",
+            {
+                "head": {"sha": MOVED, "ref": "code-monkey/issue-31"},
+                "user": {"login": "lf-releng-code-monkey-bot[bot]"},
+            },
+        )
+        code, sent, record, summary = self.dispatch(records)
+        self.assertEqual((code, sent), (0, []))
+        reason = f"moved: the head moved from {HEAD[:12]} to {MOVED[:12]}"
+        self.assertEqual(
+            (record or {})["deliveries"],
+            [
+                {
+                    "pull": "org/repo#1",
+                    "review": 501,
+                    "state": "skipped",
+                    "reason": reason,
+                }
+            ],
+        )
+        self.assertIn(f"- `org/repo#1` (review 501): skipped; {reason}", summary)
+        self.assertIn("::notice::org/repo#1 skipped", self.output)
+
+    @unittest.expectedFailure
+    def test_an_answered_review_is_not_sent_again(self) -> None:
+        """A round footer by the author naming this review means it went."""
+        self.serve(
+            "repos/org/repo/pulls/1",
+            {
+                "head": {"sha": HEAD, "ref": "code-monkey/issue-31"},
+                "user": {"login": "Lf-Releng-Code-Monkey-Bot[bot]"},
+            },
+        )
+        footer = (
+            "Round 2 summary\n\n<!-- code-monkey https://example.invalid/run"
+            " proposed round=2 pr=1 antagonistic=501 -->\n"
+        )
+        self.serve(
+            "repos/org/repo/issues/31/comments",
+            [
+                {"user": {"login": "someone", "type": "User"}, "body": footer},
+                {
+                    "user": {"login": "lf-releng-code-monkey-bot", "type": "Bot"},
+                    "body": footer,
+                },
+            ],
+        )
+        code, sent, record, _ = self.dispatch(self.pending(1))
+        self.assertEqual((code, sent), (0, []))
+        self.assertEqual(self.states(record), {"org/repo#1": "skipped"})
+        self.assertEqual(
+            (record or {})["deliveries"][0]["reason"],
+            "answered: issue #31 already answers review 501",
+        )
+
+    @unittest.expectedFailure
+    def test_other_footers_do_not_answer(self) -> None:
+        """Another review, a human, another bot, a footer mid-body, or a branch
+        with no Code Monkey issue: still sent.
+        """
+        bot = {"login": "lf-releng-code-monkey-bot[bot]", "type": "Bot"}
+        tail = " proposed antagonistic={review} -->"
+        cases = {
+            "another review": [
+                {"user": bot, "body": "<!-- code-monkey x" + tail.format(review=5011)}
+            ],
+            "a human": [
+                {
+                    "user": {"login": "lf-releng-code-monkey-bot", "type": "User"},
+                    "body": "<!-- code-monkey x" + tail.format(review=501),
+                }
+            ],
+            "another bot": [
+                {
+                    "user": {"login": "evil[bot]", "type": "Bot"},
+                    "body": "<!-- code-monkey x" + tail.format(review=501),
+                }
+            ],
+            "mid-body": [
+                {
+                    "user": bot,
+                    "body": "<!-- code-monkey x" + tail.format(review=501) + "\nlater",
+                }
+            ],
+        }
+        for name, comments in cases.items():
+            with self.subTest(case=name):
+                self.serve(
+                    "repos/org/repo/pulls/1",
+                    {
+                        "head": {"sha": HEAD, "ref": "code-monkey/issue-31"},
+                        "user": {"login": "lf-releng-code-monkey-bot[bot]"},
+                    },
+                )
+                self.serve("repos/org/repo/issues/31/comments", comments)
+                code, sent, _, _ = self.dispatch(self.pending(1))
+                self.assertEqual((code, sent), (0, ["org/repo#1"]))
+        self.serve(
+            "repos/org/repo/pulls/1",
+            {
+                "head": {"sha": HEAD, "ref": "feature"},
+                "user": {"login": "lf-releng-code-monkey-bot[bot]"},
+            },
+        )
+        code, sent, _, _ = self.dispatch(self.pending(1))
+        self.assertEqual((code, sent), (0, ["org/repo#1"]))
+        self.assertEqual(self.reads(), ["read-token repos/org/repo/pulls/1"])
+
+    @unittest.expectedFailure
+    def test_the_check_reads_with_the_job_token_and_keeps_on_failure(
+        self,
+    ) -> None:
+        """Every read uses the job's own token, never the dispatch token, and
+        a read that fails keeps the pull request with a warning.
+        """
+        self.serve(
+            "repos/org/repo/pulls/1",
+            {
+                "head": {"sha": HEAD, "ref": "code-monkey/issue-31"},
+                "user": {"login": "lf-releng-code-monkey-bot[bot]"},
+            },
+        )
+        code, sent, record, _ = self.dispatch(self.pending(1, 2))
+        self.assertEqual((code, sent), (0, ["org/repo#1", "org/repo#2"]))
+        self.assertEqual(
+            self.reads(),
+            [
+                "read-token repos/org/repo/pulls/1",
+                "read-token repos/org/repo/issues/31/comments?per_page=100",
+                "read-token repos/org/repo/pulls/2",
+            ],
+        )
+        self.assertEqual(
+            self.states(record),
+            {"org/repo#1": "dispatched", "org/repo#2": "dispatched"},
+        )
+        self.assertEqual(self.output.count("delivery check could not be read"), 2)
+
+    @unittest.expectedFailure
+    def test_an_interrupted_checkpoint_keeps_the_last_one_whole(self) -> None:
+        """A step killed while it writes a checkpoint leaves the one before it
+        for the upload, so a re-run still knows what went.
+        """
+        code, sent, record, _ = self.dispatch(self.pending(1, 2), jq_abort_at=3)
+        self.assertNotEqual(code, 0)
+        self.assertEqual(sent, ["org/repo#1", "org/repo#2"])
+        self.assertEqual(
+            self.states(record),
+            {"org/repo#1": "dispatched"},
+        )
 
 
 class CommentPathContracts(unittest.TestCase):

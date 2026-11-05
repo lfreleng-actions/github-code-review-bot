@@ -26,6 +26,8 @@ APP = "lf-releng-antagonistic-review-bot"
 MONKEY = "lf-releng-code-monkey-bot"
 RUN = 42
 OTHER_RUN = 41
+REVIEW = 501
+ISSUE = 31
 
 
 def result(number: int, **overrides: Any) -> dict[str, Any]:
@@ -70,12 +72,40 @@ def review(
     login: str = f"{APP}[bot]",
     kind: str = "Bot",
     run: int = RUN,
+    review_id: int = REVIEW,
 ) -> dict[str, Any]:
     """One review as the REST listing returns it."""
     text = "Findings.\n\n---\nfooter"
     if marker:
         text += "\n\n" + body.handback_marker(1, head, run)
-    return {"user": {"login": login, "type": kind}, "commit_id": head, "body": text}
+    return {
+        "id": review_id,
+        "user": {"login": login, "type": kind},
+        "commit_id": head,
+        "body": text,
+    }
+
+
+def pull(
+    head: str = HEAD, branch: str = f"code-monkey/issue-{ISSUE}"
+) -> dict[str, Any]:
+    """A pull request as the REST read returns it."""
+    return {"head": {"sha": head, "ref": branch}}
+
+
+def footer(
+    review_id: int = REVIEW,
+    *,
+    login: str = f"{MONKEY}[bot]",
+    kind: str = "Bot",
+    trailer: str = "",
+) -> dict[str, Any]:
+    """A Code Monkey round comment on its issue whose footer names a review."""
+    text = (
+        "Round summary.\n\n<!-- code-monkey https://run proposed round=3 pr=1"
+        f" since=2026-10-07T00:00:00Z antagonistic={review_id} -->{trailer}"
+    )
+    return {"user": {"login": login, "type": kind}, "body": text}
 
 
 class GitHubDouble:
@@ -85,20 +115,47 @@ class GitHubDouble:
         self,
         reviews: dict[int, list[dict[str, Any]]],
         failures: dict[int, int] | None = None,
+        *,
+        pulls: dict[int, dict[str, Any]] | None = None,
+        comments: list[dict[str, Any]] | None = None,
+        broken: tuple[str, ...] = (),
     ) -> None:
-        """Remember each listing, and the HTTP status of each that fails."""
+        """Remember each listing, and the HTTP status of each that fails.
+
+        ``pulls`` and ``comments`` answer the delivery check: each pull
+        request defaults to one at HEAD on a Code Monkey issue branch, and
+        the issue to no comments. An endpoint ending with an entry of
+        ``broken`` fails with HTTP 502.
+        """
         self.reviews = reviews
         self.failures = failures or {}
+        self.pulls = pulls or {}
+        self.comments = comments or []
+        self.broken = broken
         self.reads: list[str] = []
 
+    def fail_if_broken(self, endpoint: str) -> None:
+        """Raise the 502 a broken endpoint answers with."""
+        if endpoint.endswith(self.broken):
+            raise handback.github.GitHubError("HTTP 502: ::read failed", 502)
+
     def __call__(self, endpoint: str) -> list[dict[str, Any]]:
-        """Answer ``api_list`` for ``repos/org/repo/pulls/N/reviews``."""
+        """Answer ``api_list`` for reviews and the issue's comments."""
         self.reads.append(endpoint)
+        self.fail_if_broken(endpoint)
+        if "/issues/" in endpoint:
+            return self.comments
         number = int(endpoint.split("/pulls/")[1].split("/")[0])
         if number in self.failures:
             status = self.failures[number]
             raise handback.github.GitHubError(f"HTTP {status}: ::read failed", status)
         return self.reviews.get(number, [])
+
+    def read_pull(self, endpoint: str) -> dict[str, Any]:
+        """Answer ``api_object`` for ``repos/org/repo/pulls/N``."""
+        self.reads.append(endpoint)
+        self.fail_if_broken(endpoint)
+        return self.pulls.get(int(endpoint.rsplit("/", 1)[1]), pull())
 
 
 class HandbacksTest(unittest.TestCase):
@@ -234,6 +291,116 @@ class HandbacksTest(unittest.TestCase):
             self.assertNotIn("::read", warning)
 
 
+class DeliveriesTest(unittest.TestCase):
+    """Each confirmed hand-back is recorded with its review, and dropped from
+    the dispatch when it needs no delivery.
+    """
+
+    def records(
+        self, double: GitHubDouble, numbers: tuple[int, ...] = (1,)
+    ) -> list[dict[str, Any]]:
+        """Confirm and check the hand-backs of ``numbers`` against the double."""
+        with (
+            patch.object(handback.github, "api_list", side_effect=double),
+            patch.object(handback.github, "api_object", side_effect=double.read_pull),
+        ):
+            confirmed = handback.handbacks(
+                {"results": [result(n) for n in numbers]},
+                selection(*(entry(n) for n in numbers)),
+                "org",
+                RUN,
+            )
+            return handback.deliveries(confirmed)
+
+    @unittest.expectedFailure
+    def test_a_pending_delivery_names_its_review(self) -> None:
+        """The posted review's id is the delivery's identity."""
+        double = GitHubDouble({1: [review()]})
+        self.assertEqual(
+            self.records(double),
+            [{"pull": "org/repo#1", "review": REVIEW, "state": "pending"}],
+        )
+        self.assertIn(
+            f"repos/org/repo/issues/{ISSUE}/comments?per_page=100", double.reads
+        )
+
+    @unittest.expectedFailure
+    def test_a_moved_head_is_skipped(self) -> None:
+        """A round already ran, or someone pushed: the review is spent."""
+        double = GitHubDouble({1: [review()]}, pulls={1: pull(OLD)})
+        with contextlib.redirect_stderr(io.StringIO()):
+            records = self.records(double)
+        self.assertEqual(
+            records,
+            [
+                {
+                    "pull": "org/repo#1",
+                    "review": REVIEW,
+                    "state": "skipped",
+                    "reason": f"the head moved from {HEAD[:12]} to {OLD[:12]}",
+                }
+            ],
+        )
+        self.assertFalse(any("/issues/" in read for read in double.reads))
+
+    @unittest.expectedFailure
+    def test_an_answered_review_is_skipped(self) -> None:
+        """Code Monkey's round footer naming this review means it went."""
+        double = GitHubDouble({1: [review()]}, comments=[footer(trailer="\n")])
+        with contextlib.redirect_stderr(io.StringIO()) as err:
+            records = self.records(double)
+        self.assertEqual(
+            records,
+            [
+                {
+                    "pull": "org/repo#1",
+                    "review": REVIEW,
+                    "state": "skipped",
+                    "reason": f"issue #{ISSUE} already answers review {REVIEW}",
+                }
+            ],
+        )
+        self.assertIn("::notice::handback: org/repo#1 skipped", err.getvalue())
+
+    @unittest.expectedFailure
+    def test_other_footers_do_not_answer(self) -> None:
+        """Another review, another author, or a footer mid-body: still pending."""
+        quoted = footer()
+        quoted["body"] += "\n\nlater text"
+        cases = {
+            "another review": footer(REVIEW + 1),
+            "a human": footer(kind="User"),
+            "another bot": footer(login="evil[bot]"),
+            "mid-body": quoted,
+        }
+        for name, comment in cases.items():
+            with self.subTest(case=name):
+                double = GitHubDouble({1: [review()]}, comments=[comment])
+                self.assertEqual(self.records(double)[0]["state"], "pending")
+
+    @unittest.expectedFailure
+    def test_a_branch_without_an_issue_reads_no_comments(self) -> None:
+        """No Code Monkey issue to read: the hand-back stays pending."""
+        double = GitHubDouble({1: [review()]}, pulls={1: pull(branch="feature")})
+        self.assertEqual(self.records(double)[0]["state"], "pending")
+        self.assertFalse(any("/issues/" in read for read in double.reads))
+
+    @unittest.expectedFailure
+    def test_a_failed_check_keeps_the_pull_request(self) -> None:
+        """A duplicate dispatch costs a refused session; a dropped one a revision."""
+        for broken in ("/pulls/1", "/comments?per_page=100"):
+            with (
+                self.subTest(broken=broken),
+                contextlib.redirect_stderr(io.StringIO()) as err,
+            ):
+                double = GitHubDouble({1: [review()]}, broken=(broken,))
+                records = self.records(double)
+            self.assertEqual(records[0]["state"], "pending")
+            warning = err.getvalue()
+            self.assertTrue(warning.startswith("::warning::handback: org/repo#1 kept"))
+            self.assertNotIn("::read", warning)
+
+
 class MainTest(unittest.TestCase):
     """The CLI prints exactly two output lines."""
 
@@ -246,6 +413,7 @@ class MainTest(unittest.TestCase):
         failures: dict[int, int] | None = None,
     ) -> str:
         """Run ``list`` over files in a temp tree; return stdout."""
+        double = GitHubDouble({1: [review()]}, failures)
         with tempfile.TemporaryDirectory() as tmp:
             report_path = Path(tmp) / "report.json"
             report_path.write_text(json.dumps(report), encoding="utf-8")
@@ -255,10 +423,9 @@ class MainTest(unittest.TestCase):
             with (
                 contextlib.redirect_stdout(out),
                 contextlib.redirect_stderr(io.StringIO()),
+                patch.object(handback.github, "api_list", side_effect=double),
                 patch.object(
-                    handback.github,
-                    "api_list",
-                    side_effect=GitHubDouble({1: [review()]}, failures),
+                    handback.github, "api_object", side_effect=double.read_pull
                 ),
             ):
                 handback.main(
@@ -298,6 +465,23 @@ class MainTest(unittest.TestCase):
                     ),
                     "pulls=\ncount=0\n",
                 )
+
+    @unittest.expectedFailure
+    def test_records_carry_every_confirmed_hand_back(self) -> None:
+        """Skipped hand-backs are recorded and left out of the dispatch list."""
+        self.assertEqual(
+            self.run_list({"results": [result(1)]}, selection(entry(1))).splitlines()[
+                2
+            ],
+            f'records=[{{"pull":"org/repo#1","review":{REVIEW},"state":"pending"}}]',
+        )
+        with patch.object(GitHubDouble, "read_pull", return_value=pull(OLD)):
+            out = self.run_list({"results": [result(1)]}, selection(entry(1)))
+        pulls, count, records = out.splitlines()
+        self.assertEqual((pulls, count), ("pulls=", "count=0"))
+        self.assertEqual(
+            json.loads(records.removeprefix("records="))[0]["state"], "skipped"
+        )
 
     def test_bad_inputs_fail(self) -> None:
         """Files that are not objects, or an owner or run that is malformed, exit."""
