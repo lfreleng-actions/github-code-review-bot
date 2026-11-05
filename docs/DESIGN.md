@@ -253,8 +253,9 @@ run closed.
 
 <!-- markdownlint-enable MD013 -->
 
-The gate costs about half a minute per run: a `uv` setup and a
-`zizmor` install from PyPI, which the allow-list already carries.
+The gate costs about half a minute per run: a `uv` setup, a
+Python install from uv's release mirror (`releases.astral.sh`) and
+a `zizmor` install from PyPI, all hosts the allow-list must carry.
 Everything it checks is a file already on the runner or a value the
 workflow already holds; it introduces nothing new to trust. A run it
 fails is a run that must not proceed, and the error annotation names
@@ -265,18 +266,40 @@ workflow still has the shape the design and tests describe; the
 design and tests remain the place to change that shape.
 
 The gate's own interpreter is the workflow's choice, never the
-workspace's. `setup-uv` looks up a Python interpreter, and reads
-`required-version` and `cache-dir`, in its working directory, so
-every `setup-uv` step runs from `runner.temp` with `UV_NO_CONFIG`,
-`UV_SYSTEM_PYTHON` and `UV_NO_PROJECT` set. In project mode
-`uv run` executes the interpreter of an existing project
+workspace's or the job environment's. `setup-uv` reads
+`required-version` and `cache-dir` in its working directory, and
+runs `uv python find` and executes what it returns. Without an
+absolute `--python`, uv chooses an interpreter from files in the
+working directory and from `PATH`, `UV_PYTHON`, `VIRTUAL_ENV`,
+`CONDA_PREFIX` and its internal variables, any of which an earlier
+step can set for the rest of the job through `GITHUB_ENV` or
+`GITHUB_PATH`. To close both routes, every `setup-uv` step runs from
+`runner.temp` with `UV_NO_CONFIG` and `UV_NO_PROJECT` set, installs
+tools under `runner.temp`, keeps its cache off, and sets
+`UV_PYTHON_PREFERENCE` to an invalid value so uv refuses the lookup
+before it runs anything; it also clears an inherited
+`UV_PYTHON_ARCH`, which would make `setup-uv` probe uv against that
+preference. It pins `UV_PYTHON_INSTALL_DIR` under `runner.temp`
+too: `setup-uv` puts that directory on `PATH` ahead of its own uv
+and then runs a bare `uv`, so an inherited value naming a directory
+that holds another `uv` would run it before the preference applied.
+An `Install Python` step then runs `uv python install` and
+`uv python find --managed-python` into that directory under
+`env -i`, passing uv's own settings and the proxy and certificate
+variables and nothing else, and fails unless the result lies in the
+directory it installed to. It runs from `runner.temp`, because
+`uv python find` starts a `.venv/bin/python` in its working
+directory to query it, emptied environment or not, before rejecting
+it as unmanaged. Every later uv call runs uv by the path `setup-uv`
+reports and names that interpreter by absolute path. In project
+mode `uv run` executes the interpreter of an existing project
 environment, a `.venv` in the assets checkout or that of a uv
-workspace above it, even when given `--python`. So the gate
-finds a system interpreter from `RUNNER_TEMP`, fails without one,
-passes it with `--python`, and builds the environment under
-`RUNNER_TEMP` through `UV_PROJECT_ENVIRONMENT`. Nothing writes to
-the workspace before these steps today; this keeps the gate from
-depending on that.
+workspace above it, even when given `--python`, so the gate also
+builds its environment under `RUNNER_TEMP` through
+`UV_PROJECT_ENVIRONMENT`. Nothing writes to the workspace or the job
+environment before these steps today; this keeps the gate from
+depending on that. A `python3` an earlier step puts on `PATH` is out
+of scope: the runner finds `bash` there for every step too.
 
 ## 5. Selection
 
@@ -813,9 +836,17 @@ site with `mkdocs build --strict` without any Pages permission.
 A `uv-isolation` job plants a `.venv` and a `.python-version` in the
 workspace root and the assets checkout, each naming an interpreter
 that records it ran, plus a root `uv.toml` demanding uv 0.0.1. It
-then runs exact copies of the select job's uv steps (section 4.4)
-and fails if a planted interpreter ran; the contract tests keep the
-copies identical to the originals.
+also puts the root `.venv/bin`, holding a bait `python3.13` and
+`uv`, on `PATH`, and in one leg points `UV_PYTHON` and
+`UV_PYTHON_SEARCH_PATH` at the bait, in the other `VIRTUAL_ENV`,
+`CONDA_PREFIX` and `UV_INTERNAL__PARENT_INTERPRETER`, with
+`UV_PYTHON_ARCH`, `UV_NO_CACHE` and a `UV_PYTHON_INSTALL_DIR`
+naming a root `.uv-python` that holds another bait `uv` in both.
+It then runs exact copies of the select job's uv steps (section
+4.4) and fails if a planted interpreter ran; a control step last
+runs the same lookups without `--python` and fails unless the bait
+ran, so the check cannot pass on a dead bait. The contract tests
+keep the copies identical to the originals.
 
 The full agent session runs from `workflow_dispatch` alone: a
 maintainer dispatches `testing.yaml` against a chosen ref with a

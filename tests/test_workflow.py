@@ -499,7 +499,6 @@ class PreflightContracts(ReusableWorkflowCase):
             self.position("apply", "Apply verdict"),
         )
 
-    @unittest.expectedFailure
     def test_preflight_python_is_installed_from_an_empty_environment(self) -> None:
         """No variable of the job steers the install or lookup of the gate's Python."""
         step = self.step("select", INSTALL_PYTHON)
@@ -525,7 +524,6 @@ class PreflightContracts(ReusableWorkflowCase):
             self.position("select", SETUP_UV_ID), self.position("select", "python")
         )
 
-    @unittest.expectedFailure
     def test_preflight_python_comes_from_outside_the_workspace(self) -> None:
         """The gate's interpreter and environment are chosen outside the checkout."""
         step = self.step("select", "Pre-flight: workflow contracts and audit")
@@ -547,7 +545,6 @@ class PreflightContracts(ReusableWorkflowCase):
             self.position("select", "Pre-flight: workflow contracts and audit"),
         )
 
-    @unittest.expectedFailure
     def test_zizmor_is_pinned(self) -> None:
         """The auditor the gate runs is an exact version."""
         run = flatten(self.step("select", "Install zizmor")["run"])
@@ -1174,7 +1171,6 @@ class TestingContracts(WorkflowCase):
             dry["with"]["pull_requests"], "${{ inputs.pull_requests || '' }}"
         )
 
-    @unittest.expectedFailure
     def test_regression_runs_the_locked_unittest_suite(self) -> None:
         """The offline suite runs from the lockfile with read-only permissions."""
         regression = self.jobs["regression"]
@@ -1186,7 +1182,6 @@ class TestingContracts(WorkflowCase):
             run,
         )
 
-    @unittest.expectedFailure
     def test_isolation_job_runs_copies_of_the_select_uv_steps(self) -> None:
         """The isolation job proves the select job's own uv steps, unedited."""
         select = cast(list[dict[str, Any]], load_jobs(REUSABLE)["select"]["steps"])
@@ -1196,7 +1191,6 @@ class TestingContracts(WorkflowCase):
                 self.assertEqual(len(originals), 1)
                 self.assertEqual(self.step(ISOLATION_JOB, name), originals[0])
 
-    @unittest.expectedFailure
     def test_isolation_job_fails_when_a_planted_interpreter_runs(self) -> None:
         """Interpreters planted in the workspace and assets must never run."""
         self.assertEqual(self.jobs[ISOLATION_JOB]["permissions"], {"contents": "read"})
@@ -1226,7 +1220,6 @@ class TestingContracts(WorkflowCase):
         self.assertEqual(order, sorted(order))
         self.assertEqual(order[-1], len(self.steps(ISOLATION_JOB)) - 1)
 
-    @unittest.expectedFailure
     def test_isolation_job_plants_the_job_environment_routes(self) -> None:
         """Bait on PATH and in uv's variables reaches every later step."""
         job = self.jobs[ISOLATION_JOB]
@@ -1255,7 +1248,6 @@ class TestingContracts(WorkflowCase):
                 with self.subTest(route=route, variable=variable):
                     self.assertIn(f'echo "{variable}$venv', branch)
 
-    @unittest.expectedFailure
     def test_isolation_control_proves_the_bait_is_live(self) -> None:
         """Unguarded lookups must start the bait, or the check proves nothing."""
         step = self.step(ISOLATION_JOB, ISOLATION_CONTROL)
@@ -1547,7 +1539,6 @@ class SetupUvContracts(unittest.TestCase):
                     found.append((path.name, job, steps))
         return found
 
-    @unittest.expectedFailure
     def test_every_setup_uv_step_refuses_the_interpreter_lookup(self) -> None:
         """Every setup-uv step runs in the runner's temp directory, lookup off."""
         for path in self.UV_WORKFLOWS:
@@ -1565,7 +1556,6 @@ class SetupUvContracts(unittest.TestCase):
                     self.assertEqual(step.get("with"), SETUP_UV_WITH)
                     self.assertEqual(step.get("env"), SETUP_UV_ENV)
 
-    @unittest.expectedFailure
     def test_every_uv_job_installs_the_select_jobs_python(self) -> None:
         """Each uv job installs its interpreter exactly as the select job does."""
         select = cast(list[dict[str, Any]], load_jobs(REUSABLE)["select"]["steps"])
@@ -1577,7 +1567,6 @@ class SetupUvContracts(unittest.TestCase):
                 setup = next(i for i, s in enumerate(steps) if is_action(s, SETUP_UV))
                 self.assertEqual(steps.index(installs[0]), setup + 1)
 
-    @unittest.expectedFailure
     def test_every_uv_call_names_the_trusted_python(self) -> None:
         """uv runs by path, and each call that picks a Python names the trusted one."""
         for workflow, job, steps in self.uv_jobs():
