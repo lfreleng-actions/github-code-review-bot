@@ -783,5 +783,58 @@ class PullComparisonCommitsTest(ReadsCase):
                 read_comparison()
 
 
+class PullReviewsTest(ReadsCase):
+    """``pull_reviews`` keeps Copilot's review bodies alone, bounded."""
+
+    def read(self, entries: list[Any]) -> list[dict[str, Any]]:
+        """Run ``pull_reviews`` against one page of REST reviews."""
+        with patch.object(github, "run_gh", return_value=json.dumps([entries])):
+            return changes.pull_reviews("org/alpha", 7)
+
+    @unittest.expectedFailure
+    def test_copilot_body_kept_others_dropped(self) -> None:
+        """Copilot's body and submission time survive; a human's body does not."""
+        copilot = {
+            "user": {"login": "copilot-pull-request-reviewer[bot]", "type": "Bot"},
+            "state": "COMMENTED",
+            "commit_id": HEAD,
+            "submitted_at": "2026-02-01T00:00:00Z",
+            "body": "### 🟢 Approval recommended\n",
+        }
+        human = {**copilot, "user": {"login": "alice", "type": "User"}}
+        lookalike = {**copilot, "user": {"login": "copilot", "type": "User"}}
+        other_bot = {**copilot, "user": {"login": "monkey[bot]", "type": "Bot"}}
+        reviews = self.read([copilot, human, lookalike, other_bot])
+        self.assertEqual(
+            reviews[0],
+            {
+                "author": "copilot-pull-request-reviewer[bot]",
+                "is_bot": True,
+                "state": "COMMENTED",
+                "commit": HEAD,
+                "submitted_at": "2026-02-01T00:00:00Z",
+                "body": "### 🟢 Approval recommended\n",
+            },
+        )
+        self.assertEqual([r["body"] for r in reviews[1:]], [None, None, None])
+
+    @unittest.expectedFailure
+    def test_oversized_body_is_dropped(self) -> None:
+        """A body past the classifier's bound is never stored, so it reads unclean."""
+        limit = changes.MAX_REVIEW_BODY_BYTES
+        entry = {
+            "user": {"login": "copilot-pull-request-reviewer[bot]", "type": "Bot"},
+            "state": "COMMENTED",
+            "commit_id": HEAD,
+            "submitted_at": None,
+            "body": "x" * limit,
+        }
+        (fits,) = self.read([entry])
+        self.assertEqual(fits["body"], "x" * limit)
+        (over,) = self.read([{**entry, "body": "x" * (limit + 1)}])
+        self.assertIsNone(over["body"])
+        self.assertIsNone(over["submitted_at"])
+
+
 if __name__ == "__main__":
     unittest.main()
