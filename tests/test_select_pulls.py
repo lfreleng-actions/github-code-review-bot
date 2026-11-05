@@ -1370,7 +1370,6 @@ class AntagonisticSelectionTest(SelectionCase):
         self.run_main()
         self.assertFalse(any("/reviews?" in " ".join(c) for c in self.gh.calls))
 
-    @unittest.expectedFailure
     def test_five_rounds_cap_a_pull_request(self) -> None:
         """Five reviews from this App, on any heads, hand it to a maintainer;
         four leave room for a fifth round on a new head.

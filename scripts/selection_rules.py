@@ -50,8 +50,9 @@ CI_SKIPS = {"pending": "ci_pending", "failure": "ci_failing", "none": "ci_none"}
 INERT_REVIEW_STATES = frozenset({"PENDING", "DISMISSED"})
 # Antagonistic reviews one pull request takes, across all its heads,
 # before a maintainer must take over: the review and Code Monkey's
-# revision can feed each other, and this bounds the loop.
-MAX_ROUNDS = 3
+# revision can feed each other, and this bounds the loop. Five give
+# the authoring bot four chances to answer; never lift it.
+MAX_ROUNDS = 5
 
 
 class Skips:

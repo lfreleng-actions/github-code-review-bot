@@ -624,13 +624,12 @@ class CommentCommandTests(Tree):
             result = self.comment("--handback")
         body = self.write.call_args.args[2]["body"]
         self.assertIn(
-            "_Antagonistic round 1 of 3. Revision requested from Code Monkey._",
+            "_Antagonistic round 1 of 5. Revision requested from Code Monkey._",
             body,
         )
         self.assertEqual(result["round"], 1)
         self.assertIs(result["handback"], True)
 
-    @unittest.expectedFailure
     def test_round_four_still_hands_back(self) -> None:
         """Three earlier rounds leave room for a fourth that goes back."""
         self.history = [self.own_review(c * 40) for c in "bcd"]
@@ -646,7 +645,6 @@ class CommentCommandTests(Tree):
         self.assertEqual(result["round"], 4)
         self.assertIs(result["handback"], True)
 
-    @unittest.expectedFailure
     def test_rounds_count_this_apps_reviews_of_earlier_heads(self) -> None:
         """Four earlier rounds make this the fifth and last: it posts, and
         hands nothing back.
@@ -836,7 +834,7 @@ class CommentCommandTests(Tree):
                 self.assertEqual(result["verdict"], "commented")
                 self.assertIs(result["handback"], False)
                 body = self.write.call_args.args[2]["body"]
-                self.assertIn("_Antagonistic round 1 of 3._", body)
+                self.assertIn("_Antagonistic round 1 of 5._", body)
 
     def test_a_dry_run_hands_nothing_back(self) -> None:
         """Nothing posted, so nothing to revise against."""

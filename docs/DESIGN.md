@@ -329,7 +329,7 @@ records a count for every reason, zero included:
 | `already_approved`   | Some reviewer's latest review is `APPROVED` on the current head                                                                                                    |
 | `copilot_pending`    | Copilot is a requested reviewer whose review has not arrived                                                                                                       |
 | `copilot_feedback`   | Unresolved review threads opened by Copilot                                                                                                                        |
-| `round_cap`          | Antagonistic mode alone: this App has reviewed the pull request three times (§19.9)                                                                                |
+| `round_cap`          | Antagonistic mode alone: this App has reviewed the pull request five times (§19.9)                                                                                 |
 | `already_reviewed`   | Antagonistic mode alone: this App has a submitted review of the head (§19.2)                                                                                       |
 | `copilot_unreviewed` | Antagonistic mode alone: no submitted Copilot review of the head itself (§19.2)                                                                                    |
 | `copilot_findings`   | Antagonistic mode alone: Copilot's latest review of the head is not clean: yellow, findings in its body, no assessment, or unreadable (§19.2)                      |
@@ -1555,9 +1555,9 @@ None counts a review unless GitHub marks its author as a bot: logins
 compare without the `[bot]` suffix, and a human account named like
 the App or like Copilot must stand in for neither.
 
-- `round_cap`: this App has submitted three reviews of the pull
+- `round_cap`: this App has submitted five reviews of the pull
   request, on any heads. The review and Code Monkey's revision can
-  feed each other (§19.9); after the third round a maintainer takes
+  feed each other (§19.9); after the fifth round a maintainer takes
   over, and the pull request takes no further antagonistic review.
 - `already_reviewed`: this App has submitted a review of the head.
   GitHub keeps that review, so the review itself records which
@@ -1851,7 +1851,7 @@ The loop runs: Code Monkey publishes; Copilot reviews; once its
 review of the head is clean, Code Monkey dispatches this mode, whose
 selection confirms the review is clean (§19.2); this mode reviews
 and hands back; Code Monkey revises, and the cycle
-repeats. It ends after three antagonistic rounds per pull request,
+repeats. It ends after five antagonistic rounds per pull request,
 when a maintainer takes over.
 
 - **Who decides.** `comment_review.py comment`, at the live gate,
@@ -1861,15 +1861,15 @@ when a maintainer takes over.
   act on (a finding, or a defect the summary names and flags with
   `summary_finding`), the author is in `config/handback-authors.txt`
   (Code Monkey alone: the Copilot coding agent has no revision
-  workflow to dispatch), and the round is under three. The review body
+  workflow to dispatch), and the round is under five. The review body
   names the round and, when it hands back, says it requests a revision
   from Code Monkey: the applier writes it before the hand-back job
-  dispatches anything, so it never claims a revision started. The third says a
+  dispatches anything, so it never claims a revision started. The fifth says a
   maintainer takes it from there. A review that hands back ends with a
   hidden marker,
   `<!-- antagonistic-handback round=N head=SHA run=RUN_ID -->`;
   one that does not ends with the run's review marker (§19.5).
-  The gate refuses a fourth review, and the selection skips such a
+  The gate refuses a sixth review, and the selection skips such a
   pull request as `round_cap` (§19.2).
 - **What authorises the dispatch.** The report finds result
   artifacts by name, so a compromised review runner could upload one;
@@ -1972,11 +1972,13 @@ when a maintainer takes over.
   holding different heads cannot both pass the round check before
   either posts, and `queue: max` keeps a late job for an older head
   from evicting the current head's.
-- **Why a cap, and why three.** Code Monkey's own cap is ten rounds;
-  a disagreement between two agents would spend those before a human
-  saw it. Three antagonistic rounds give the authoring bot two
-  chances to answer the findings, and leave the third review's
-  verdict for the maintainer.
+- **Why a cap, and why five.** Without one, a disagreement between
+  two agents could run on with no human seeing it. Five antagonistic
+  rounds give the authoring bot four chances to answer the findings,
+  and leave the fifth review's verdict for the maintainer. Code
+  Monkey's ten-round Copilot cap applies within each antagonistic
+  round (resetting it per round is Code Monkey's side), so the loop
+  stays bounded at both levels.
 - **What Code Monkey must do.** A named pull request gets a revision
   round whatever its threads, but Code Monkey's packet reads the
   threads Copilot or a maintainer opened, and no others. Until it

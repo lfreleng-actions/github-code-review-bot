@@ -67,7 +67,7 @@ on:
       handback:
         description: >-
           Hand reviewed Code Monkey pull requests back for a revision
-          round (three antagonistic rounds per pull request at most)
+          round (five antagonistic rounds per pull request at most)
         type: boolean
         default: true
 
@@ -151,7 +151,7 @@ jobs:
       github_app_client_id: "${{ vars.ANTAGONISTIC_APP_CLIENT_ID || '' }}"
       # Code Monkey's revision rounds, in this owner. The applier caps
       # the rounds, so the review and the revision cannot feed each
-      # other past three.
+      # other past five.
       handback_repository: >-
         ${{ inputs.handback
         && format('{0}/github-code-monkey-bot', github.repository_owner)
