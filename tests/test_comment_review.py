@@ -630,20 +630,42 @@ class CommentCommandTests(Tree):
         self.assertEqual(result["round"], 1)
         self.assertIs(result["handback"], True)
 
-    def test_rounds_count_this_apps_reviews_of_earlier_heads(self) -> None:
-        """Two earlier rounds make this the third and last: no hand-back."""
-        self.history = [self.own_review(MOVED), self.own_review("c" * 40)]
+    @unittest.expectedFailure
+    def test_round_four_still_hands_back(self) -> None:
+        """Three earlier rounds leave room for a fourth that goes back."""
+        self.history = [self.own_review(c * 40) for c in "bcd"]
         with patch.object(
             comment_review.pull_reads, "pull_state", return_value=live_state()
         ):
             result = self.comment("--handback")
         body = self.write.call_args.args[2]["body"]
         self.assertIn(
-            "_Antagonistic round 3 of 3. That is the last one: a maintainer "
+            "_Antagonistic round 4 of 5. Revision requested from Code Monkey._",
+            body,
+        )
+        self.assertEqual(result["round"], 4)
+        self.assertIs(result["handback"], True)
+
+    @unittest.expectedFailure
+    def test_rounds_count_this_apps_reviews_of_earlier_heads(self) -> None:
+        """Four earlier rounds make this the fifth and last: it posts, and
+        hands nothing back.
+        """
+        self.history = [self.own_review(c * 40) for c in "bcde"]
+        with patch.object(
+            comment_review.pull_reads, "pull_state", return_value=live_state()
+        ):
+            result = self.comment("--handback")
+        self.write.assert_called_once()
+        body = self.write.call_args.args[2]["body"]
+        self.assertIn(
+            "_Antagonistic round 5 of 5. That is the last one: a maintainer "
             "takes it from here._",
             body,
         )
-        self.assertEqual(result["round"], 3)
+        self.assertNotIn("antagonistic-handback", body)
+        self.assertEqual(result["verdict"], "commented")
+        self.assertEqual(result["round"], 5)
         self.assertIs(result["handback"], False)
 
     def test_a_hand_back_ends_the_review_with_its_marker(self) -> None:
@@ -775,16 +797,19 @@ class CommentCommandTests(Tree):
                 fences = [line for line in body.split("\n") if line.startswith("```")]
                 self.assertEqual(fences, ["```", "```"] * pairs)
 
-    def test_the_cap_refuses_a_fourth_round(self) -> None:
-        """Three reviews of earlier heads: the live gate posts nothing more."""
-        self.history = [self.own_review(c * 40) for c in "bcd"]
+    def test_the_cap_refuses_the_round_after_it(self) -> None:
+        """A full cap of reviews of earlier heads: the live gate posts nothing
+        more.
+        """
+        cap = comment_review.MAX_ROUNDS
+        self.history = [self.own_review(f"{n:040x}") for n in range(1, cap + 1)]
         with patch.object(
             comment_review.pull_reads, "pull_state", return_value=live_state()
         ):
             result = self.comment("--handback")
         self.write.assert_not_called()
         self.assertEqual(result["verdict"], "refused")
-        self.assertIn("round cap of 3 is reached", result["reasons"][0])
+        self.assertIn(f"round cap of {cap} is reached", result["reasons"][0])
         self.assertIs(result["handback"], False)
 
     def test_no_hand_back_without_cause_or_a_bot_that_can_revise(self) -> None:

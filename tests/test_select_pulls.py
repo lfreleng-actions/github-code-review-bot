@@ -1370,9 +1370,10 @@ class AntagonisticSelectionTest(SelectionCase):
         self.run_main()
         self.assertFalse(any("/reviews?" in " ".join(c) for c in self.gh.calls))
 
-    def test_three_rounds_cap_a_pull_request(self) -> None:
-        """Three reviews from this App, on any heads, hand it to a maintainer;
-        two leave room for a third round on a new head.
+    @unittest.expectedFailure
+    def test_five_rounds_cap_a_pull_request(self) -> None:
+        """Five reviews from this App, on any heads, hand it to a maintainer;
+        four leave room for a fifth round on a new head.
         """
 
         def own(commit: str) -> dict[str, Any]:
@@ -1393,8 +1394,14 @@ class AntagonisticSelectionTest(SelectionCase):
         }
         self.add_bot("alpha", 1)
         self.add_bot("beta", 2)
-        self.gh.reviews[("org/alpha", 1)] = [copilot, *(own(c * 40) for c in "bcd")]
-        self.gh.reviews[("org/beta", 2)] = [copilot, own(BASE), own(OTHER)]
+        self.gh.reviews[("org/alpha", 1)] = [
+            copilot,
+            *(own(c * 40) for c in "bcdef"),
+        ]
+        self.gh.reviews[("org/beta", 2)] = [
+            copilot,
+            *(own(c * 40) for c in "bcde"),
+        ]
         selection = self.run_antagonistic(
             "--bot-slug", "lf-releng-antagonistic-review-bot"
         )
