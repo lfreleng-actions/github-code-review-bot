@@ -90,7 +90,9 @@ mint.
 
 **Copilot code review is a prerequisite.** The antagonistic mode
 reads a head after Copilot has reviewed that same head, and skips it
-as `copilot_unreviewed` until then. A repository with Copilot code
+as `copilot_unreviewed` until then, and as `copilot_findings` while
+that review is not clean: a yellow assessment, or suppressed findings
+or findings it missed earlier in its body. A repository with Copilot code
 review turned off never gets an antagonistic review. When a dispatch
 selects nothing, read `skipped[]` in the evidence artifact's
 `selection.json` for that reason, and for `already_reviewed`: the

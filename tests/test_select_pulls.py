@@ -18,6 +18,7 @@ from typing import Any
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 github = import_module("bot_github")
 ledger = import_module("ledger")
 reads = import_module("pull_reads")
@@ -26,6 +27,8 @@ select = import_module("select_pulls")
 rules = import_module("selection_rules")
 outputs = import_module("selection_outputs")
 report = import_module("review_report")
+BODIES = import_module("review_fixtures").BODIES
+CLEAN = BODIES["v2-green-clean"]
 
 HEAD = "a" * 40
 BASE = "b" * 40
@@ -224,6 +227,8 @@ class FakeGitHub:
                 },
                 "state": node["state"],
                 "commit_id": node["commit"]["oid"],
+                "submitted_at": node.get("submittedAt"),
+                "body": node.get("body", ""),
             }
             for node in nodes
         ]
@@ -1003,13 +1008,23 @@ MONKEY = {"__typename": "Bot", "login": "lf-releng-code-monkey-bot"}
 MONKEY_SEARCH = {"login": "lf-releng-code-monkey-bot[bot]", "is_bot": True}
 
 
-def bot_review(login: str, commit: str = HEAD) -> dict[str, Any]:
-    """One review node from a bot, Copilot by default in the callers."""
+def bot_review(
+    login: str,
+    commit: str = HEAD,
+    *,
+    body: str = CLEAN,
+    submitted_at: str = "2026-02-01T00:00:00Z",
+) -> dict[str, Any]:
+    """One review node from a bot, Copilot by default in the callers.
+
+    GraphQL reads no ``body``; the fake serves it on the REST history.
+    """
     return {
         "author": {"__typename": "Bot", "login": login},
         "state": "COMMENTED",
-        "submittedAt": "2026-02-01T00:00:00Z",
+        "submittedAt": submitted_at,
         "commit": {"oid": commit},
+        "body": body,
     }
 
 
@@ -1177,6 +1192,109 @@ class AntagonisticSelectionTest(SelectionCase):
         self.assertEqual([e["key"] for e in selection["pull_requests"]], ["gamma-3"])
         self.assertEqual(selection["skip_counts"]["copilot_unreviewed"], 2)
 
+    def copilot_on_head(self, body: str) -> dict[str, Any]:
+        """Run one Code Monkey pull request whose head Copilot reviewed with ``body``."""
+        node = bot_review("copilot-pull-request-reviewer", body=body)
+        self.add_bot("alpha", 1, reviews={"nodes": [node]})
+        return self.run_antagonistic()
+
+    def test_a_copilot_review_with_findings_in_its_body_waits(self) -> None:
+        """Body-only findings, with no thread open, are not a clean review."""
+        bodies = {
+            "yellow": BODIES["v2-yellow-first-current"],
+            "green with suppressed": BODIES["v2-green-clean"]
+            + "\n<details>\n<summary>Suppressed comments (1)</summary>\n\n"
+            "**scripts/x.py:12**\n* Something a reviewer would want to know.\n"
+            "</details>\n",
+            "previously missed": BODIES["v2-blue-previously-missed-current"],
+            "no assessment": BODIES["legacy-no-comments"],
+            "unreadable": BODIES["v2-green-clean"] + "\n<!-- hidden -->\n",
+            "empty": "",
+        }
+        for name, body in bodies.items():
+            with self.subTest(name=name):
+                self.gh.search.clear()
+                self.assert_only_skip(self.copilot_on_head(body), "copilot_findings")
+
+    def test_a_suppressed_entry_with_a_non_ascii_path_waits(self) -> None:
+        """A backticked entry under a stated zero still counts, whatever its path."""
+        body = (
+            CLEAN + "\n<details>\n<summary>Suppressed comments (0)</summary>\n\n"
+            "**`src/café.py:12`**\n* Something a reviewer would want to know.\n"
+            "</details>\n"
+        )
+        self.assert_only_skip(self.copilot_on_head(body), "copilot_findings")
+
+    def test_a_clean_green_or_blue_review_is_selected(self) -> None:
+        """Approval, or a blue review with nothing outstanding, lets the mode run."""
+        for name in ("v2-green-clean", "v2-blue-clean", "v2-blue-clean-current"):
+            with self.subTest(name=name):
+                self.gh.search.clear()
+                selection = self.copilot_on_head(BODIES[name])
+                self.assertEqual(
+                    [e["key"] for e in selection["pull_requests"]], ["alpha-1"]
+                )
+
+    def test_only_the_latest_current_head_review_is_classified(self) -> None:
+        """A clean review of an older head never counts; the newest of this head
+        decides, whichever way it went.
+        """
+        old_clean = bot_review("copilot-pull-request-reviewer", OTHER)
+        yellow = BODIES["v2-yellow-first-current"]
+
+        def copilot(body: str, when: str) -> dict[str, Any]:
+            return bot_review(
+                "copilot-pull-request-reviewer", body=body, submitted_at=when
+            )
+
+        cases = {
+            "older head clean, this head yellow": (
+                [old_clean, copilot(yellow, "2026-02-02T00:00:00Z")],
+                "copilot_findings",
+            ),
+            "clean then yellow": (
+                [
+                    copilot(CLEAN, "2026-02-01T00:00:00Z"),
+                    copilot(yellow, "2026-02-02T00:00:00Z"),
+                ],
+                "copilot_findings",
+            ),
+            "yellow after clean, listed first": (
+                [
+                    copilot(yellow, "2026-02-02T00:00:00Z"),
+                    copilot(CLEAN, "2026-02-01T00:00:00Z"),
+                ],
+                "copilot_findings",
+            ),
+            "yellow then clean": (
+                [
+                    copilot(yellow, "2026-02-01T00:00:00Z"),
+                    copilot(CLEAN, "2026-02-02T00:00:00Z"),
+                ],
+                None,
+            ),
+        }
+        for name, (nodes, reason) in cases.items():
+            with self.subTest(name=name):
+                self.gh.search.clear()
+                self.add_bot("alpha", 1, reviews={"nodes": nodes})
+                selection = self.run_antagonistic()
+                if reason is None:
+                    self.assertEqual(
+                        [e["key"] for e in selection["pull_requests"]], ["alpha-1"]
+                    )
+                else:
+                    self.assert_only_skip(selection, reason)
+
+    def test_approve_mode_ignores_the_copilot_review_body(self) -> None:
+        """The cleanliness rule is the antagonistic mode's alone."""
+        yellow = bot_review(
+            "copilot-pull-request-reviewer", body=BODIES["v2-yellow-first-current"]
+        )
+        self.gh.add("alpha", 1, reviews={"nodes": [yellow]})
+        selection, _, _ = self.run_main()
+        self.assertEqual([e["key"] for e in selection["pull_requests"]], ["alpha-1"])
+
     def test_a_head_this_app_reviewed_costs_no_session(self) -> None:
         """GitHub keeps the review, so it outlives any ledger that loses it."""
         own = bot_review("lf-releng-antagonistic-review-bot")
@@ -1208,6 +1326,7 @@ class AntagonisticSelectionTest(SelectionCase):
             "user": {"login": "copilot-pull-request-reviewer[bot]", "type": "Bot"},
             "state": "COMMENTED",
             "commit_id": HEAD,
+            "body": CLEAN,
         }
         self.gh.reviews[("org/alpha", 1)] = [copilot, own, *noise]
         selection = self.run_antagonistic(
@@ -1232,6 +1351,7 @@ class AntagonisticSelectionTest(SelectionCase):
             "user": {"login": "copilot-pull-request-reviewer[bot]", "type": "Bot"},
             "state": "COMMENTED",
             "commit_id": HEAD,
+            "body": CLEAN,
         }
         self.gh.reviews[("org/alpha", 1)] = lookalikes
         selection = self.run_antagonistic(
@@ -1269,6 +1389,7 @@ class AntagonisticSelectionTest(SelectionCase):
             "user": {"login": "copilot-pull-request-reviewer[bot]", "type": "Bot"},
             "state": "COMMENTED",
             "commit_id": HEAD,
+            "body": CLEAN,
         }
         self.add_bot("alpha", 1)
         self.add_bot("beta", 2)

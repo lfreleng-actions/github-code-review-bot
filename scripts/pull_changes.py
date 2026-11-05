@@ -18,11 +18,14 @@ from pull_reads import (
     MAX_FILES,
     MAX_MESSAGE_BYTES,
     MAX_PATCH_BYTES,
+    is_copilot,
     optional_str,
     require_count,
     require_object,
     truncate_utf8,
 )
+from review_verdict import MAX_BODY_BYTES as MAX_REVIEW_BODY_BYTES
+from selection_inputs import bot_identity
 
 
 def pull_comparison(
@@ -139,9 +142,15 @@ def pull_reviews(repository: str, number: int) -> list[dict[str, Any]]:
 
     The state query reads the last 100. A rule that must know whether a
     reviewer ever reviewed a head, rather than recently, reads them all.
-    Each entry has the ``author``, ``state`` and ``commit`` keys of the
-    the state query's reviews, plus ``is_bot``; a deleted account leaves
-    the author null.
+    Each entry has the ``author``, ``state``, ``commit`` and
+    ``submitted_at`` keys of the state query's reviews, plus ``is_bot``
+    and ``body``; a deleted account leaves the author null.
+
+    The body is kept for Copilot's reviews alone, which the
+    antagonistic mode classifies (DESIGN.md section 19.2), and only up
+    to the size the classifier reads: a larger one is dropped to null,
+    which the classifier reads as no assessment, never clean. Every
+    other review's body is null, so no other text grows the run.
     """
     context = f"{repository}#{number} review"
     reviews: list[dict[str, Any]] = []
@@ -152,12 +161,25 @@ def pull_reviews(repository: str, number: int) -> list[dict[str, Any]]:
         data = cast("dict[str, Any]", user) if isinstance(user, dict) else {}
         login = data.get("login")
         commit = entry.get("commit_id")
+        is_bot = data.get("type") == "Bot"
+        body = entry.get("body")
+        kept = (
+            body
+            if is_bot
+            and isinstance(login, str)
+            and is_copilot(bot_identity(login))
+            and isinstance(body, str)
+            and len(body.encode("utf-8")) <= MAX_REVIEW_BODY_BYTES
+            else None
+        )
         reviews.append(
             {
                 "author": login if isinstance(login, str) else None,
-                "is_bot": data.get("type") == "Bot",
+                "is_bot": is_bot,
                 "state": github.require_str(entry, "state", context),
                 "commit": commit if isinstance(commit, str) else None,
+                "submitted_at": optional_str(entry.get("submitted_at"), context),
+                "body": kept,
             }
         )
     return reviews
