@@ -17,6 +17,7 @@ from typing import Any, cast
 
 import ledger
 import pull_reads as reads
+import review_verdict as verdicts
 from selection_inputs import bot_identity
 
 SKIP_REASONS = (
@@ -33,6 +34,7 @@ SKIP_REASONS = (
     "round_cap",
     "already_reviewed",
     "copilot_unreviewed",
+    "copilot_findings",
     "ci_pending",
     "ci_failing",
     "ci_none",
@@ -139,11 +141,44 @@ def reviewed_by(reviews: list[dict[str, Any]], login: str, head_sha: str) -> boo
     return bot_identity(login) in submitted_bot_reviews(reviews, head_sha)
 
 
-def copilot_reviewed(reviews: list[dict[str, Any]], head_sha: str) -> bool:
-    """Whether Copilot has submitted a review of this head itself."""
-    return any(
-        reads.is_copilot(login) for login in submitted_bot_reviews(reviews, head_sha)
-    )
+def latest_copilot_review(
+    reviews: list[dict[str, Any]], head_sha: str
+) -> dict[str, Any] | None:
+    """Copilot's newest submitted review of this head itself, or None.
+
+    Newest by submission time; on a tie the later entry wins, since
+    the history arrives oldest first. A review of an earlier head
+    never counts, however clean.
+    """
+    latest: dict[str, Any] | None = None
+    for review in reviews:
+        author = review.get("author")
+        if (
+            isinstance(author, str)
+            and review.get("is_bot") is True
+            and reads.is_copilot(bot_identity(author))
+            and review.get("commit") == head_sha
+            and review.get("state") not in INERT_REVIEW_STATES
+            and (
+                latest is None
+                or str(review.get("submitted_at") or "")
+                >= str(latest.get("submitted_at") or "")
+            )
+        ):
+            latest = review
+    return latest
+
+
+def copilot_clean(review: dict[str, Any], unresolved_threads: int) -> bool:
+    """Whether Copilot's review, with its open threads, reads as clean.
+
+    The classifier is Code Monkey's, vendored unchanged: a yellow
+    assessment, a suppressed or previously missed finding, no
+    recognised assessment, or a body it cannot read is never clean.
+    """
+    body = review.get("body")
+    text = body if isinstance(body, str) else None
+    return verdicts.classify(text, unresolved_threads).verdict == "clean"
 
 
 def rounds_by(reviews: list[dict[str, Any]], login: str) -> int:
@@ -164,9 +199,10 @@ def mode_skip(state: dict[str, Any], rules: Rules) -> str | None:
 
     The approve mode waits for green CI, which an approval relies on.
     The antagonistic mode reviews a head once, and only after Copilot
-    has: a review of an earlier head, or none, does not count. It reads
-    the full review history, since the state query's last 100 reviews
-    can miss an old one of this head.
+    has reviewed it clean: a review of an earlier head, or none, does
+    not count, and neither does one whose body still reports findings.
+    It reads the full review history, since the state query's last 100
+    reviews can miss an old one of this head.
     """
     if rules.mode == "approve":
         return CI_SKIPS.get(str(state["ci"]))
@@ -179,8 +215,11 @@ def mode_skip(state: dict[str, Any], rules: Rules) -> str | None:
         return "round_cap"
     if rules.bot_login and reviewed_by(reviews, rules.bot_login, state["head_sha"]):
         return "already_reviewed"
-    if not copilot_reviewed(reviews, state["head_sha"]):
+    copilot = latest_copilot_review(reviews, state["head_sha"])
+    if copilot is None:
         return "copilot_unreviewed"
+    if not copilot_clean(copilot, int(state["unresolved_copilot_threads"])):
+        return "copilot_findings"
     return None
 
 

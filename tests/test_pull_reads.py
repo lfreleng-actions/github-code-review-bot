@@ -791,7 +791,6 @@ class PullReviewsTest(ReadsCase):
         with patch.object(github, "run_gh", return_value=json.dumps([entries])):
             return changes.pull_reviews("org/alpha", 7)
 
-    @unittest.expectedFailure
     def test_copilot_body_kept_others_dropped(self) -> None:
         """Copilot's body and submission time survive; a human's body does not."""
         copilot = {
@@ -804,7 +803,8 @@ class PullReviewsTest(ReadsCase):
         human = {**copilot, "user": {"login": "alice", "type": "User"}}
         lookalike = {**copilot, "user": {"login": "copilot", "type": "User"}}
         other_bot = {**copilot, "user": {"login": "monkey[bot]", "type": "Bot"}}
-        reviews = self.read([copilot, human, lookalike, other_bot])
+        agent = {**copilot, "user": {"login": "Copilot[bot]", "type": "Bot"}}
+        reviews = self.read([copilot, human, lookalike, other_bot, agent])
         self.assertEqual(
             reviews[0],
             {
@@ -816,9 +816,9 @@ class PullReviewsTest(ReadsCase):
                 "body": "### 🟢 Approval recommended\n",
             },
         )
-        self.assertEqual([r["body"] for r in reviews[1:]], [None, None, None])
+        self.assertEqual([r["body"] for r in reviews[1:4]], [None, None, None])
+        self.assertEqual(reviews[4]["body"], copilot["body"])
 
-    @unittest.expectedFailure
     def test_oversized_body_is_dropped(self) -> None:
         """A body past the classifier's bound is never stored, so it reads unclean."""
         limit = changes.MAX_REVIEW_BODY_BYTES

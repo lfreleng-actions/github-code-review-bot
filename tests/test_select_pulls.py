@@ -1198,7 +1198,6 @@ class AntagonisticSelectionTest(SelectionCase):
         self.add_bot("alpha", 1, reviews={"nodes": [node]})
         return self.run_antagonistic()
 
-    @unittest.expectedFailure
     def test_a_copilot_review_with_findings_in_its_body_waits(self) -> None:
         """Body-only findings, with no thread open, are not a clean review."""
         bodies = {
@@ -1217,7 +1216,6 @@ class AntagonisticSelectionTest(SelectionCase):
                 self.gh.search.clear()
                 self.assert_only_skip(self.copilot_on_head(body), "copilot_findings")
 
-    @unittest.expectedFailure
     def test_a_suppressed_entry_with_a_non_ascii_path_waits(self) -> None:
         """A backticked entry under a stated zero still counts, whatever its path."""
         body = (
@@ -1237,7 +1235,6 @@ class AntagonisticSelectionTest(SelectionCase):
                     [e["key"] for e in selection["pull_requests"]], ["alpha-1"]
                 )
 
-    @unittest.expectedFailure
     def test_only_the_latest_current_head_review_is_classified(self) -> None:
         """A clean review of an older head never counts; the newest of this head
         decides, whichever way it went.

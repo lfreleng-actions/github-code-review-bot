@@ -309,6 +309,7 @@ records a count for every reason, zero included:
 | `round_cap`          | Antagonistic mode alone: this App has reviewed the pull request three times (§19.9)                                                                                |
 | `already_reviewed`   | Antagonistic mode alone: this App has a submitted review of the head (§19.2)                                                                                       |
 | `copilot_unreviewed` | Antagonistic mode alone: no submitted Copilot review of the head itself (§19.2)                                                                                    |
+| `copilot_findings`   | Antagonistic mode alone: Copilot's latest review of the head is not clean: yellow, findings in its body, no assessment, or unreadable (§19.2)                      |
 | `ci_pending`         | Status check rollup `PENDING` or `EXPECTED`; approve mode alone                                                                                                    |
 | `ci_failing`         | Rollup `FAILURE` or `ERROR`; approve mode alone                                                                                                                    |
 | `ci_none`            | No status check rollup at all; approve mode alone                                                                                                                  |
@@ -1029,6 +1030,9 @@ scripts/comment_review.py                check and comment (§19.5)
 scripts/comment_body.py                  review body and inline comments
 scripts/handback.py                      hand-back list (§19.9)
 scripts/review_report.py                 report and new ledger
+scripts/review_verdict.py                Copilot review classifier (§19.2)
+scripts/review_sections.py               its section counts
+scripts/review_text.py                   its line reader
 tests/test_<module>.py                   offline unittest suite
 tests/test_workflow.py                   workflow contract tests
 pyproject.toml, uv.lock                  Python tooling
@@ -1040,13 +1044,16 @@ Every bot carries five shared modules, copied verbatim from
 `lfreleng-actions/bots-template`: `bot_github.py`, `bot_evidence.py`,
 `artifact_fetch.py`, `preflight.py`, `ledger.py`. Fix them in the
 template first, then copy; never patch a copy alone. The same holds
-for their test files.
+for their test files. Three more, `review_verdict.py`,
+`review_sections.py` and `review_text.py`, with their tests, come
+verbatim from Code Monkey at `7506d5e` (§19.2) under the same rule:
+fix them there first.
 
 The suite holds one test file per script module that owns a
 contract (`agent_outcome`, `apply_review`, `artifact_fetch`,
 `bot_evidence`, `bot_github`, `comment_review`, `handback`, `ledger`,
 `preflight`, `pull_reads`, `review_comments`, `review_policy`,
-`review_report`, `select_pulls`)
+`review_report`, `review_verdict`, `select_pulls`)
 plus `test_workflow.py`, which
 pins the workflow facts the scripts rely on: which job holds which
 credential, which step gates the write token, the artifact
@@ -1474,7 +1481,7 @@ They exist because an approval relies on green CI; a comment does
 not, and a bot pull request from a fork whose workflows await a
 maintainer's approval may show pending or partial CI for days.
 
-Three rules apply to this mode alone, after the Copilot rules. All
+Four rules apply to this mode alone, after the Copilot rules. All
 read the pull request's full review history, a paginated read the
 selection makes for this mode's candidates alone, after the cheaper
 rules: the state query's last 100 reviews could miss an old review.
@@ -1492,9 +1499,39 @@ the App or like Copilot must stand in for neither.
   overlap than the ledger fetch reads back costs no second session.
 - `copilot_unreviewed`: no submitted Copilot review of the head
   itself. An empty request list is not enough, and neither is a
-  review of an earlier push. With `copilot_pending` and
-  `copilot_feedback`, the mode reads a head once Copilot has
-  reviewed that head and nobody has left its threads open.
+  review of an earlier push.
+- `copilot_findings`: Copilot's latest submitted review of the head,
+  newest by submission time, is not clean. The selection classifies
+  its body, with the count of unresolved Copilot threads, through
+  Code Monkey's classifier (`scripts/review_verdict.py`, below):
+  clean means a green or blue assessment, no unresolved thread, no
+  suppressed finding, and no finding the body lists as missed on code
+  an earlier review read. A yellow assessment, either kind of finding
+  that lives in the body alone, a body with no recognised assessment,
+  one the classifier cannot read, and one over its 64 KiB bound are
+  all findings. A clean review of an earlier head never counts, and
+  a newer review of the head that is not clean overrides an older
+  clean one.
+
+With `copilot_pending` and `copilot_feedback`, the mode reads a head
+once Copilot has reviewed that head clean and nobody has left its
+threads open, and not before. The rule holds at every entry point: a
+scheduled scan, a maintainer's dispatch, and Code Monkey's dispatch
+after its own classifier found the review clean (§19.7). A caller
+saying the review was clean does not make it so, and the check runs
+before any agent session starts. The approve mode does not read the
+body.
+
+The selection keeps the body of Copilot's reviews alone from the
+history read (`pull_changes.pull_reviews`), and drops one past the
+classifier's 64 KiB bound rather than store it, so a large review
+cannot grow the run's memory. `review_verdict.py`,
+`review_sections.py` and `review_text.py`, with
+`tests/test_review_verdict.py` and `tests/review_fixtures.py`, come
+byte for byte from
+[`lfreleng-actions/github-code-monkey-bot`](https://github.com/lfreleng-actions/github-code-monkey-bot)
+at commit `7506d5e`. Fix them in Code Monkey first, then copy; never
+patch a copy alone.
 
 `approve_tiers`
 must be `none`; the select job and the selection script both refuse
@@ -1691,7 +1728,11 @@ from taking two reviews.
 
 A dispatcher needs `actions: write` on this repository and nothing
 else. Code Monkey dispatches with its own credential, sending the
-pull requests whose Copilot review of the current head is clean:
+pull requests whose Copilot review of the current head its own
+classifier finds clean. The selection checks that again with the
+same classifier (`copilot_findings`, §19.2), as it does for every
+other dispatch and for a scan, so a dispatch cannot vouch for a
+review:
 
 ```bash
 gh workflow run code-review-antagonistic.yaml \
@@ -1725,8 +1766,9 @@ gh workflow run code-review-antagonistic.yaml \
 A review with findings on a Code Monkey pull request goes back to
 Code Monkey for a revision round, without waiting for a maintainer.
 The loop runs: Code Monkey publishes; Copilot reviews; once its
-review of the head is clean, Code Monkey dispatches this mode; this
-mode reviews and hands back; Code Monkey revises, and the cycle
+review of the head is clean, Code Monkey dispatches this mode, whose
+selection confirms the review is clean (§19.2); this mode reviews
+and hands back; Code Monkey revises, and the cycle
 repeats. It ends after three antagonistic rounds per pull request,
 when a maintainer takes over.
 
