@@ -1443,7 +1443,8 @@ class HandbackContracts(ReusableWorkflowCase):
         )
         self.assertEqual(job["permissions"], {})
         self.assertEqual(self.actions("handback", CHECKOUT), [])
-        self.assertEqual(self.actions("handback", DOWNLOAD), [])
+        downloads = self.actions("handback", DOWNLOAD)
+        self.assertEqual([s["name"] for s in downloads], ["Fetch the delivery record"])
 
     def test_the_token_reaches_the_dispatch_step_alone(self) -> None:
         """handback_token appears in one step of one job, and nowhere else."""
@@ -1459,18 +1460,17 @@ class HandbackContracts(ReusableWorkflowCase):
 
     def test_dispatch_target_and_list_are_fixed_and_checked(self) -> None:
         """One workflow file, live, revision mode, no count cap, and a validated
-        list dispatched whole in chunks of fifty.
+        list dispatched whole, one pull request per dispatch.
         """
         step = self.step("handback", "Dispatch the revision round")
         run = flatten(step["run"])
         self.assertIn(
             'gh workflow run code-monkey-cron.yaml --repo "$REPOSITORY"'
             " -f dry_run=false -f mode=pull-requests -f max_pull_requests=0"
-            ' -f pull_requests="$chunk"',
+            ' -f pull_requests="$pull"',
             run,
         )
-        self.assertIn("for ((start = 0; start < ${#all[@]}; start += 50)); do", run)
-        self.assertIn('chunk="${all[*]:start:50}"', run)
+        self.assertIn("for pull in $PULLS; do", run)
         self.assertIn('[[ "$REPOSITORY" =~ $repo_re ]]', run)
         self.assertIn('[[ "$PULLS" =~ ^$ref(\\ $ref)*$ ]]', run)
         self.assertEqual(
@@ -1489,7 +1489,6 @@ class HandbackContracts(ReusableWorkflowCase):
 class HandbackDeliveryContracts(ReusableWorkflowCase):
     """The hand-back records each delivery and a re-run reads that record."""
 
-    @unittest.expectedFailure
     def test_report_passes_a_record_of_each_hand_back(self) -> None:
         """The records carry each confirmed hand-back's review and state."""
         self.assertEqual(
@@ -1501,7 +1500,6 @@ class HandbackDeliveryContracts(ReusableWorkflowCase):
             step["env"]["RECORDS"], "${{ needs.report.outputs.handback_records }}"
         )
 
-    @unittest.expectedFailure
     def test_a_re_run_reads_the_earlier_record_alone(self) -> None:
         """The first attempt reads nothing; a later one reads this run's record
         before it dispatches, and a failed fetch never blocks a dispatch.
@@ -1524,7 +1522,6 @@ class HandbackDeliveryContracts(ReusableWorkflowCase):
         )
         self.assertEqual(self.actions("handback", CHECKOUT), [])
 
-    @unittest.expectedFailure
     def test_the_dispatch_time_check_reads_with_the_job_token(self) -> None:
         """Each read before a dispatch uses the job's own token, which holds
         no permission; handback_token dispatches and does nothing else.
@@ -1538,7 +1535,6 @@ class HandbackDeliveryContracts(ReusableWorkflowCase):
         self.assertEqual(len(re.findall(r"(?<![\w-])gh ", run)), reads + 1)
         self.assertEqual(self.jobs["handback"]["permissions"], {})
 
-    @unittest.expectedFailure
     def test_the_record_uploads_whatever_the_dispatch_did(self) -> None:
         """One name per run, replaced by each attempt, after any outcome."""
         step = self.step("handback", "Record the deliveries")
@@ -1713,7 +1709,6 @@ class HandbackDeliveryRuns(ReusableWorkflowCase):
         self.assertEqual(record["schema"], 1)
         return {d["pull"]: d["state"] for d in record["deliveries"]}
 
-    @unittest.expectedFailure
     def test_each_pull_request_is_one_dispatch(self) -> None:
         """One live, uncapped dispatch per pull request, each recorded."""
         code, sent, record, summary = self.dispatch(self.pending(1, 2))
@@ -1725,7 +1720,6 @@ class HandbackDeliveryRuns(ReusableWorkflowCase):
         )
         self.assertIn("- `org/repo#1` (review 501): dispatched", summary)
 
-    @unittest.expectedFailure
     def test_a_failed_dispatch_fails_the_job_and_a_re_run_sends_it_alone(
         self,
     ) -> None:
@@ -1750,7 +1744,6 @@ class HandbackDeliveryRuns(ReusableWorkflowCase):
         self.assertEqual(sent, ["org/repo#2"])
         self.assertEqual(set(self.states(record).values()), {"dispatched"})
 
-    @unittest.expectedFailure
     def test_a_re_run_after_a_late_failure_sends_nothing(self) -> None:
         """Every dispatch went before the job failed: the re-run repeats none."""
         records = self.pending(1, 2)
@@ -1762,7 +1755,6 @@ class HandbackDeliveryRuns(ReusableWorkflowCase):
         self.assertEqual(set(self.states(record).values()), {"dispatched"})
         self.assertIn("dispatched by an earlier attempt of this run", summary)
 
-    @unittest.expectedFailure
     def test_a_shorter_list_forgets_no_earlier_dispatch(self) -> None:
         """Three attempts: the second lists less than the first dispatched,
         and the third still sends nothing the first sent.
@@ -1785,7 +1777,6 @@ class HandbackDeliveryRuns(ReusableWorkflowCase):
         self.assertEqual((code, sent), (0, []))
         self.assertEqual(len((record or {})["deliveries"]), 3)
 
-    @unittest.expectedFailure
     def test_an_interrupted_attempt_forgets_no_earlier_dispatch(self) -> None:
         """Three attempts: the second dies mid-dispatch, and its record still
         names what the first sent, so the third sends the rest alone.
@@ -1811,7 +1802,6 @@ class HandbackDeliveryRuns(ReusableWorkflowCase):
         code, sent, _, _ = self.dispatch(self.pending(1, 2, 3, 4))
         self.assertEqual((code, sent), (0, ["org/repo#4"]))
 
-    @unittest.expectedFailure
     def test_a_new_review_is_a_new_delivery(self) -> None:
         """The earlier record stands for the same review alone."""
         _, _, record, _ = self.dispatch(self.pending(1))
@@ -1822,7 +1812,6 @@ class HandbackDeliveryRuns(ReusableWorkflowCase):
         code, sent, _, _ = self.dispatch(newer)
         self.assertEqual((code, sent), (0, ["org/repo#1"]))
 
-    @unittest.expectedFailure
     def test_skipped_hand_backs_are_recorded_and_not_sent(self) -> None:
         """The report's skips reach the record and the summary with their reason."""
         skipped = {
@@ -1837,7 +1826,6 @@ class HandbackDeliveryRuns(ReusableWorkflowCase):
         self.assertIn(skipped, (record or {})["deliveries"])
         self.assertIn("- `org/repo#9` (review 509): skipped; the head moved", summary)
 
-    @unittest.expectedFailure
     def test_an_unreadable_earlier_record_counts_as_none(self) -> None:
         """A malformed record cannot suppress a dispatch it does not name."""
         prior = self.tmp / "delivery-prior"
@@ -1847,14 +1835,12 @@ class HandbackDeliveryRuns(ReusableWorkflowCase):
         self.assertEqual((code, sent), (0, ["org/repo#1"]))
         self.assertEqual(self.states(record), {"org/repo#1": "dispatched"})
 
-    @unittest.expectedFailure
     def test_a_pull_request_without_a_review_dispatches_nothing(self) -> None:
         """Every dispatch names the review that requested it."""
         records = [{"pull": "org/repo#1", "head": HEAD, "state": "pending"}]
         code, sent, _, _ = self.dispatch(records)
         self.assertEqual((code, sent), (1, []))
 
-    @unittest.expectedFailure
     def test_a_pull_request_without_a_reviewed_head_dispatches_nothing(
         self,
     ) -> None:
@@ -1867,7 +1853,6 @@ class HandbackDeliveryRuns(ReusableWorkflowCase):
                 code, sent, _, _ = self.dispatch(records)
                 self.assertEqual((code, sent), (1, []))
 
-    @unittest.expectedFailure
     def test_a_delayed_retry_after_the_head_moved_sends_nothing(self) -> None:
         """An accepted dispatch left no readable record; by the retry the
         round has published a new head, so the retry sends nothing.
@@ -1901,7 +1886,6 @@ class HandbackDeliveryRuns(ReusableWorkflowCase):
         self.assertIn(f"- `org/repo#1` (review 501): skipped; {reason}", summary)
         self.assertIn("::notice::org/repo#1 skipped", self.output)
 
-    @unittest.expectedFailure
     def test_an_answered_review_is_not_sent_again(self) -> None:
         """A round footer by the author naming this review means it went."""
         self.serve(
@@ -1933,7 +1917,6 @@ class HandbackDeliveryRuns(ReusableWorkflowCase):
             "answered: issue #31 already answers review 501",
         )
 
-    @unittest.expectedFailure
     def test_other_footers_do_not_answer(self) -> None:
         """Another review, a human, another bot, a footer mid-body, or a branch
         with no Code Monkey issue: still sent.
@@ -1986,7 +1969,6 @@ class HandbackDeliveryRuns(ReusableWorkflowCase):
         self.assertEqual((code, sent), (0, ["org/repo#1"]))
         self.assertEqual(self.reads(), ["read-token repos/org/repo/pulls/1"])
 
-    @unittest.expectedFailure
     def test_the_check_reads_with_the_job_token_and_keeps_on_failure(
         self,
     ) -> None:
@@ -2016,7 +1998,6 @@ class HandbackDeliveryRuns(ReusableWorkflowCase):
         )
         self.assertEqual(self.output.count("delivery check could not be read"), 2)
 
-    @unittest.expectedFailure
     def test_an_interrupted_checkpoint_keeps_the_last_one_whole(self) -> None:
         """A step killed while it writes a checkpoint leaves the one before it
         for the upload, so a re-run still knows what went.

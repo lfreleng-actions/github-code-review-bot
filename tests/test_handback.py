@@ -171,7 +171,8 @@ class HandbacksTest(unittest.TestCase):
         """Run with the GitHub double; return the list and the reads it made."""
         double = GitHubDouble(reviews, failures)
         with patch.object(handback.github, "api_list", side_effect=double):
-            return handback.handbacks(report, chosen, "org", RUN), double
+            confirmed = handback.handbacks(report, chosen, "org", RUN)
+        return [found.ref for found in confirmed], double
 
     def test_a_marked_review_of_the_selected_head_confirms(self) -> None:
         """The applier's marker on this App's review of the head is the proof."""
@@ -238,8 +239,10 @@ class HandbacksTest(unittest.TestCase):
         self.assertEqual(refs, [])
         double = GitHubDouble(posted)
         with patch.object(handback.github, "api_list", side_effect=double):
-            refs = handback.handbacks(report, selection(entry(1)), "org", OTHER_RUN)
-        self.assertEqual(refs, ["org/repo#1"])
+            confirmed = handback.handbacks(
+                report, selection(entry(1)), "org", OTHER_RUN
+            )
+        self.assertEqual([found.ref for found in confirmed], ["org/repo#1"])
 
     def test_unclaimed_or_malformed_results_cost_no_read(self) -> None:
         """Only a posted result claiming a hand-back in the owner is checked."""
@@ -312,19 +315,24 @@ class DeliveriesTest(unittest.TestCase):
             )
             return handback.deliveries(confirmed)
 
-    @unittest.expectedFailure
     def test_a_pending_delivery_names_its_review(self) -> None:
         """The posted review's id is the delivery's identity."""
         double = GitHubDouble({1: [review()]})
         self.assertEqual(
             self.records(double),
-            [{"pull": "org/repo#1", "review": REVIEW, "state": "pending"}],
+            [
+                {
+                    "pull": "org/repo#1",
+                    "review": REVIEW,
+                    "head": HEAD,
+                    "state": "pending",
+                }
+            ],
         )
         self.assertIn(
             f"repos/org/repo/issues/{ISSUE}/comments?per_page=100", double.reads
         )
 
-    @unittest.expectedFailure
     def test_a_moved_head_is_skipped(self) -> None:
         """A round already ran, or someone pushed: the review is spent."""
         double = GitHubDouble({1: [review()]}, pulls={1: pull(OLD)})
@@ -336,6 +344,7 @@ class DeliveriesTest(unittest.TestCase):
                 {
                     "pull": "org/repo#1",
                     "review": REVIEW,
+                    "head": HEAD,
                     "state": "skipped",
                     "reason": f"the head moved from {HEAD[:12]} to {OLD[:12]}",
                 }
@@ -343,7 +352,6 @@ class DeliveriesTest(unittest.TestCase):
         )
         self.assertFalse(any("/issues/" in read for read in double.reads))
 
-    @unittest.expectedFailure
     def test_an_answered_review_is_skipped(self) -> None:
         """Code Monkey's round footer naming this review means it went."""
         double = GitHubDouble({1: [review()]}, comments=[footer(trailer="\n")])
@@ -355,6 +363,7 @@ class DeliveriesTest(unittest.TestCase):
                 {
                     "pull": "org/repo#1",
                     "review": REVIEW,
+                    "head": HEAD,
                     "state": "skipped",
                     "reason": f"issue #{ISSUE} already answers review {REVIEW}",
                 }
@@ -362,7 +371,6 @@ class DeliveriesTest(unittest.TestCase):
         )
         self.assertIn("::notice::handback: org/repo#1 skipped", err.getvalue())
 
-    @unittest.expectedFailure
     def test_other_footers_do_not_answer(self) -> None:
         """Another review, another author, or a footer mid-body: still pending."""
         quoted = footer()
@@ -378,14 +386,12 @@ class DeliveriesTest(unittest.TestCase):
                 double = GitHubDouble({1: [review()]}, comments=[comment])
                 self.assertEqual(self.records(double)[0]["state"], "pending")
 
-    @unittest.expectedFailure
     def test_a_branch_without_an_issue_reads_no_comments(self) -> None:
         """No Code Monkey issue to read: the hand-back stays pending."""
         double = GitHubDouble({1: [review()]}, pulls={1: pull(branch="feature")})
         self.assertEqual(self.records(double)[0]["state"], "pending")
         self.assertFalse(any("/issues/" in read for read in double.reads))
 
-    @unittest.expectedFailure
     def test_a_failed_check_keeps_the_pull_request(self) -> None:
         """A duplicate dispatch costs a refused session; a dropped one a revision."""
         for broken in ("/pulls/1", "/comments?per_page=100"):
@@ -444,13 +450,18 @@ class MainTest(unittest.TestCase):
         return out.getvalue()
 
     def test_outputs(self) -> None:
-        """One space-separated list and its count, an empty list included."""
+        """One space-separated list, its count and the records, an empty list
+        included.
+        """
         self.assertEqual(
             self.run_list({"results": [result(1)]}, selection(entry(1))),
-            "pulls=org/repo#1\ncount=1\n",
+            "pulls=org/repo#1\ncount=1\nrecords="
+            f'[{{"pull":"org/repo#1","review":{REVIEW},"head":"{HEAD}",'
+            '"state":"pending"}]\n',
         )
         self.assertEqual(
-            self.run_list({"results": []}, selection()), "pulls=\ncount=0\n"
+            self.run_list({"results": []}, selection()),
+            "pulls=\ncount=0\nrecords=[]\n",
         )
 
     def test_a_failed_read_lists_nothing_and_succeeds(self) -> None:
@@ -463,17 +474,17 @@ class MainTest(unittest.TestCase):
                         selection(entry(1)),
                         failures={1: status},
                     ),
-                    "pulls=\ncount=0\n",
+                    "pulls=\ncount=0\nrecords=[]\n",
                 )
 
-    @unittest.expectedFailure
     def test_records_carry_every_confirmed_hand_back(self) -> None:
         """Skipped hand-backs are recorded and left out of the dispatch list."""
         self.assertEqual(
             self.run_list({"results": [result(1)]}, selection(entry(1))).splitlines()[
                 2
             ],
-            f'records=[{{"pull":"org/repo#1","review":{REVIEW},"state":"pending"}}]',
+            f'records=[{{"pull":"org/repo#1","review":{REVIEW},"head":"{HEAD}",'
+            '"state":"pending"}]',
         )
         with patch.object(GitHubDouble, "read_pull", return_value=pull(OLD)):
             out = self.run_list({"results": [result(1)]}, selection(entry(1)))
