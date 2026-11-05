@@ -1218,6 +1218,7 @@ jobs:
     outputs:
       handback_pulls: "${{ steps.handback.outputs.pulls }}"
       handback_count: "${{ steps.handback.outputs.count }}"
+      handback_records: "${{ steps.handback.outputs.records }}"
     steps:
       - name: 'Load egress allow-list'
         if: inputs.harden_runner_egress == 'block'
@@ -1331,12 +1332,17 @@ jobs:
       # The pull requests whose posted antagonistic review chose a
       # hand-back, each confirmed against the verified selection and
       # this App's own review on GitHub, whose marker must name this
-      # run (scripts/handback.py), as one owner/repo#N list. Only a
-      # live antagonistic run can hand back, so no other reads here.
-      # It runs after both uploads so that no failure here costs the
-      # run its report or ledger. The native token reads public
-      # repositories alone: a candidate it cannot read (private, 5xx,
-      # rate limited) is skipped with a warning, never dispatched.
+      # run (scripts/handback.py), as one owner/repo#N list, and a
+      # record of each with the review that requested it. A pull
+      # request whose head moved, or whose Code Monkey issue already
+      # answers that review, is recorded as skipped and left out of
+      # the list. Only a live antagonistic run can hand back, so no
+      # other reads here. It runs after both uploads so that no
+      # failure here costs the run its report or ledger. The native
+      # token reads public repositories alone: a candidate it cannot
+      # read (private, 5xx, rate limited) is skipped with a warning,
+      # never dispatched; a pull request whose delivery check it
+      # cannot read stays in the list with a warning.
       - name: 'List hand-backs'
         id: handback
         if: inputs.mode == 'antagonistic' && !inputs.dry_run
@@ -1352,10 +1358,13 @@ jobs:
 
   # Hands the reviewed bot pull requests back to their bot for a
   # revision round (docs/DESIGN.md section 19.9): one dispatch of the
-  # hand-back repository's code-monkey-cron.yaml naming them all. The
-  # only job that holds handback_token, which can dispatch that one
-  # workflow and nothing else; it reads no artifact and runs no script.
-  # The applier already capped the rounds, so this job never needs to.
+  # hand-back repository's code-monkey-cron.yaml per pull request, and
+  # a delivery record of each. The only job that holds handback_token,
+  # which can dispatch that one workflow and nothing else; it runs no
+  # checked-out script and reads one artifact, its own record from an
+  # earlier attempt of this run. Its reads of GitHub use the job's own
+  # token, which holds no permission and sees public repositories. The
+  # applier already capped the rounds, so this job never needs to.
   handback:
     name: 'Hand back for revision'
     needs: [select, report]
@@ -1393,11 +1402,27 @@ jobs:
           egress-policy: "${{ inputs.harden_runner_egress }}"
           allowed-endpoints: "${{ env.CONNECTION_ALLOW_LIST }}"
 
+      # A re-run sends only what an earlier attempt of this run has
+      # not: the record that attempt uploaded names what it dispatched.
+      # A record that cannot be fetched counts as none; at worst that
+      # repeats a dispatch, which Code Monkey's round refuses.
+      - name: 'Fetch the delivery record'
+        if: github.run_attempt != '1'
+        continue-on-error: true
+        # yamllint disable-line rule:line-length
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: 'code-review-handback'
+          merge-multiple: true
+          path: 'delivery-prior'
+
       - name: 'Dispatch the revision round'
         env:
           GH_TOKEN: "${{ secrets.handback_token }}"
+          READ_TOKEN: "${{ github.token }}"
           REPOSITORY: "${{ inputs.handback_repository }}"
           PULLS: "${{ needs.report.outputs.handback_pulls }}"
+          RECORDS: "${{ needs.report.outputs.handback_records }}"
         run: |
           repo_re='^[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9._-]+$'
           ref='[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9._-]+#[1-9][0-9]*'
@@ -1409,20 +1434,139 @@ jobs:
             echo '::error::handback_repository is set; handback_token is empty'
             exit 1
           fi
+          jq -e 'type == "array"' <<< "$RECORDS" > /dev/null || {
+            echo '::error::the hand-back records are malformed'; exit 1; }
+          # A pull request goes once per review that requested it; an
+          # earlier attempt's record of that pair stands for this one.
+          prior='[]'
+          if [ -f delivery-prior/handback.json ]; then
+            prior=$(jq -c '[.deliveries[]? | select(.state == "dispatched")]
+              | unique_by([.pull, .review])' \
+              delivery-prior/handback.json) || {
+              echo '::warning::the earlier delivery record is unreadable'
+              prior='[]'
+            }
+          fi
+          mkdir -p delivery
+          deliveries=$(jq -c '[.[] | select(.state == "skipped")]' \
+            <<< "$RECORDS")
+          # Every checkpoint carries each pair an earlier attempt
+          # dispatched, listed or reached in this attempt or not, so an
+          # interrupted attempt or a shorter list forgets none. It
+          # replaces the last one by a rename, so an interrupted write
+          # leaves that one whole for the upload.
+          checkpoint() {
+            jq -n --argjson prior "$prior" --argjson now "$deliveries" \
+              '{schema: 1, deliveries: ($prior + [$now[] | . as $d
+                | select(all($prior[];
+                    .pull != $d.pull or .review != $d.review))])}' \
+              > delivery/handback.json.tmp
+            mv -f delivery/handback.json.tmp delivery/handback.json
+          }
+          # The report's check again, read just before each dispatch with
+          # the job's own token: why the hand-back needs no dispatch now
+          # (`moved` or `answered`), or nothing. A hand-back-only re-run
+          # after a round has published therefore sends nothing. Fails
+          # when a read fails, and the caller keeps the pull request.
+          needless() {
+            local repo=${1%#*} number=${1##*#} review=$2 head=$3 now
+            local sha branch author issue comments answered
+            now=$(GH_TOKEN="$READ_TOKEN" gh api "repos/$repo/pulls/$number" \
+              --jq '[.head.sha, .head.ref, .user.login] | @tsv') || return 1
+            IFS=$'\t' read -r sha branch author <<< "$now" || return 1
+            [[ "$sha" =~ ^[0-9a-f]{40}$ ]] || return 1
+            if [ "$sha" != "$head" ]; then
+              echo "moved: the head moved from ${head:0:12} to ${sha:0:12}"
+              return 0
+            fi
+            [[ "$branch" =~ ^code-monkey/issue-([1-9][0-9]*)$ ]] || return 0
+            issue=${BASH_REMATCH[1]}
+            comments=$(GH_TOKEN="$READ_TOKEN" gh api --paginate \
+              "repos/$repo/issues/$issue/comments?per_page=100") || return 1
+            answered=$(jq -n --arg author "$author" --arg review "$review" '
+              def who: sub("\\[bot\\]$"; "") | ascii_downcase;
+              any(inputs[]; .user.type == "Bot"
+                and (.user.login | strings | who) == ($author | who)
+                and (.body | strings | test("(^|\n)<!-- code-monkey \\S+ "
+                  + "[^\n]*?\\bantagonistic=" + $review + " -->\\s*\\z")))' \
+              <<< "$comments") || return 1
+            if [ "$answered" = true ]; then
+              echo "answered: issue #$issue already answers review $review"
+            fi
+          }
+          checkpoint
+          failed=0
           # Code Monkey caps a run at max_pull_requests, named ones
-          # included, so each dispatch lifts the cap (0) and names at most
-          # fifty: every confirmed hand-back is dispatched, none dropped.
-          read -r -a all <<< "$PULLS"
-          for ((start = 0; start < ${#all[@]}; start += 50)); do
-            chunk="${all[*]:start:50}"
-            gh workflow run code-monkey-cron.yaml --repo "$REPOSITORY" \
+          # included, so each dispatch lifts the cap (0). One pull
+          # request per dispatch keeps a failure to that pull request.
+          for pull in $PULLS; do
+            review=$(jq -r --arg pull "$pull" \
+              'first(.[] | select(.pull == $pull) | .review) // empty' \
+              <<< "$RECORDS")
+            [[ "$review" =~ ^[1-9][0-9]*$ ]] || {
+              echo "::error::no review is recorded for $pull"; exit 1; }
+            head=$(jq -r --arg pull "$pull" \
+              'first(.[] | select(.pull == $pull) | .head) // empty' \
+              <<< "$RECORDS")
+            [[ "$head" =~ ^[0-9a-f]{40}$ ]] || {
+              echo "::error::no reviewed head is recorded for $pull"; exit 1; }
+            state='' reason=''
+            if jq -e --arg pull "$pull" --argjson review "$review" \
+              'any(.[]; .pull == $pull and .review == $review)' \
+              <<< "$prior" > /dev/null; then
+              state=dispatched
+              reason='dispatched by an earlier attempt of this run'
+            elif ! reason=$(needless "$pull" "$review" "$head"); then
+              reason=''
+              echo "::warning::$pull kept; its delivery check could not be read"
+            elif [ -n "$reason" ]; then
+              state=skipped
+              echo "::notice::$pull skipped; $reason"
+            fi
+            if [ -n "$state" ]; then
+              :
+            elif gh workflow run code-monkey-cron.yaml --repo "$REPOSITORY" \
               -f dry_run=false -f mode=pull-requests -f max_pull_requests=0 \
-              -f pull_requests="$chunk"
+              -f pull_requests="$pull"; then
+              state=dispatched
+            else
+              state=failed
+              reason='the dispatch failed'
+              failed=$((failed + 1))
+              echo "::warning::$pull: the dispatch failed"
+            fi
+            deliveries=$(jq -c --arg pull "$pull" --argjson review "$review" \
+              --arg state "$state" --arg reason "$reason" \
+              '. + [{pull: $pull, review: $review, state: $state}
+                + (if $reason == "" then {} else {reason: $reason} end)]' \
+              <<< "$deliveries")
+            checkpoint
           done
           {
-            echo '## Handed back for revision'
+            echo '## Hand-back deliveries'
             echo
-            echo "Dispatched \`code-monkey-cron.yaml\` in \`$REPOSITORY\` for:"
+            echo "\`code-monkey-cron.yaml\` in \`$REPOSITORY\`:"
             echo
-            for pull in $PULLS; do echo "- \`$pull\`"; done
+            jq -r '.[] | "- `\(.pull)` (review \(.review)): \(.state)"
+              + (if .reason then "; \(.reason)" else "" end)' \
+              <<< "$deliveries"
           } >> "$GITHUB_STEP_SUMMARY"
+          if [ "$failed" -ne 0 ]; then
+            echo "::error::$failed dispatch(es) failed; re-run the job to retry"
+            exit 1
+          fi
+
+      # Runs whatever the dispatch did, so a re-run of this job can
+      # tell what has gone already. One name per run: each attempt
+      # replaces the record with its own, which carries every earlier
+      # dispatch forward from its first checkpoint on.
+      - name: 'Record the deliveries'
+        if: always()
+        # yamllint disable-line rule:line-length
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: 'code-review-handback'
+          path: 'delivery/handback.json'
+          overwrite: true
+          retention-days: 90
+          if-no-files-found: 'ignore'

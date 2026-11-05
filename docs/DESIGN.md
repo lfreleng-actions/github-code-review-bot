@@ -1862,7 +1862,9 @@ when a maintainer takes over.
   `summary_finding`), the author is in `config/handback-authors.txt`
   (Code Monkey alone: the Copilot coding agent has no revision
   workflow to dispatch), and the round is under three. The review body
-  names the round and says whether it went back; the third says a
+  names the round and, when it hands back, says it requests a revision
+  from Code Monkey: the applier writes it before the hand-back job
+  dispatches anything, so it never claims a revision started. The third says a
   maintainer takes it from there. A review that hands back ends with a
   hidden marker,
   `<!-- antagonistic-handback round=N head=SHA run=RUN_ID -->`;
@@ -1884,7 +1886,8 @@ when a maintainer takes over.
   refuses the head, and a result forged in its run finds the first
   run's review, which names the first run and not the second, so it
   dispatches nothing. A re-run of the report repeats its own run's
-  hand-backs and no other run's.
+  hand-backs and no other run's. The confirmed review's id names the
+  hand-back from then on.
 - **When a read fails.** The report job lists hand-backs in a live
   antagonistic run alone, after it has uploaded the run report and
   the ledger, so a failure there never costs the run its record. It
@@ -1892,13 +1895,76 @@ when a maintainer takes over.
   hand-back needs public candidates. A candidate whose reviews it
   cannot read (a private repository, a 5xx, a rate limit) drops out
   with a warning and never goes back; the rest of the list stands.
-- **How.** A separate `handback` job, with no permissions, no checkout
-  and no artifact, holds `handback_token` and dispatches
+- **Requested is not delivered.** A posted review that hands back is a
+  request; a dispatch is its delivery, and the two are separate
+  states. Each hand-back's delivery identity is the pull request and
+  the id of the review that requested it, which also fixes the head,
+  the round and the posting run. Before the list goes out, the report
+  job drops a confirmed hand-back that needs no delivery, recording it
+  as `skipped` with the reason: the pull request's head is no longer
+  the reviewed one (a round already ran, or someone pushed), or the
+  Code Monkey issue (`code-monkey/issue-<n>`, the pull request's
+  branch) holds a round footer by the pull request's author that ends
+  with `antagonistic=<review id>`, so the review is already answered.
+  A read that fails there keeps the pull request in the list with a
+  warning: a duplicate dispatch costs one session that Code Monkey's
+  compare-and-swap refuses, while a dropped one costs a revision. The
+  report job's `handback_records` output carries every confirmed
+  hand-back with its review id, the head it reviewed, and `pending` or
+  `skipped`.
+- **The check again at dispatch.** Before each dispatch the
+  `handback` job repeats the report's check: it reads the pull
+  request's head and, on a `code-monkey/issue-<n>` branch, that
+  issue's comments, and records the hand-back as `skipped` with the
+  reason `moved` or `answered` when the head is no longer the reviewed
+  one or a footer by the pull request's author already carries
+  `antagonistic=<review id>`. A re-run of the hand-back job alone
+  reuses the report's outputs; after a round has published, or after
+  an accepted dispatch that left no readable record, it sends nothing.
+  These reads use the job's own token, which holds no permission and
+  sees public repositories, as the report's do; `handback_token`
+  dispatches and does nothing else. A read that fails keeps the pull
+  request, with a warning, as in the report. The design accepts one
+  remaining window: a re-run while the round it already started is
+  still running, with nothing published yet, dispatches again, and
+  Code Monkey's compare-and-swap rejects that duplicate session.
+- **How.** A separate `handback` job, with no permissions and no
+  checkout, holds `handback_token` and dispatches
   `code-monkey-cron.yaml` in `handback_repository`, live, in
   `pull-requests` mode with `max_pull_requests=0`, since Code Monkey
-  caps named pull requests too, fifty per dispatch until it has
-  sent the whole list. It never runs in a dry run or the approve mode. The
-  token needs Actions: write on that repository and nothing else.
+  caps named pull requests too, once per pull request, so a failure
+  costs that pull request alone. It never runs in a dry run or the
+  approve mode. The token needs Actions: write on that repository and
+  nothing else.
+- **The delivery record.** The `handback` job writes
+  `delivery/handback.json`, `{"schema": 1, "deliveries": [...]}`, with
+  each pull request, its review id, and `dispatched`, `skipped` (with
+  the report's or the dispatch-time check's reason) or `failed`,
+  writing it before the first dispatch and again after each. Each
+  write goes to a temporary file that replaces the record by a rename,
+  so an attempt killed mid-write leaves the last whole record for the
+  upload. An `always()` step uploads it as
+  `code-review-handback`, one name per run that each attempt replaces
+  (`overwrite`). A later attempt of the same run fetches that record
+  first and does not dispatch a pull request it records as
+  `dispatched` for the same review. Every record an attempt writes
+  carries each pair the fetched record names as `dispatched`, listed
+  in this attempt or not, so an interrupted attempt or a shorter list
+  never makes a later one forget a dispatch. A failed dispatch fails
+  the job, and its re-run sends what has not gone and nothing else.
+  The first attempt fetches nothing. The record is an artifact of the
+  run, which any job in it could upload, so it can withhold a dispatch
+  but never create one; a record the job cannot fetch or read counts
+  as none, which at worst repeats a dispatch. When the report skips every confirmed
+  hand-back the job does not run, and the report job's notices name
+  them.
+- **Recovering a lost delivery.** Nothing here needs to retry a
+  hand-back that a review requested and no dispatch delivered: Code
+  Monkey's own revision scan selects a pull request whose current-head
+  review from this App carries a hand-back marker that no round has
+  answered (scan reason `antagonistic review round N handed back`).
+  Code Monkey's next scan picks up a dispatch that never went, or a
+  run that failed before it.
 - **The cap under concurrency.** The apply lock is one per pull
   request, whatever the head (§19.5), so the round count at the gate
   and the review it posts are one step: an applier for any other head

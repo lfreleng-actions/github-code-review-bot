@@ -230,7 +230,7 @@ def round_note(round_number: int, handing_back: bool) -> str:
     """The line that says which round this is and what happens next."""
     where = f"Antagonistic round {round_number} of {MAX_ROUNDS}."
     if handing_back:
-        return f"_{where} Handed back to Code Monkey for a revision round._"
+        return f"_{where} Revision requested from Code Monkey._"
     if round_number >= MAX_ROUNDS:
         return f"_{where} That is the last one: a maintainer takes it from here._"
     return f"_{where}_"

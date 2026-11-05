@@ -4,8 +4,10 @@
 """List the pull requests an antagonistic run hands back for revision.
 
 The report job runs ``list`` and writes the pull requests to dispatch
-as one ``owner/repo#N`` list on a single output line. The hand-back
-job dispatches that list and holds the one credential that can.
+as one ``owner/repo#N`` list on a single output line, with a record of
+each confirmed hand-back: the review that requested it, the head it
+reviewed, and whether it is still to dispatch or why it is skipped. The hand-back job
+dispatches that list and holds the one credential that can.
 
 Result files nominate candidates and decide nothing: an artifact is
 found by name, so a compromised review runner could upload one. Each
@@ -16,6 +18,13 @@ must end with the hand-back marker the trusted applier of this run
 appends. The review runner holds no App token and cannot post that
 review, and a review another run posted names that run, not this one.
 A candidate whose reviews cannot be read is skipped, never dispatched.
+
+A confirmed hand-back is dropped from the dispatch list when it needs
+no delivery: the pull request's head has moved past the reviewed one,
+or the Code Monkey issue already carries a round footer that answers
+the review. A read that fails there keeps the pull request in the list
+with a warning: a duplicate dispatch costs one session that Code
+Monkey refuses, while a dropped one costs a revision.
 """
 
 from __future__ import annotations
@@ -24,6 +33,7 @@ import argparse
 import json
 import re
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, cast
 
@@ -36,6 +46,30 @@ MARKER_RE = re.compile(
     r"<!-- antagonistic-handback round=[1-9][0-9]* head=(?P<head>[0-9a-f]{40})"
     r" run=(?P<run>[1-9][0-9]*) -->\Z"
 )
+# Code Monkey works an issue on this branch of its pull request.
+ISSUE_BRANCH_RE = re.compile(r"^code-monkey/issue-(?P<issue>[1-9][0-9]*)\Z")
+# A Code Monkey round footer, the last line of its issue comment, that
+# names the antagonistic review the round answered.
+ANSWERED_RE = re.compile(
+    r"(?:^|\n)<!-- code-monkey \S+ [^\n]*?\bantagonistic=(?P<review>[0-9]+)"
+    r" -->\s*\Z"
+)
+
+
+@dataclass(frozen=True)
+class Handback:
+    """One confirmed hand-back: the pull request, its head, and the review."""
+
+    repository: str
+    number: int
+    head: str
+    author: str
+    review: int
+
+    @property
+    def ref(self) -> str:
+        """The ``owner/repo#N`` the dispatch names."""
+        return f"{self.repository}#{self.number}"
 
 
 def load_object(path: Path, context: str) -> dict[str, Any]:
@@ -66,12 +100,16 @@ def candidates(report: dict[str, Any], org: str) -> list[tuple[str, int]]:
     return found
 
 
-def selected_heads(selection: dict[str, Any]) -> dict[tuple[str, int], str]:
-    """The head the selection recorded for each pull request a hand-back may name."""
+def selected_heads(
+    selection: dict[str, Any],
+) -> dict[tuple[str, int], tuple[str, str]]:
+    """The head and author the selection recorded for each pull request a
+    hand-back may name.
+    """
     authors = [
         str(name) for name in cast("list[Any]", selection.get("handback_authors") or [])
     ]
-    heads: dict[tuple[str, int], str] = {}
+    heads: dict[tuple[str, int], tuple[str, str]] = {}
     for item in cast("list[Any]", selection.get("pull_requests") or []):
         if not isinstance(item, dict):
             continue
@@ -86,14 +124,15 @@ def selected_heads(selection: dict[str, Any]) -> dict[tuple[str, int], str]:
             and isinstance(repository, str)
             and type(number) is int
         ):
-            heads[(repository, number)] = head
+            heads[(repository, number)] = (head, author)
     return heads
 
 
 def marked(
     repository: str, number: int, bot_login: str, head: str, run_id: int
-) -> bool:
-    """Whether this App's review of ``head`` ends with this run's hand-back marker.
+) -> int | None:
+    """The id of this App's review of ``head`` that ends with this run's
+    hand-back marker, or None when there is none.
 
     The run in the marker must be this one: two runs can hold the same
     head, and the one whose applier refused the head must not dispatch
@@ -114,19 +153,22 @@ def marked(
             and isinstance(body, str)
         ):
             found = MARKER_RE.search(body.rstrip())
+            review_id = review.get("id")
             if (
                 found is not None
                 and found.group("head") == head
                 and found.group("run") == str(run_id)
+                and type(review_id) is int
+                and review_id > 0
             ):
-                return True
-    return False
+                return review_id
+    return None
 
 
 def handbacks(
     report: dict[str, Any], selection: dict[str, Any], org: str, run_id: int
-) -> list[str]:
-    """The ``owner/repo#N`` of each nominated hand-back that GitHub confirms.
+) -> list[Handback]:
+    """Each nominated hand-back that GitHub confirms, with its review.
 
     A candidate whose reviews cannot be read (a private repository the
     native token cannot see, a 5xx, a rate limit) is not confirmed: it
@@ -136,11 +178,12 @@ def handbacks(
     if not isinstance(bot_login, str) or not bot_login:
         return []
     heads = selected_heads(selection)
-    confirmed: list[str] = []
+    confirmed: list[Handback] = []
     for repository, number in candidates(report, org):
-        head = heads.get((repository, number))
-        if head is None:
+        selected = heads.get((repository, number))
+        if selected is None:
             continue
+        head, author = selected
         ref = f"{repository}#{number}"
         try:
             found = marked(repository, number, bot_login, head, run_id)
@@ -151,13 +194,93 @@ def handbacks(
                 file=sys.stderr,
             )
             continue
-        if found:
-            confirmed.append(ref)
+        if found is not None:
+            confirmed.append(Handback(repository, number, head, author, found))
     return confirmed
 
 
+def answered(handback: Handback, issue: int) -> bool:
+    """Whether the Code Monkey issue holds a round footer, by the pull
+    request's author, that answers this hand-back's review.
+    """
+    own = bot_identity(handback.author)
+    for comment in github.api_list(
+        f"repos/{handback.repository}/issues/{issue}/comments?per_page=100"
+    ):
+        user = comment.get("user")
+        data = cast("dict[str, Any]", user) if isinstance(user, dict) else {}
+        login, body = data.get("login"), comment.get("body")
+        if (
+            data.get("type") == "Bot"
+            and isinstance(login, str)
+            and bot_identity(login) == own
+            and isinstance(body, str)
+        ):
+            found = ANSWERED_RE.search(body)
+            if found is not None and found.group("review") == str(handback.review):
+                return True
+    return False
+
+
+def skip_reason(handback: Handback) -> str | None:
+    """Why a confirmed hand-back needs no dispatch, or None to dispatch it.
+
+    Raises ``GitHubError`` when a read fails or GitHub answers in a shape
+    that cannot be judged; the caller then keeps the pull request.
+    """
+    context = handback.ref
+    pull = github.api_object(f"repos/{handback.repository}/pulls/{handback.number}")
+    head = pull.get("head")
+    if not isinstance(head, dict):
+        raise github.GitHubError(f"{context}: missing or invalid 'head'")
+    data = cast("dict[str, Any]", head)
+    sha = github.require_sha(data, "sha", context)
+    if sha != handback.head:
+        return f"the head moved from {handback.head[:12]} to {sha[:12]}"
+    branch = data.get("ref")
+    found = ISSUE_BRANCH_RE.fullmatch(branch) if isinstance(branch, str) else None
+    if found is None:
+        return None
+    issue = int(found.group("issue"))
+    if answered(handback, issue):
+        return f"issue #{issue} already answers review {handback.review}"
+    return None
+
+
+def deliveries(confirmed: list[Handback]) -> list[dict[str, Any]]:
+    """One delivery record per hand-back, with its review and reviewed head:
+    ``pending`` or ``skipped``.
+    """
+    records: list[dict[str, Any]] = []
+    for handback in confirmed:
+        record: dict[str, Any] = {
+            "pull": handback.ref,
+            "review": handback.review,
+            "head": handback.head,
+        }
+        try:
+            reason = skip_reason(handback)
+        except github.GitHubError as exc:
+            print(
+                f"::warning::handback: {handback.ref} kept; whether it still"
+                f" needs a revision could not be read: {github.safe_message(exc)}",
+                file=sys.stderr,
+            )
+            reason = None
+        if reason is None:
+            record["state"] = "pending"
+        else:
+            record.update(state="skipped", reason=reason)
+            print(
+                f"::notice::handback: {handback.ref} skipped; {reason}",
+                file=sys.stderr,
+            )
+        records.append(record)
+    return records
+
+
 def main(argv: list[str] | None = None) -> None:
-    """Print ``pulls=`` and ``count=`` lines for the workflow outputs."""
+    """Print ``pulls=``, ``count=`` and ``records=`` lines for the outputs."""
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
     listing = commands.add_parser("list", help="the hand-backs GitHub confirms")
@@ -173,11 +296,13 @@ def main(argv: list[str] | None = None) -> None:
     try:
         report = load_object(args.report, "the report")
         selection = load_object(args.selection, "the selection")
-        refs = handbacks(report, selection, args.org, args.run_id)
+        records = deliveries(handbacks(report, selection, args.org, args.run_id))
     except (OSError, ValueError, RecursionError, github.GitHubError) as exc:
         parser.exit(1, f"handback: {github.safe_message(exc)}\n")
+    refs = [str(record["pull"]) for record in records if record["state"] == "pending"]
     print(f"pulls={' '.join(refs)}")
     print(f"count={len(refs)}")
+    print(f"records={json.dumps(records, separators=(',', ':'))}")
     print(f"handback: {len(refs)} pull request(s) to hand back", file=sys.stderr)
 
 
