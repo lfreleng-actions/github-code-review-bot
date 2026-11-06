@@ -90,6 +90,7 @@ def live_state(**overrides: Any) -> dict[str, Any]:
     state: dict[str, Any] = {
         "state": "OPEN",
         "is_draft": False,
+        "author_association": "MEMBER",
         "head_sha": HEAD,
         "base_ref": "release",
         "base_sha": BASE,
@@ -312,6 +313,42 @@ class ApplyCommandTests(unittest.TestCase):
                 self.assertEqual(result["verdict"], "needs-human")
                 self.assertEqual(len(result["reasons"]), 1)
                 self.assertIn(expected, result["reasons"][0])
+
+    @unittest.expectedFailure
+    def test_an_untrusted_author_refuses(self) -> None:
+        """An approval never lands on an outside author's pull request."""
+        for association in ("NONE", "CONTRIBUTOR", "COLLABORATOR", None):
+            with self.subTest(association=association):
+                state = live_state(author_association=association)
+                if association is None:
+                    del state["author_association"]
+                reasons = apply_review.gate_reasons(self.check, state)
+                self.assertEqual(len(reasons), 1)
+                self.assertIn("untrusted author", reasons[0])
+                self.assertIn(association or "missing", reasons[0])
+
+    @unittest.expectedFailure
+    def test_an_untrusted_author_withholds_the_write(self) -> None:
+        """The live gate refuses before any write."""
+        with (
+            patch.object(
+                apply_review.pull_reads,
+                "pull_state",
+                return_value=live_state(author_association="NONE"),
+            ),
+            patch.object(apply_review.github, "api_write") as write,
+        ):
+            result = self.apply()
+        write.assert_not_called()
+        self.assertEqual(result["verdict"], "needs-human")
+        self.assertEqual(result["reasons"], ["untrusted author (association NONE)"])
+
+    def test_owner_and_member_pass_the_author_gate(self) -> None:
+        """The organisation's owners and members are trusted."""
+        for association in ("OWNER", "MEMBER"):
+            with self.subTest(association=association):
+                state = live_state(author_association=association)
+                self.assertEqual(apply_review.gate_reasons(self.check, state), [])
 
     def test_a_retargeted_base_refuses(self) -> None:
         """The same head against another base ref is a diff nobody reviewed."""
