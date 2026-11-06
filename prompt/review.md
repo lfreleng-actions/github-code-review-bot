@@ -64,7 +64,9 @@ Every condition below holds:
   pre-commit autoupdate and Renovate style bumps, including `uses:`
   lines in workflows where the commit SHA and version comment
   change and nothing else), lockfiles, README and documentation,
-  comments, or pure formatting and typo fixes.
+  comments, or pure formatting and typo fixes. Documentation here
+  excludes agent instruction files such as `AGENTS.md` and
+  `.github/copilot-instructions.md`, `CODEOWNERS`, `SECURITY.md`.
 - The diff does **not** touch workflow job logic or steps, `on:`
   triggers, `permissions:` blocks, shell script logic, `action.yaml`
   inputs or outputs, or anything else that changes runtime behaviour.
@@ -100,7 +102,11 @@ issue and every condition below holds:
 ### `needs-human`
 
 Everything else: any security or CI/CD concern, any uncertainty, any
-feedback you would want a maintainer to weigh in on, a diff too large
+feedback you would want a maintainer to weigh in on, any change to an
+agent instruction file (`AGENTS.md`, `CLAUDE.md`,
+`.github/copilot-instructions.md`, `.github/instructions/` and the
+like) or to `CODEOWNERS`, `SECURITY.md`, `.aislop/` or
+`.zizmor.yml`, a diff too large
 or too tangled to review with confidence, or a change whose
 correctness you cannot judge from the diff and the checkout. When in
 doubt, classify here. Put what you found in `findings`: a human

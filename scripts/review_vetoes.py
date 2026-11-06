@@ -90,6 +90,44 @@ SECRET_RE = re.compile(
 ACTION_PORT_RE = re.compile(r"^-\s{2}[A-Za-z0-9_-]+:\s*$")
 PIPE_TO_SHELL_RE = re.compile(r"\b(curl|wget)\b.*\|\s*(ba)?sh\b")
 TRIGGER_TARGET = "pull_request_target"
+# Files an agent harness reads as instructions, or that govern review.
+# Compared in lower case, since a case-insensitive checkout or harness
+# reads AGENTS.md and agents.md alike.
+SENSITIVE_NAMES = frozenset(
+    {
+        "agents.md",
+        "claude.md",
+        "gemini.md",
+        "copilot-instructions.md",
+        "skill.md",
+        ".cursorrules",
+        ".windsurfrules",
+        ".clinerules",
+        "codeowners",
+    }
+)
+SENSITIVE_DIRS = frozenset(
+    {
+        ".copilot",
+        ".claude",
+        ".cursor",
+        ".agents",
+        ".windsurf",
+        ".clinerules",
+        ".gemini",
+        ".codex",
+    }
+)
+SENSITIVE_PREFIXES = (
+    ".github/instructions/",
+    ".github/prompts/",
+    ".github/agents/",
+    ".github/skills/",
+    ".github/copilot/",
+    ".aislop/",
+)
+SENSITIVE_ROOT_FILES = frozenset({"security.md", ".zizmor.yml", ".zizmor.yaml"})
+SENSITIVE_VETO = "changes an agent instruction or review-governance file"
 
 
 def changed_lines(patch: str) -> list[str]:
@@ -102,14 +140,40 @@ def changed_lines(patch: str) -> list[str]:
     return [line for line in patch.splitlines() if line[:1] in {"+", "-"}]
 
 
+def is_sensitive(path: str) -> bool:
+    """Whether a path instructs an agent or governs review.
+
+    Such a file decides what every later agent session in the
+    repository obeys, or who reviews, so no approval may carry it.
+    """
+    lowered = path.lower()
+    parts = lowered.split("/")
+    return (
+        parts[-1] in SENSITIVE_NAMES
+        or lowered in SENSITIVE_ROOT_FILES
+        or lowered.startswith(SENSITIVE_PREFIXES)
+        or not SENSITIVE_DIRS.isdisjoint(parts[:-1])
+    )
+
+
+def sensitive_path(file: dict[str, Any]) -> str | None:
+    """The sensitive path a change touches, the old side of a rename too."""
+    for key in ("path", "previous_path"):
+        path = file.get(key)
+        if isinstance(path, str) and is_sensitive(path):
+            return path
+    return None
+
+
 def is_doc(path: str) -> bool:
     """Whether a path is documentation the classifier trusts by name alone.
 
     Under ``docs/`` only prose and images count: a build hook or a
-    requirements pin living there is code or configuration.
+    requirements pin living there is code or configuration. An agent
+    instruction or review-governance file is never documentation.
     """
     name = posixpath.basename(path)
-    if name == "CODEOWNERS" or REQUIREMENTS_RE.match(name):
+    if is_sensitive(path) or REQUIREMENTS_RE.match(name):
         return False
     lowered = path.lower()
     if lowered.endswith(DOC_SUFFIXES) or name.startswith(("LICENSE", "NOTICE")):
@@ -202,6 +266,8 @@ def line_rule(path: str) -> Callable[[list[str]], bool] | None:
 def file_is_trivial(file: dict[str, Any]) -> bool:
     """Whether one changed file is a documentation, lock or pin-only change."""
     path = str(file.get("path") or "")
+    if sensitive_path(file) is not None:
+        return False
     if is_doc(path):
         return True
     patch = file.get("patch")
@@ -259,12 +325,15 @@ def file_vetoes(file: dict[str, Any]) -> list[str]:
     """Every veto one changed file raises, in the order found."""
     path = str(file.get("path") or "")
     patch = file.get("patch")
-    if is_doc(path):
+    found: list[str] = []
+    sensitive = sensitive_path(file)
+    if sensitive is not None:
+        found.append(f"{sensitive} {SENSITIVE_VETO}")
+    elif is_doc(path):
         return []
     if file.get("patch_truncated") or not isinstance(patch, str):
-        return [f"patch for {path} is unreadable"]
+        return [*found, f"patch for {path} is unreadable"]
     lines = changed_lines(patch)
-    found: list[str] = []
     if WORKFLOW_RE.match(path):
         found.extend(workflow_vetoes(path, lines))
     if is_workflow_or_action(path):
