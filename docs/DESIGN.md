@@ -573,7 +573,7 @@ from `review_vetoes.py`:
    with the non-trivial paths as the reason. A file is trivial
    when its name marks it as documentation (`.md`, `.markdown`, `.rst`,
    `.adoc`, `LICENSE*`, `NOTICE*`, images under `docs/`; never
-   `CODEOWNERS` or a `requirements*` file), a lockfile by name
+   a sensitive path below or a `requirements*` file), a lockfile by name
    (`uv.lock`, `poetry.lock`, `package-lock.json`, `yarn.lock`,
    `pnpm-lock.yaml`, `Cargo.lock`, `go.sum`, `Gemfile.lock` or any
    `*.lock`), or a manifest whose every changed line is a pin:
@@ -589,8 +589,26 @@ from `review_vetoes.py`:
    because the classifier cannot tell a comment from code with
    confidence.
 2. **Vetoes on any approvable tier.** `find_vetoes` names changes
-   no approval may carry, whatever the agent concluded. Over the
-   changed lines of every non-documentation file:
+   no approval may carry, whatever the agent concluded. First, for
+   any status (added, modified, removed, renamed, on either side of
+   a rename), a sensitive path: "`<path>` changes an agent
+   instruction or review-governance file". `is_sensitive` matches,
+   without regard to case:
+   - a basename of `AGENTS.md`, `CLAUDE.md`, `GEMINI.md`,
+     `copilot-instructions.md`, `SKILL.md`, `.cursorrules`,
+     `.windsurfrules`, `.clinerules` or `CODEOWNERS`, at any depth;
+   - a directory component of `.copilot`, `.claude`, `.cursor`,
+     `.agents`, `.windsurf`, `.clinerules`, `.gemini` or `.codex`,
+     at any depth;
+   - a path under `.github/instructions/`, `.github/prompts/`,
+     `.github/agents/`, `.github/skills/`, `.github/copilot/` or
+     `.aislop/`;
+   - `SECURITY.md`, `.zizmor.yml` or `.zizmor.yaml` at the root.
+
+   These files decide what every later agent session in the
+   repository obeys, this bot's included, or who reviews and how,
+   and are never documentation either. Then, over the changed
+   lines of every non-documentation file:
    - a truncated or missing patch: "patch for `<path>` is
      unreadable";
    - a workflow adding a `pull_request_target` trigger;
@@ -1268,11 +1286,15 @@ Decided:
   a claim. The classifier reads the same patches the agent read
   and must agree before an approval goes out under that tier.
 - **Vetoes on every approvable tier.** Some changes no approval may
-  carry whatever a reviewer concludes: a new `pull_request_target`
-  trigger, a write permission, an unpinned action, a secret
-  reference, a removed action input, a download piped into a
-  shell. The list is short on purpose; it names the changes whose
-  cost of a wrong approval is highest.
+  carry whatever a reviewer concludes: a change to an agent
+  instruction or review-governance file (`AGENTS.md`,
+  `.github/copilot-instructions.md`, `CODEOWNERS` and the rest of
+  §8.2's list), a new `pull_request_target` trigger, a write
+  permission, an unpinned action, a secret reference, a removed
+  action input, a download piped into a shell. The list is short
+  on purpose; it names the changes whose cost of a wrong approval
+  is highest. Instruction files rank first: a wrong approval there
+  changes what every later agent session obeys.
 - **Low-risk enabled from the start.** The maintainer chose
   `trivial,low-risk` as the default rather than a staged widening,
   on the ground that the dry-run period exercises both tiers and
