@@ -326,6 +326,7 @@ records a count for every reason, zero included:
 | `repository`         | Excluded by `config/excluded-repos.txt` or `exclude_repos`, archived, or outside the organisation                                                                  |
 | `bot_author`         | Approve mode: author is a Bot or App (`is_bot`, typename `Bot`, login ending `[bot]`) or absent. Antagonistic mode: a bot the author list does not name, or absent |
 | `human_author`       | Antagonistic mode alone: the author is a human                                                                                                                     |
+| `untrusted_author`   | Approve mode alone: `authorAssociation`, read with the state, is not `OWNER` or `MEMBER`, or is missing; fork status plays no part                                 |
 | `closed`             | Not `OPEN` at read time                                                                                                                                            |
 | `draft`              | `isDraft`                                                                                                                                                          |
 | `conflicting`        | `mergeable == CONFLICTING`; `UNKNOWN` does not skip                                                                                                                |
@@ -371,8 +372,9 @@ limit of 256.
 
 Named pull requests bypass the exclusion list and the search,
 nothing else. Every other rule applies to them, so an operator
-cannot push a draft or a red build through by naming it. A named
-pull request that the token cannot read is an operator error; the
+cannot push a draft, a red build or an outside author's change
+through by naming it. A named pull request that the token cannot
+read is an operator error; the
 same failure during a scan is an operational error. Both fail the
 run.
 
@@ -621,11 +623,11 @@ cannot approve anything.
 
 `apply` re-reads the pull request with the same GraphQL query the
 selection used and refuses, with a reason each, unless the pull
-request is `OPEN`, not a draft, at the same head SHA, against the
-same base ref at the same base SHA, with CI `success`, with no
-reviewer requesting changes, with no Copilot review pending, with no
-unresolved Copilot thread, and with no standing approval on the
-head. The selection skipped approved pull
+request is `OPEN`, not a draft, by an `OWNER` or `MEMBER` author
+(§5), at the same head SHA, against the same base ref at the same
+base SHA, with CI `success`, with no reviewer requesting changes,
+with no Copilot review pending, with no unresolved Copilot thread,
+and with no standing approval on the head. The selection skipped approved pull
 requests, so an approval arriving here landed during the run, the
 bot's own from an overlapping attempt included; a second one is
 noise.
@@ -1252,6 +1254,16 @@ Decided:
   short of an approval goes to the report. Bot pull requests are
   the opposite case (§19.1): an approval there saves nobody a context
   switch, and the authoring bot acts on comments.
+- **Organisation members alone.** The approve mode reviews pull
+  requests whose `authorAssociation` is `OWNER` or `MEMBER`; any other
+  association, or none, skips as `untrusted_author`, and the apply
+  job's live re-read refuses one too. This App's approval counts
+  toward the required review (§2), and the `low-risk` tier approves
+  workflow and code changes, so on an outside author's change it
+  would stand in for the one human read that change must get. Fork
+  status is not the test: members open pull requests from personal
+  forks. The antagonistic mode keeps its own author rule, which
+  already admits listed bots alone.
 - **Deterministic corroboration of `trivial`.** The agent's tier is
   a claim. The classifier reads the same patches the agent read
   and must agree before an approval goes out under that tier.
@@ -1306,7 +1318,8 @@ against the trusted `selection.json`.
   "explicit_repositories": ["repo"],
   "exclusions": ["project-reporting-artifacts"],
   "candidates_seen": 13,
-  "skip_counts": {"draft": 1, "bot_author": 2, "cap": 0},
+  "skip_counts": {"draft": 1, "bot_author": 2, "untrusted_author": 1,
+                  "cap": 0},
   "skipped": [
     {"repository": "lfreleng-actions/repo", "number": 5,
      "url": "https://github.com/lfreleng-actions/repo/pull/5",
@@ -1352,7 +1365,8 @@ against the trusted `selection.json`.
 `bot_login` is `null` without an App slug. `approve_tiers` holds a
 sorted list, always empty in the antagonistic mode. `bot_authors`
 holds the folded logins that mode reviews, and is empty in the
-approve mode. `skip_counts` carries every reason from §5. `skipped` has
+approve mode. `skip_counts` carries every reason from §5,
+`untrusted_author` included, in table order. `skipped` has
 one row per skipped pull request; `title` may be `null` when the
 skip happened before a read. Entries sort by repository and number.
 `base_sha` is the base branch's tip at the state read, not the pull

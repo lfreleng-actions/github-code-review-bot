@@ -28,6 +28,7 @@ import review_files as files
 import review_policy as policy
 import review_recovery as recovery
 from selection_inputs import bot_identity
+from selection_rules import trusted_association
 
 SCHEMA = 1
 MODE = "approve"
@@ -137,6 +138,9 @@ def gate_reasons(check: dict[str, Any], state: dict[str, Any]) -> list[str]:
         reasons.append(f"pull request is {state.get('state')}")
     if state.get("is_draft"):
         reasons.append("pull request is a draft")
+    association = state.get("author_association")
+    if not trusted_association(association):
+        reasons.append(f"untrusted author (association {association or 'missing'})")
     reasons.extend(files.comparison_reasons(check, state))
     if state.get("ci") != "success":
         reasons.append(f"CI is {state.get('ci')}")

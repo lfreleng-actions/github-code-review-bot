@@ -791,6 +791,85 @@ class SkipRulesTest(SelectionCase):
         self.assertEqual([e["key"] for e in selection["pull_requests"]], ["alpha-1"])
 
 
+class AuthorAssociationTest(SelectionCase):
+    """The approve mode reviews pull requests from organisation members alone."""
+
+    def test_untrusted_author_is_skipped_and_counted(self) -> None:
+        """Any association besides OWNER and MEMBER skips as ``untrusted_author``."""
+        for association in (
+            "NONE",
+            "CONTRIBUTOR",
+            "FIRST_TIMER",
+            "FIRST_TIME_CONTRIBUTOR",
+            "COLLABORATOR",
+            "MANNEQUIN",
+        ):
+            with self.subTest(association=association):
+                self.install(FakeGitHub())
+                self.gh.add("alpha", 1, authorAssociation=association)
+                selection, _, _ = self.run_main()
+                self.assert_only_skip(selection, "untrusted_author")
+
+    def test_owner_and_member_are_kept(self) -> None:
+        """The organisation's owners and members are trusted authors."""
+        for association in ("OWNER", "MEMBER"):
+            with self.subTest(association=association):
+                self.install(FakeGitHub())
+                self.gh.add("alpha", 1, authorAssociation=association)
+                selection, _, _ = self.run_main()
+                self.assertEqual(
+                    [e["key"] for e in selection["pull_requests"]], ["alpha-1"]
+                )
+                self.assertEqual(sum(selection["skip_counts"].values()), 0)
+
+    def test_a_member_fork_is_kept(self) -> None:
+        """Fork status is not the criterion: a member's fork is reviewed."""
+        self.gh.add(
+            "alpha",
+            1,
+            isCrossRepository=True,
+            headRepository={"nameWithOwner": "alice/alpha"},
+        )
+        selection, _, _ = self.run_main()
+        (entry,) = selection["pull_requests"]
+        self.assertTrue(entry["is_fork"])
+        self.assertEqual(entry["author_association"], "MEMBER")
+
+    def test_a_missing_association_is_untrusted(self) -> None:
+        """A state without an association never passes the author rule."""
+        state: dict[str, Any] = {
+            "repository_archived": False,
+            "head_repository": "org/alpha",
+            "author": {"login": "alice", "is_bot": False},
+        }
+        for association in (None, ""):
+            with self.subTest(association=association):
+                if association is not None:
+                    state["author_association"] = association
+                self.assertEqual(
+                    rules.first_skip(state, rules.Rules(mode="approve")),
+                    "untrusted_author",
+                )
+
+    def test_a_named_untrusted_pull_request_is_skipped(self) -> None:
+        """Naming an outside author's pull request does not get it approved."""
+        self.gh.pulls[("org/alpha", 1)] = pull_node(
+            "alpha", 1, authorAssociation="CONTRIBUTOR"
+        )
+        selection, _, _ = self.run_main("--pull-requests", "alpha#1")
+        self.assert_only_skip(selection, "untrusted_author")
+
+    def test_the_reason_follows_the_author_reasons(self) -> None:
+        """``untrusted_author`` sits directly after the two author reasons."""
+        reasons = list(rules.SKIP_REASONS)
+        self.assertEqual(reasons[reasons.index("human_author") + 1], "untrusted_author")
+        self.assertEqual(reasons.index("human_author"), reasons.index("bot_author") + 1)
+
+    def test_trusted_associations(self) -> None:
+        """OWNER and MEMBER, and nothing else, are trusted."""
+        self.assertEqual(rules.TRUSTED_ASSOCIATIONS, frozenset({"OWNER", "MEMBER"}))
+
+
 class NamedPullRequestsTest(SelectionCase):
     """``--pull-requests`` reads the named pull requests directly."""
 
@@ -1436,6 +1515,24 @@ class AntagonisticSelectionTest(SelectionCase):
             self.run_main("--mode", "approve-all")
         self.assertEqual(caught.exception.code, 1)
         self.assertIn("mode must be one of", self.stderr.getvalue())
+
+    def test_an_outside_bot_association_is_reviewed(self) -> None:
+        """The antagonistic mode's author rule alone decides: listed bots pass."""
+        for association in ("NONE", "CONTRIBUTOR"):
+            with self.subTest(association=association):
+                self.install(FakeGitHub())
+                self.add_bot("alpha", 1, authorAssociation=association)
+                selection = self.run_antagonistic()
+                self.assertEqual(
+                    [e["key"] for e in selection["pull_requests"]], ["alpha-1"]
+                )
+                self.assertEqual(selection["skip_counts"].get("untrusted_author", 0), 0)
+
+    def test_an_untrusted_human_is_a_human_author(self) -> None:
+        """An outside human skips under the antagonistic author rule, unchanged."""
+        self.gh.add("alpha", 1, authorAssociation="NONE")
+        selection = self.run_antagonistic()
+        self.assert_only_skip(selection, "human_author")
 
     def test_approve_mode_still_skips_every_bot(self) -> None:
         """A listed bot is no exception in the approve mode."""
