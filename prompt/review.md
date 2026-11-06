@@ -38,9 +38,9 @@ carry on.
 2. **Judge the diff, not the repository name or the author.** Do not
    clear a change because the repository looks harmless, and do not
    flag one because of where it lives. The workflow has already
-   excluded drafts, bot authors, red or pending CI, and pull requests
-   with outstanding review feedback; you still verify what you can
-   see.
+   excluded drafts, bot authors, authors outside the organisation, red
+   or pending CI, and pull requests with outstanding review feedback;
+   you still verify what you can see.
 3. **Classify into one tier**, defined below. When in doubt,
    `needs-human`.
 4. **Stay within scope.** Do not change, create or delete files, run

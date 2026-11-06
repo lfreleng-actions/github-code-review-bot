@@ -24,6 +24,7 @@ SKIP_REASONS = (
     "repository",
     "bot_author",
     "human_author",
+    "untrusted_author",
     "closed",
     "draft",
     "conflicting",
@@ -43,6 +44,12 @@ SKIP_REASONS = (
     "moved",
     "cap",
 )
+# The author associations the approve mode reviews: an approval from
+# this App counts toward the required review, so it must never stand in
+# for the human read an outside author's change needs. A collaborator,
+# a contributor or a missing association is untrusted; fork status is
+# no part of it, since members open pull requests from their own forks.
+TRUSTED_ASSOCIATIONS = frozenset({"OWNER", "MEMBER"})
 # The CI rule: the rollup states that keep the approve mode waiting.
 CI_SKIPS = {"pending": "ci_pending", "failure": "ci_failing", "none": "ci_none"}
 # A pending review was never submitted and a dismissed one no longer
@@ -113,6 +120,11 @@ def author_skip(
     if isinstance(login, str) and bot_identity(login) in bot_authors:
         return None
     return "bot_author"
+
+
+def trusted_association(association: object) -> bool:
+    """Whether a pull request's ``author_association`` is OWNER or MEMBER."""
+    return isinstance(association, str) and association in TRUSTED_ASSOCIATIONS
 
 
 def submitted_bot_reviews(reviews: list[dict[str, Any]], head_sha: str) -> list[str]:
@@ -232,6 +244,10 @@ def first_skip(state: dict[str, Any], rules: Rules) -> str | None:
     )
     if author is not None:
         return author
+    if rules.mode == "approve" and not trusted_association(
+        state.get("author_association")
+    ):
+        return "untrusted_author"
     if state["state"] != "OPEN":
         return "closed"
     if state["is_draft"]:

@@ -314,7 +314,6 @@ class ApplyCommandTests(unittest.TestCase):
                 self.assertEqual(len(result["reasons"]), 1)
                 self.assertIn(expected, result["reasons"][0])
 
-    @unittest.expectedFailure
     def test_an_untrusted_author_refuses(self) -> None:
         """An approval never lands on an outside author's pull request."""
         for association in ("NONE", "CONTRIBUTOR", "COLLABORATOR", None):
@@ -327,7 +326,6 @@ class ApplyCommandTests(unittest.TestCase):
                 self.assertIn("untrusted author", reasons[0])
                 self.assertIn(association or "missing", reasons[0])
 
-    @unittest.expectedFailure
     def test_an_untrusted_author_withholds_the_write(self) -> None:
         """The live gate refuses before any write."""
         with (

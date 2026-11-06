@@ -794,7 +794,6 @@ class SkipRulesTest(SelectionCase):
 class AuthorAssociationTest(SelectionCase):
     """The approve mode reviews pull requests from organisation members alone."""
 
-    @unittest.expectedFailure
     def test_untrusted_author_is_skipped_and_counted(self) -> None:
         """Any association besides OWNER and MEMBER skips as ``untrusted_author``."""
         for association in (
@@ -836,7 +835,6 @@ class AuthorAssociationTest(SelectionCase):
         self.assertTrue(entry["is_fork"])
         self.assertEqual(entry["author_association"], "MEMBER")
 
-    @unittest.expectedFailure
     def test_a_missing_association_is_untrusted(self) -> None:
         """A state without an association never passes the author rule."""
         state: dict[str, Any] = {
@@ -853,7 +851,6 @@ class AuthorAssociationTest(SelectionCase):
                     "untrusted_author",
                 )
 
-    @unittest.expectedFailure
     def test_a_named_untrusted_pull_request_is_skipped(self) -> None:
         """Naming an outside author's pull request does not get it approved."""
         self.gh.pulls[("org/alpha", 1)] = pull_node(
@@ -862,14 +859,12 @@ class AuthorAssociationTest(SelectionCase):
         selection, _, _ = self.run_main("--pull-requests", "alpha#1")
         self.assert_only_skip(selection, "untrusted_author")
 
-    @unittest.expectedFailure
     def test_the_reason_follows_the_author_reasons(self) -> None:
         """``untrusted_author`` sits directly after the two author reasons."""
         reasons = list(rules.SKIP_REASONS)
         self.assertEqual(reasons[reasons.index("human_author") + 1], "untrusted_author")
         self.assertEqual(reasons.index("human_author"), reasons.index("bot_author") + 1)
 
-    @unittest.expectedFailure
     def test_trusted_associations(self) -> None:
         """OWNER and MEMBER, and nothing else, are trusted."""
         self.assertEqual(rules.TRUSTED_ASSOCIATIONS, frozenset({"OWNER", "MEMBER"}))
