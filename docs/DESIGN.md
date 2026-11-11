@@ -902,6 +902,7 @@ applies, and the read token scopes to their repositories.
 | Cron dispatch                    | operator's choice | yes | yes               | as above                                 |
 | Antagonistic dispatch, dry       | `true`            | yes | yes               | none; `would-comment` recorded           |
 | Antagonistic dispatch, live      | `false`           | yes | yes               | one comment review per commentable head  |
+| Antagonistic schedule            | `false`           | yes | yes               | as above                                 |
 | `testing.yaml` on a pull request | `true`            | no  | no (`skip_agent`) | none                                     |
 | `testing.yaml` dispatch          | `true`            | no  | yes               | none                                     |
 
@@ -1015,6 +1016,13 @@ request cost and API seconds per session, which the report sums.
   dispatches, a per-run group for dry dispatches. A group holds one
   pending run and a newcomer replaces it, so this is not a FIFO
   queue.
+- Antagonistic caller: every hour at minute 41, clear of Code
+  Monkey's minute 17. Scheduled runs share
+  `code-review-antagonistic-scan` with `queue: max`, so two slots
+  never run together and a waiting slot is never replaced; each
+  dispatch keeps a per-run group, so no slot cancels a dispatched
+  batch (§19.7). `cancel-in-progress: false` for both. A slot skips
+  its jobs unless `ANTAGONISTIC_SCAN_ENABLED` is `true` (§19.8).
 - Testing caller group: `testing-<ref>` on pull requests with
   `cancel-in-progress: true`, so a new push supersedes the older
   run; a per-run group for dispatches, so a second dispatch never
@@ -1133,6 +1141,7 @@ whatever the result's provenance.
 | Antagonistic comment off the diff                        | GitHub would refuse the whole review       | Offline anchor check lists it in the review body with its reason; a 422 regardless posts every finding in the body |
 | Antagonistic App key wired into the approving caller     | Token from the wrong App                   | Identity check against the mode's config fails the run before any read (§4.4)                                      |
 | Two antagonistic dispatches name one pull request        | Possible second comment review             | Apply locks per pull request across live runs and queues the rest; each re-read sees the review before it          |
+| Antagonistic scan slot outlasts the hour                 | Next slot would overlap it                 | The scan group runs slots one at a time and `queue: max` keeps each waiting; dispatches stay in their own groups   |
 
 <!-- markdownlint-enable MD013 -->
 
@@ -1886,14 +1895,18 @@ Keeping this ledger apart from the approve one
 means neither mode's memory can skip a head for the other. For live
 runs the ledger is a cache in front of `already_reviewed`, which
 reads the posted review itself; dry runs post nothing, so they rely
-on the ledger alone.
+on the ledger alone. The scheduled scan (§19.7) relies on both: the
+ledger keeps a slot from paying a session for a head a dispatched
+run reviewed, and `already_reviewed` covers a head the ledger fetch
+missed.
 
 ### 19.7 The caller
 
-`code-review-antagonistic.yaml` runs on `workflow_dispatch` alone.
-Its form offers `dry_run` (default `true`), a model choice defaulting
-to GPT-6 Astra, so the second read comes from a different model
-family from the Claude default that writes Code Monkey's changes,
+`code-review-antagonistic.yaml` runs on `workflow_dispatch` and on
+a `schedule` every hour. Its form offers `dry_run` (default
+`true`), a model choice defaulting to GPT-6 Astra, so the second
+read comes from a different model family from the Claude default
+that writes Code Monkey's changes,
 `pull_requests`, `repositories`, `max_pull_requests` (default 10),
 `max_concurrent_agents` (default 5), `reassess` and `handback`
 (default on, §19.9). It passes
@@ -1904,12 +1917,31 @@ caller. With `handback` on it names
 `<owner>/github-code-monkey-bot` as `handback_repository` and hands
 the `CODE_MONKEY_DISPATCH_TOKEN` secret to the hand-back job.
 
+The schedule, at minute 41 of every hour, catches a bot pull request
+that turned clean outside a Code Monkey publishing run: a maintainer
+resolved the last thread by hand, Copilot's review arrived after
+Code Monkey stopped waiting, or a maintainer pushed a fix to the bot
+branch. Nobody would dispatch for such a head. A schedule has no
+inputs, so a scheduled run is live, scans (`pull_requests` and
+`repositories` empty), keeps the form's `max_pull_requests` and
+`reassess` defaults, and hands back as the form's default does. A
+slot skips its jobs unless `ANTAGONISTIC_SCAN_ENABLED` is `true`
+(§19.8): the `options` job carries the gate and the review job needs
+it, so a slot with the variable unset skips both. The §19.2 rules
+need no change for the schedule: they admit a head once Copilot
+has reviewed it clean with no open thread, skip a head this App has
+read, and stop at the round cap, so a scan reviews the heads Code
+Monkey would have nominated and nothing else.
+
 Each dispatch locks within its own run, in the caller and in the
 reusable workflow. Code Monkey dispatches a batch per run, and a
-shared group would let a newer dispatch cancel a pending batch. The
-apply job's lock per pull request (§19.5) serialises the one write
-across runs instead, and the live re-read and the ledger stop a head
-from taking two reviews.
+shared group would let a newer dispatch cancel a pending batch.
+Scheduled runs share the caller group `code-review-antagonistic-scan`
+with `queue: max`, so slots run one at a time and none cancels or
+waits on a dispatch; in the reusable workflow every antagonistic run
+keeps its per-run group. The apply job's lock per pull request
+(§19.5) serialises the one write across runs instead, and the live
+re-read and the ledger stop a head from taking two reviews.
 
 A dispatcher needs `actions: write` on this repository and nothing
 else. Code Monkey dispatches with its own credential, sending the
@@ -1945,6 +1977,16 @@ gh workflow run code-review-antagonistic.yaml \
 4. Once Code Monkey's revision rounds read this App's threads (§19.9),
    create `CODE_MONKEY_DISPATCH_TOKEN`, then enable Code Monkey's
    dispatch of this workflow.
+5. Set the repository variable `ANTAGONISTIC_SCAN_ENABLED` to `true`
+   to start the scheduled scan.
+
+The schedule runs live with hand-back on, so its slots wait for step
+5: until the variable reads `true`, a scheduled run skips its jobs
+and reviews nothing. The gate is on the schedule alone; dispatches
+run whatever its value, so steps 3 and 4 need the workflow enabled
+and never start the scan. Disabling the workflow in the Actions UI
+would refuse those dispatches too. Unsetting the variable stops the
+scan again without touching the dispatch path.
 
 ### 19.9 Hand-back and the round cap
 

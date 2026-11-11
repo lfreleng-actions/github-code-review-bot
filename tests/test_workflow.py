@@ -1313,7 +1313,6 @@ class AntagonisticCallerContracts(WorkflowCase):
 
     WORKFLOW = ANTAGONISTIC
 
-    @unittest.expectedFailure
     def test_dispatch_and_schedule_with_gpt_by_default(self) -> None:
         """The form defaults to a dry run on GPT-6 Astra, hand-back on."""
         self.assertEqual(set(self.triggers), {"workflow_dispatch", "schedule"})
@@ -1348,13 +1347,11 @@ class AntagonisticCallerContracts(WorkflowCase):
             "${{ inputs.model || 'GPT-6 Astra' }}",
         )
 
-    @unittest.expectedFailure
     def test_schedule_scans_hourly_off_code_monkeys_minute(self) -> None:
         """One cron, every hour at :41, clear of Code Monkey's :17."""
         crons = [entry["cron"] for entry in self.triggers["schedule"]]
         self.assertEqual(crons, ["41 * * * *"])
 
-    @unittest.expectedFailure
     def test_a_schedule_waits_for_the_scan_variable(self) -> None:
         """A slot runs once ``ANTAGONISTIC_SCAN_ENABLED`` is ``true``.
 
@@ -1370,7 +1367,6 @@ class AntagonisticCallerContracts(WorkflowCase):
         self.assertEqual(self.jobs["code-review"]["needs"], "options")
         self.assertNotIn("if", self.jobs["code-review"])
 
-    @unittest.expectedFailure
     def test_a_schedule_runs_live_and_scans_with_the_form_defaults(self) -> None:
         """A schedule has no inputs: live, a scan, the form's cap and reassess.
 
@@ -1396,7 +1392,6 @@ class AntagonisticCallerContracts(WorkflowCase):
         self.assertIs(inputs["reassess"]["default"], False)
         self.assertEqual(call["with"]["reassess"], "${{ inputs.reassess || false }}")
 
-    @unittest.expectedFailure
     def test_a_schedule_hands_back_as_a_dispatch_does(self) -> None:
         """An empty ``inputs.handback`` on a schedule reads as the form's ``true``."""
         self.assertIs(
@@ -1451,7 +1446,6 @@ class AntagonisticCallerContracts(WorkflowCase):
         self.assertFalse(self.workflow["concurrency"]["cancel-in-progress"])
         self.assertEqual(self.workflow["permissions"], {})
 
-    @unittest.expectedFailure
     def test_a_schedule_takes_the_scan_group_and_queues(self) -> None:
         """Slots never overlap, and none cancels a dispatched batch.
 

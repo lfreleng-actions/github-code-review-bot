@@ -2,8 +2,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: 2026 The Linux Foundation
 
-# On-demand entry point for the antagonistic mode (docs/DESIGN.md
-# section 19).
+# Scheduled and on-demand entry point for the antagonistic mode
+# (docs/DESIGN.md section 19).
 #
 # Reviews pull requests opened by the bots config/antagonistic-authors.txt
 # lists (Code Monkey and the Copilot coding agent) and posts one COMMENT
@@ -14,6 +14,10 @@
 # Code Monkey dispatches this workflow for its own pull requests once
 # their Copilot review is clean; a maintainer may dispatch it by hand,
 # naming pull requests or scanning for the listed bots' open ones.
+# An hourly scan, live, catches a pull request that turned clean
+# outside a Code Monkey run; the selection rules admit only the heads
+# a dispatch would have named (docs/DESIGN.md section 19.2). The scan
+# runs once the ANTAGONISTIC_SCAN_ENABLED variable is 'true'.
 #
 # The run holds the antagonistic App's credentials and never the
 # approving App's (docs/DESIGN.md section 10). The pre-flight identity
@@ -24,6 +28,9 @@ name: 'Code Review Bot (antagonistic) 😈'
 
 # yamllint disable-line rule:truthy
 on:
+  schedule:
+    # Hourly at :41, clear of Code Monkey's :17 (UTC)
+    - cron: '41 * * * *'
   workflow_dispatch:
     inputs:
       dry_run:
@@ -75,15 +82,28 @@ permissions: {}
 
 # Each dispatch locks within its own run: Code Monkey sends one batch
 # per run, and a shared group would let a newcomer cancel a pending
-# batch. The apply job refuses a head the bot already reviewed, so two
-# overlapping dispatches cannot comment on one head twice in sequence.
+# batch. Scheduled slots share a group of their own, so two never run
+# together and none touches a dispatch; queue: max keeps every waiting
+# slot rather than letting a newcomer replace one. The apply job
+# refuses a head the bot already reviewed, so two overlapping runs
+# cannot comment on one head twice in sequence.
 concurrency:
-  group: "${{ format('code-review-antagonistic-{0}', github.run_id) }}"
+  group: >-
+    ${{ github.event_name == 'schedule'
+    && 'code-review-antagonistic-scan'
+    || format('code-review-antagonistic-{0}', github.run_id) }}
   cancel-in-progress: false
+  queue: max
 
 jobs:
   options:
     name: 'Resolve options'
+    # A scheduled slot runs only once the scan is switched on; a
+    # dispatch always runs. The review job needs this one, so a
+    # skipped slot reviews nothing (docs/DESIGN.md section 19.8).
+    if: >-
+      ${{ github.event_name != 'schedule'
+      || vars.ANTAGONISTIC_SCAN_ENABLED == 'true' }}
     runs-on: 'ubuntu-latest'
     timeout-minutes: 2
     permissions: {}
@@ -135,7 +155,11 @@ jobs:
       # Fixed: this caller can never ask for an approval, and the
       # reusable workflow refuses any tier in this mode.
       approve_tiers: 'none'
-      dry_run: ${{ inputs.dry_run }}
+      # A schedule has no inputs and runs live; a dispatch takes the
+      # operator's choice. Every other input falls back to the form's
+      # default below.
+      dry_run: >-
+        ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run }}
       model: "${{ needs.options.outputs.model }}"
       pull_requests: "${{ inputs.pull_requests || '' }}"
       repositories: "${{ inputs.repositories || '' }}"
@@ -151,9 +175,10 @@ jobs:
       github_app_client_id: "${{ vars.ANTAGONISTIC_APP_CLIENT_ID || '' }}"
       # Code Monkey's revision rounds, in this owner. The applier caps
       # the rounds, so the review and the revision cannot feed each
-      # other past three.
+      # other past three. A schedule hands back as the form's default
+      # does.
       handback_repository: >-
-        ${{ inputs.handback
+        ${{ (github.event_name != 'workflow_dispatch' || inputs.handback)
         && format('{0}/github-code-monkey-bot', github.repository_owner)
         || '' }}
       assets_repository: "${{ github.repository }}"
