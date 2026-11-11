@@ -741,7 +741,8 @@ sanitiser disarms `<`). `apply` takes the run from the run URL the
 workflow builds from `github.run_id`, and refuses a URL that names
 none.
 
-A transient failure of the write (a 5xx, or gh's own timeout) is
+A transient failure of the write (a 5xx, gh's own timeout, or one of
+gh's status-less wordings in `bot_github.TRANSIENT_WORDINGS`) is
 ambiguous: GitHub may have created the review and lost the reply.
 `apply` makes the write through `bot_github.write_with_recovery` with
 `repeat_safe=False`, and `scripts/review_recovery.py` reads it back:
