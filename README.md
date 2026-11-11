@@ -19,14 +19,14 @@ organisation, in two modes:
   trivial or that a code review finds low risk. It posts nothing
   else: a pull request it cannot approve appears in the run report
   for a human, and the pull request itself stays untouched.
-- **Antagonistic.** On dispatch, the same pipeline reads pull
-  requests opened by coding bots (Code Monkey, the Copilot coding
-  agent) as a hostile reviewer would, and posts its findings as one
-  comment review with each finding on its line. It never approves:
-  a maintainer still reviews and approves every pull request. A Code
-  Monkey pull request with findings goes back to Code Monkey for a
-  revision round, for three antagonistic rounds at most; after that
-  a maintainer takes over.
+- **Antagonistic.** On dispatch and every hour, the same pipeline
+  reads pull requests opened by coding bots (Code Monkey, the
+  Copilot coding agent) as a hostile reviewer would, and posts its
+  findings as one comment review with each finding on its line. It
+  never approves: a maintainer still reviews and approves every pull
+  request. A Code Monkey pull request with findings goes back to
+  Code Monkey for a revision round, for three antagonistic rounds at
+  most; after that a maintainer takes over.
 
 ## 📚 Documentation
 
@@ -88,9 +88,13 @@ pypi-version-check-action/pull/157, pypi-version-check-action/pull/158
 pypi-version-check-action#157 lfreleng-actions/pypi-version-check-action#158
 ```
 
-`code-review-antagonistic.yaml` runs on dispatch alone, defaulting
-to GPT-6 Astra and a dry run; Code Monkey dispatches it for its own
-pull requests once their Copilot review is clean:
+`code-review-antagonistic.yaml` runs on dispatch, defaulting to
+GPT-6 Astra and a dry run; Code Monkey dispatches it for its own
+pull requests once their Copilot review is clean. It also scans
+live every hour at minute 41, for a bot pull request that turned
+clean outside a Code Monkey run, with the same selection rules and
+caps, once the `ANTAGONISTIC_SCAN_ENABLED` repository variable is
+`true`; dispatches run whatever its value. To dispatch by hand:
 
 ```bash
 gh workflow run code-review-antagonistic.yaml \

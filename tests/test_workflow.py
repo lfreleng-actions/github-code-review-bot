@@ -1309,13 +1309,13 @@ class TestingContracts(WorkflowCase):
 
 
 class AntagonisticCallerContracts(WorkflowCase):
-    """The antagonistic caller: dispatch only, its own App, never an approval."""
+    """The antagonistic caller: dispatch and scan, its own App, never an approval."""
 
     WORKFLOW = ANTAGONISTIC
 
-    def test_dispatch_only_with_gpt_by_default(self) -> None:
-        """No schedule; the form defaults to a dry run on GPT-6 Astra, hand-back on."""
-        self.assertEqual(set(self.triggers), {"workflow_dispatch"})
+    def test_dispatch_and_schedule_with_gpt_by_default(self) -> None:
+        """The form defaults to a dry run on GPT-6 Astra, hand-back on."""
+        self.assertEqual(set(self.triggers), {"workflow_dispatch", "schedule"})
         inputs = self.triggers["workflow_dispatch"]["inputs"]
         self.assertEqual(
             set(inputs),
@@ -1342,6 +1342,67 @@ class AntagonisticCallerContracts(WorkflowCase):
         for name in options:
             self.assertIn(f"'{name}') id='", run)
         self.assertIn("'GPT-6 Astra') id='gpt-6-astra' ;;", run)
+        self.assertEqual(
+            self.step("options", "Map display name to identifier")["env"]["MODEL"],
+            "${{ inputs.model || 'GPT-6 Astra' }}",
+        )
+
+    def test_schedule_scans_hourly_off_code_monkeys_minute(self) -> None:
+        """One cron, every hour at :41, clear of Code Monkey's :17."""
+        crons = [entry["cron"] for entry in self.triggers["schedule"]]
+        self.assertEqual(crons, ["41 * * * *"])
+
+    def test_a_schedule_waits_for_the_scan_variable(self) -> None:
+        """A slot runs once ``ANTAGONISTIC_SCAN_ENABLED`` is ``true``.
+
+        A dispatch always runs, so the rollout's dry and single pull
+        request dispatches work while the scan stays off. The review
+        job needs the options job, so a skipped slot reviews nothing.
+        """
+        self.assertEqual(
+            squash(str(self.jobs["options"]["if"])),
+            "${{ github.event_name != 'schedule'"
+            " || vars.ANTAGONISTIC_SCAN_ENABLED == 'true' }}",
+        )
+        self.assertEqual(self.jobs["code-review"]["needs"], "options")
+        self.assertNotIn("if", self.jobs["code-review"])
+
+    def test_a_schedule_runs_live_and_scans_with_the_form_defaults(self) -> None:
+        """A schedule has no inputs: live, a scan, the form's cap and reassess.
+
+        ``inputs.dry_run`` is empty on a schedule, so only a dispatch
+        reads it; every other input falls back to its form default.
+        """
+        call = self.jobs["code-review"]
+        self.assertEqual(
+            squash(str(call["with"]["dry_run"])),
+            "${{ github.event_name == 'workflow_dispatch' && inputs.dry_run }}",
+        )
+        self.assertEqual(
+            call["with"]["pull_requests"], "${{ inputs.pull_requests || '' }}"
+        )
+        self.assertEqual(
+            call["with"]["repositories"], "${{ inputs.repositories || '' }}"
+        )
+        inputs = self.triggers["workflow_dispatch"]["inputs"]
+        self.assertEqual(inputs["max_pull_requests"]["default"], "10")
+        self.assertEqual(
+            call["with"]["max_pull_requests"], "${{ inputs.max_pull_requests || '10' }}"
+        )
+        self.assertIs(inputs["reassess"]["default"], False)
+        self.assertEqual(call["with"]["reassess"], "${{ inputs.reassess || false }}")
+
+    def test_a_schedule_hands_back_as_a_dispatch_does(self) -> None:
+        """An empty ``inputs.handback`` on a schedule reads as the form's ``true``."""
+        self.assertIs(
+            self.triggers["workflow_dispatch"]["inputs"]["handback"]["default"], True
+        )
+        self.assertEqual(
+            squash(str(self.jobs["code-review"]["with"]["handback_repository"])),
+            "${{ (github.event_name != 'workflow_dispatch' || inputs.handback)"
+            " && format('{0}/github-code-monkey-bot', github.repository_owner)"
+            " || '' }}",
+        )
 
     def test_runs_the_antagonistic_mode_and_never_approves(self) -> None:
         """The mode and an empty tier set are literals the dispatch cannot change."""
@@ -1350,7 +1411,6 @@ class AntagonisticCallerContracts(WorkflowCase):
         self.assertEqual(call["with"]["mode"], "antagonistic")
         self.assertEqual(call["with"]["approve_tiers"], "none")
         self.assertEqual(call["with"]["model"], "${{ needs.options.outputs.model }}")
-        self.assertEqual(call["with"]["dry_run"], "${{ inputs.dry_run }}")
 
     def test_holds_the_antagonistic_app_alone(self) -> None:
         """The approving App's names appear nowhere in this caller."""
@@ -1366,12 +1426,6 @@ class AntagonisticCallerContracts(WorkflowCase):
                 "github_app_private_key": "${{ secrets.ANTAGONISTIC_APP_PRIVATE_KEY }}",
                 "handback_token": "${{ secrets.CODE_MONKEY_DISPATCH_TOKEN }}",
             },
-        )
-        self.assertEqual(
-            squash(str(call["with"]["handback_repository"])),
-            "${{ inputs.handback"
-            " && format('{0}/github-code-monkey-bot', github.repository_owner)"
-            " || '' }}",
         )
         text = dumped(self.jobs)
         self.assertNotIn("BOT_APP_CLIENT_ID", text)
@@ -1391,6 +1445,22 @@ class AntagonisticCallerContracts(WorkflowCase):
         self.assertIn("code-review-antagonistic-{0}', github.run_id", group)
         self.assertFalse(self.workflow["concurrency"]["cancel-in-progress"])
         self.assertEqual(self.workflow["permissions"], {})
+
+    def test_a_schedule_takes_the_scan_group_and_queues(self) -> None:
+        """Slots never overlap, and none cancels a dispatched batch.
+
+        Only a schedule enters the shared group; ``queue: max`` keeps
+        every waiting slot rather than letting a newcomer replace one.
+        """
+        concurrency = self.workflow["concurrency"]
+        self.assertEqual(
+            squash(str(concurrency["group"])),
+            "${{ github.event_name == 'schedule'"
+            " && 'code-review-antagonistic-scan'"
+            " || format('code-review-antagonistic-{0}', github.run_id) }}",
+        )
+        self.assertFalse(concurrency["cancel-in-progress"])
+        self.assertEqual(concurrency["queue"], "max")
 
     def test_options_job_blocks_egress_with_the_allow_list(self) -> None:
         """The options job loads the caller's allow-list, then blocks with it."""
