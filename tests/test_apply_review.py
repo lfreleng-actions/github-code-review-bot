@@ -394,6 +394,7 @@ class ApplyCommandTests(unittest.TestCase):
                 self.apply()
             write.assert_not_called()
 
+    @unittest.expectedFailure
     def test_dry_run_reads_live_state_but_does_not_write(self) -> None:
         """A dry run reports what a live run would have hit, then stops."""
         with (
@@ -403,11 +404,61 @@ class ApplyCommandTests(unittest.TestCase):
             patch.object(apply_review.github, "api_write") as write,
         ):
             result = self.apply("--dry-run")
-        state.assert_called_once_with(REPO, 157)
+        state.assert_called_once_with(REPO, 157, None)
         write.assert_not_called()
         self.assertEqual(result["verdict"], "would-approve")
         self.assertTrue(result["dry_run"])
         self.assertIsNone(result["review_url"])
+
+    @unittest.expectedFailure
+    def test_the_live_read_applies_the_selections_stale_status_rule(self) -> None:
+        """The gate discounts the statuses the selection could, after the same bound."""
+        (self.root / "selection.json").write_text(
+            json.dumps(
+                selection(
+                    stale_status_contexts=["pre-commit.ci - pr"],
+                    stale_status_minutes=8,
+                )
+            )
+        )
+        with (
+            patch.object(
+                apply_review.pull_reads, "pull_state", return_value=live_state()
+            ) as state,
+            patch.object(apply_review.github, "api_write") as write,
+        ):
+            result = self.apply("--dry-run")
+        write.assert_not_called()
+        self.assertEqual(result["verdict"], "would-approve")
+        repository, number, policy = state.call_args.args
+        self.assertEqual((repository, number), (REPO, 157))
+        self.assertEqual(policy.contexts, frozenset({"pre-commit.ci - pr"}))
+        self.assertEqual(policy.minutes, 8)
+        self.assertIsNotNone(policy.now.tzinfo)
+
+    @unittest.expectedFailure
+    def test_a_malformed_stale_status_rule_fails_the_step(self) -> None:
+        """A selection whose rule cannot be read never reaches the live read."""
+        cases: list[dict[str, Any]] = [
+            {"stale_status_contexts": "pre-commit.ci - pr", "stale_status_minutes": 8},
+            {"stale_status_contexts": [3], "stale_status_minutes": 8},
+            {"stale_status_contexts": [], "stale_status_minutes": -1},
+            {"stale_status_contexts": [], "stale_status_minutes": True},
+            {"stale_status_contexts": []},
+        ]
+        for overrides in cases:
+            (self.root / "selection.json").write_text(
+                json.dumps(selection(**overrides))
+            )
+            with (
+                self.subTest(overrides=overrides),
+                patch.object(apply_review.pull_reads, "pull_state") as state,
+                patch.object(apply_review.github, "api_write") as write,
+                self.assertRaises(SystemExit),
+            ):
+                self.apply()
+            state.assert_not_called()
+            write.assert_not_called()
 
     def test_the_summary_links_nowhere_outside_the_organisation(self) -> None:
         """Raw HTML and off-site links in the agent's summary post as text."""
