@@ -394,7 +394,6 @@ class ApplyCommandTests(unittest.TestCase):
                 self.apply()
             write.assert_not_called()
 
-    @unittest.expectedFailure
     def test_dry_run_reads_live_state_but_does_not_write(self) -> None:
         """A dry run reports what a live run would have hit, then stops."""
         with (
@@ -410,7 +409,6 @@ class ApplyCommandTests(unittest.TestCase):
         self.assertTrue(result["dry_run"])
         self.assertIsNone(result["review_url"])
 
-    @unittest.expectedFailure
     def test_the_live_read_applies_the_selections_stale_status_rule(self) -> None:
         """The gate discounts the statuses the selection could, after the same bound."""
         (self.root / "selection.json").write_text(
@@ -436,7 +434,6 @@ class ApplyCommandTests(unittest.TestCase):
         self.assertEqual(policy.minutes, 8)
         self.assertIsNotNone(policy.now.tzinfo)
 
-    @unittest.expectedFailure
     def test_a_malformed_stale_status_rule_fails_the_step(self) -> None:
         """A selection whose rule cannot be read never reaches the live read."""
         cases: list[dict[str, Any]] = [

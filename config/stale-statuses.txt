@@ -1,0 +1,10 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Linux Foundation
+#
+# Commit status contexts the approve mode may judge stale, one per
+# line, compared exactly as GitHub names them; '#' starts a comment.
+# A listed status still PENDING or EXPECTED longer than the reusable
+# workflow's stale_status_minutes does not hold CI at pending; a check
+# run, or a status not listed here, always counts (docs/DESIGN.md
+# section 5).
+pre-commit.ci - pr

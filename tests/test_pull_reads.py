@@ -279,7 +279,6 @@ class PullStateTest(ReadsCase):
         )
         self.assertIn("isCrossRepository", payload["query"])
 
-    @unittest.expectedFailure
     def test_extracts_fields(self) -> None:
         """Every field is typed and the derived flags are computed."""
         state = self.state_of(pull_node())
@@ -600,13 +599,11 @@ class StaleStatusTest(ReadsCase):
         with patch.object(github, "run_gh", return_value=reply(node)):
             return reads.pull_state("org/alpha", 7, policy)
 
-    @unittest.expectedFailure
     def test_query_reads_when_a_status_was_created(self) -> None:
         """The state query asks for each commit status's creation time."""
         self.assertIn("StatusContext { context state createdAt }", reads.PULL_QUERY)
         self.assertIn("contexts(first: 100) { totalCount", reads.PULL_QUERY)
 
-    @unittest.expectedFailure
     def test_an_old_listed_status_leaves_ci_to_the_other_contexts(self) -> None:
         """Past the bound the listed status is stale and recorded as such."""
         state = self.read(
@@ -619,7 +616,6 @@ class StaleStatusTest(ReadsCase):
             {"name": PRE_COMMIT, "status": "COMPLETED", "conclusion": "PENDING"},
         )
 
-    @unittest.expectedFailure
     def test_an_expected_status_goes_stale_too(self) -> None:
         """``EXPECTED`` waits like ``PENDING`` does."""
         state = self.read(
@@ -627,7 +623,6 @@ class StaleStatusTest(ReadsCase):
         )
         self.assertEqual(state["ci"], "success")
 
-    @unittest.expectedFailure
     def test_the_other_contexts_still_decide(self) -> None:
         """Another pending or failing context keeps its effect."""
         for other, ci in (
@@ -642,13 +637,11 @@ class StaleStatusTest(ReadsCase):
                 self.assertEqual(state["ci"], ci)
                 self.assertEqual(state["stale_statuses"], [PRE_COMMIT])
 
-    @unittest.expectedFailure
     def test_a_lone_stale_status_leaves_no_ci(self) -> None:
         """With nothing else reporting, CI is absent rather than green."""
         state = self.read("PENDING", status(PRE_COMMIT, "PENDING", 30))
         self.assertEqual(state["ci"], "none")
 
-    @unittest.expectedFailure
     def test_a_young_listed_status_keeps_ci_pending(self) -> None:
         """Within the bound the status counts like any other."""
         for minutes_ago in (2, 8):
@@ -661,7 +654,6 @@ class StaleStatusTest(ReadsCase):
                 self.assertEqual(state["ci"], "pending")
                 self.assertEqual(state["stale_statuses"], [])
 
-    @unittest.expectedFailure
     def test_an_unlisted_status_keeps_ci_pending_whatever_its_age(self) -> None:
         """Only a listed context can go stale."""
         state = self.read(
@@ -670,14 +662,12 @@ class StaleStatusTest(ReadsCase):
         self.assertEqual(state["ci"], "pending")
         self.assertEqual(state["stale_statuses"], [])
 
-    @unittest.expectedFailure
     def test_a_check_run_never_goes_stale(self) -> None:
         """A check run named like a listed status still holds CI pending."""
         state = self.read("PENDING", check_run("Testing"), check_run(PRE_COMMIT, None))
         self.assertEqual(state["ci"], "pending")
         self.assertEqual(state["stale_statuses"], [])
 
-    @unittest.expectedFailure
     def test_a_failing_listed_status_fails(self) -> None:
         """A listed status that reported failure fails the head, however old."""
         state = self.read(
@@ -686,7 +676,6 @@ class StaleStatusTest(ReadsCase):
         self.assertEqual(state["ci"], "failure")
         self.assertEqual(state["stale_statuses"], [])
 
-    @unittest.expectedFailure
     def test_zero_minutes_disables_the_rule(self) -> None:
         """A bound of 0 leaves the rollup as GitHub reports it."""
         state = self.read(
@@ -698,7 +687,6 @@ class StaleStatusTest(ReadsCase):
         self.assertEqual(state["ci"], "pending")
         self.assertEqual(state["stale_statuses"], [])
 
-    @unittest.expectedFailure
     def test_a_partial_context_list_keeps_ci_pending(self) -> None:
         """Contexts beyond the first page might be pending, so nothing lifts."""
         state = self.read(
@@ -710,7 +698,6 @@ class StaleStatusTest(ReadsCase):
         self.assertEqual(state["ci"], "pending")
         self.assertEqual(state["stale_statuses"], [])
 
-    @unittest.expectedFailure
     def test_without_a_policy_every_context_counts(self) -> None:
         """The default read discounts nothing."""
         node = pull_node(
@@ -733,7 +720,6 @@ class StaleStatusTest(ReadsCase):
         self.assertEqual(state["ci"], "pending")
         self.assertEqual(state["stale_statuses"], [])
 
-    @unittest.expectedFailure
     def test_an_unreadable_creation_time_raises(self) -> None:
         """A listed waiting status without a zoned timestamp is an API fault."""
         for created in ("yesterday", "2026-11-12T00:00:00", None):

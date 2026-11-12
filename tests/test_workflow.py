@@ -392,7 +392,6 @@ class SelectContracts(ReusableWorkflowCase):
             outputs["ledger_name"], "${{ steps.budget.outputs.ledger_name }}"
         )
 
-    @unittest.expectedFailure
     def test_selection_forwards_every_scoping_input(self) -> None:
         """Mode, named pull requests, repositories, tiers and the cap reach the script."""
         run = flatten(self.step("select", "Select pull requests")["run"])
@@ -410,7 +409,6 @@ class SelectContracts(ReusableWorkflowCase):
         ):
             self.assertIn(flag, run)
 
-    @unittest.expectedFailure
     def test_the_stale_status_bound_is_checked_and_forwarded(self) -> None:
         """The bound is validated before any mint and reaches the selection."""
         expected = "${{ inputs.stale_status_minutes }}"
@@ -1010,7 +1008,6 @@ class ListInputContracts(ReusableWorkflowCase):
 class InputContracts(ReusableWorkflowCase):
     """Declared inputs, secrets and their defaults."""
 
-    @unittest.expectedFailure
     def test_declared_inputs_and_secrets(self) -> None:
         """The caller contract matches the design."""
         call = self.triggers["workflow_call"]
@@ -1047,7 +1044,6 @@ class InputContracts(ReusableWorkflowCase):
             {"copilot_token", "github_app_private_key", "handback_token"},
         )
 
-    @unittest.expectedFailure
     def test_input_defaults(self) -> None:
         """Approve mode and dry-run by default, both tiers, block egress."""
         inputs = self.triggers["workflow_call"]["inputs"]
@@ -1089,7 +1085,6 @@ class CronContracts(WorkflowCase):
             "${{ inputs.approve_tiers || 'trivial,low-risk' }}",
         )
 
-    @unittest.expectedFailure
     def test_dispatch_form(self) -> None:
         """The form offers the operator every tunable the design names."""
         inputs = self.triggers["workflow_dispatch"]["inputs"]

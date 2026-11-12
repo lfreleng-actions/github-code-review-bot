@@ -16,6 +16,13 @@ from __future__ import annotations
 from typing import Any, cast
 
 import bot_github as github
+from pull_checks import (
+    StalePolicy,
+    nodes_of,
+    optional_str,
+    require_object,
+    rollup_of,
+)
 
 COPILOT_LOGINS = frozenset(
     {
@@ -41,13 +48,6 @@ REVIEW_STATES = frozenset(
 # A pending review was never submitted and a dismissed one no longer
 # counts towards merging, so neither is a reviewer's standing verdict.
 INERT_REVIEW_STATES = frozenset({"PENDING", "DISMISSED"})
-ROLLUP_CI = {
-    "SUCCESS": "success",
-    "PENDING": "pending",
-    "EXPECTED": "pending",
-    "FAILURE": "failure",
-    "ERROR": "failure",
-}
 
 PULL_QUERY = """
 query($owner: String!, $name: String!, $number: Int!) {
@@ -61,9 +61,9 @@ query($owner: String!, $name: String!, $number: Int!) {
       headRepository { nameWithOwner }
       labels(first: 50) { nodes { name } }
       commits(last: 1) { totalCount nodes { commit { statusCheckRollup { state
-        contexts(first: 100) { nodes { __typename
+        contexts(first: 100) { totalCount nodes { __typename
           ... on CheckRun { name status conclusion }
-          ... on StatusContext { context state } } } } } } }
+          ... on StatusContext { context state createdAt } } } } } } }
       reviews(last: 100) {
         nodes { author { __typename login } state submittedAt commit { oid } } }
       reviewRequests(first: 50) { nodes { requestedReviewer { __typename
@@ -92,13 +92,6 @@ class SelectionError(Exception):
     """Operational failure of the selection, not a skip."""
 
 
-def require_object(value: Any, context: str) -> dict[str, Any]:
-    """Return a JSON object or fail the operation."""
-    if not isinstance(value, dict):
-        raise github.GitHubError(f"{context}: expected an object")
-    return cast("dict[str, Any]", value)
-
-
 def require_bool(data: dict[str, Any], key: str, context: str) -> bool:
     """Return a boolean field or fail the operation."""
     value = data.get(key)
@@ -113,30 +106,6 @@ def require_count(data: dict[str, Any], key: str, context: str) -> int:
     if type(value) is not int or value < 0:
         raise github.GitHubError(f"{context}: missing or invalid {key!r}")
     return value
-
-
-def optional_str(value: Any, context: str) -> str | None:
-    """Return a string or null field, refusing any other type."""
-    if value is not None and not isinstance(value, str):
-        raise github.GitHubError(f"{context}: expected a string or null")
-    return value
-
-
-def nodes_of(connection: Any, context: str) -> list[dict[str, Any]]:
-    """Return the object nodes of a GraphQL connection.
-
-    GraphQL returns a null node for an item the token cannot see; such
-    an item carries nothing to act on, so it is left out rather than
-    failing the read.
-    """
-    raw = require_object(connection, context).get("nodes")
-    if not isinstance(raw, list):
-        raise github.GitHubError(f"{context}: missing nodes")
-    return [
-        require_object(node, context)
-        for node in cast("list[Any]", raw)
-        if node is not None
-    ]
 
 
 def truncate_utf8(text: str, limit: int) -> str:
@@ -202,47 +171,6 @@ def search_open_pulls(org: str, repositories: list[str]) -> list[dict[str, Any]]
             raise github.GitHubError("expected pull request objects from search")
         pulls.append(cast("dict[str, Any]", entry))
     return pulls
-
-
-def check_of(node: dict[str, Any], context: str) -> dict[str, Any]:
-    """Normalise one rollup context: a check run, or a commit status.
-
-    A commit status has no lifecycle of its own: once posted it is
-    final, so it maps onto a completed check run.
-    """
-    kind = node.get("__typename")
-    if kind == "CheckRun":
-        return {
-            "name": github.require_str(node, "name", context),
-            "status": github.require_str(node, "status", context),
-            "conclusion": optional_str(node.get("conclusion"), context),
-        }
-    if kind == "StatusContext":
-        return {
-            "name": github.require_str(node, "context", context),
-            "status": "COMPLETED",
-            "conclusion": github.require_str(node, "state", context),
-        }
-    raise github.GitHubError(f"{context}: unexpected check type {kind!r}")
-
-
-def rollup_of(connection: Any, context: str) -> tuple[str, list[dict[str, Any]], int]:
-    """Read the head commit's status rollup: CI state, checks and commit count."""
-    data = require_object(connection, context)
-    total = github.require_int(data, "totalCount", context)
-    nodes = nodes_of(data, context)
-    if not nodes:
-        raise github.GitHubError(f"{context}: no head commit")
-    rollup = require_object(nodes[-1].get("commit"), context).get("statusCheckRollup")
-    if rollup is None:
-        return "none", [], total
-    rollup_data = require_object(rollup, context)
-    state = github.require_str(rollup_data, "state", context)
-    ci = ROLLUP_CI.get(state)
-    if ci is None:
-        raise github.GitHubError(f"{context}: unexpected rollup state {state!r}")
-    contexts = nodes_of(rollup_data.get("contexts"), context)
-    return ci, [check_of(node, context) for node in contexts], total
 
 
 def reviews_of(
@@ -350,7 +278,9 @@ def pull_identity(repository: str, number: int) -> dict[str, str]:
     }
 
 
-def pull_state(repository: str, number: int) -> dict[str, Any]:
+def pull_state(
+    repository: str, number: int, stale: StalePolicy | None = None
+) -> dict[str, Any]:
     """Read everything the skip rules need about one pull request in one query."""
     owner, _, name = repository.partition("/")
     context = f"{repository}#{number}"
@@ -385,7 +315,9 @@ def pull_state(repository: str, number: int) -> dict[str, Any]:
         if not github.REPO_RE.fullmatch(head_repository):
             raise github.GitHubError(f"{context}: invalid head repository")
     head_sha = github.require_sha(pr, "headRefOid", context)
-    ci, checks, commits_count = rollup_of(pr.get("commits"), context)
+    ci, checks, stale_statuses, commits_count = rollup_of(
+        pr.get("commits"), context, stale
+    )
     reviews, changes_requested, approved_by = reviews_of(
         pr.get("reviews"), head_sha, context
     )
@@ -418,6 +350,7 @@ def pull_state(repository: str, number: int) -> dict[str, Any]:
         "mergeable": mergeable,
         "ci": ci,
         "checks": checks,
+        "stale_statuses": stale_statuses,
         "reviews": reviews,
         "review_requests": review_requests_of(pr.get("reviewRequests"), context),
         "unresolved_copilot_threads": copilot_threads_of(

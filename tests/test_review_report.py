@@ -421,7 +421,6 @@ class ReportShapeTest(unittest.TestCase):
             [row["reason"] for row in built["skipped"]], ["ci_failing", "draft"]
         )
 
-    @unittest.expectedFailure
     def test_stale_statuses_are_reported(self) -> None:
         """Each entry judged without a stale status is listed, others are not."""
         selection = make_selection()
@@ -448,7 +447,6 @@ class ReportShapeTest(unittest.TestCase):
             rendered,
         )
 
-    @unittest.expectedFailure
     def test_no_stale_status_means_no_section(self) -> None:
         """A run that discounted nothing reports an empty list and no section."""
         built = report.build_report(make_selection(), [make_result()], 0)

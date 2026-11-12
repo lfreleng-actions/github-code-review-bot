@@ -60,6 +60,12 @@ on:
         description: 'Pull requests to review at most (0 = no cap)'
         type: string
         default: '20'
+      stale_status_minutes:
+        description: >-
+          Minutes a listed commit status may stay pending before CI
+          is judged without it (0 = never)
+        type: string
+        default: '8'
       max_concurrent_agents:
         description: 'Review sessions at once (1-30)'
         type: string
@@ -147,6 +153,7 @@ jobs:
       pull_requests: "${{ inputs.pull_requests || '' }}"
       repositories: "${{ inputs.repositories || '' }}"
       max_pull_requests: "${{ inputs.max_pull_requests || '20' }}"
+      stale_status_minutes: "${{ inputs.stale_status_minutes || '8' }}"
       max_concurrent_agents: "${{ inputs.max_concurrent_agents || '5' }}"
       reassess: ${{ inputs.reassess || false }}
       harden_runner_egress: 'block'

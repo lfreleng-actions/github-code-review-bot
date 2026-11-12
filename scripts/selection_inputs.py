@@ -5,8 +5,9 @@
 
 Kept apart from the selection flow so the accepted spellings of a
 repository list, a pull request list, the review mode, the approval
-tiers and the bot author list read as one contract, and so the flow
-in ``select_pulls`` stays short enough to follow.
+tiers, the bot author list and the stale status rule read as one
+contract, and so the flow in ``select_pulls`` stays short enough to
+follow.
 """
 
 from __future__ import annotations
@@ -28,6 +29,8 @@ APPROVABLE_TIERS = frozenset({"trivial", "low-risk"})
 # ``antagonistic`` reviews listed bots' pull requests and may comment.
 MODES = ("approve", "antagonistic")
 BOT_LOGIN_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9-]*")
+# A commit status context name: printable, without the comment marker.
+STATUS_CONTEXT_RE = re.compile(r"[^\x00-\x1f\x7f#]{1,255}")
 
 
 def parse_repositories(text: str) -> list[str]:
@@ -79,6 +82,37 @@ def parse_max_pull_requests(text: str) -> int:
             f"max_pull_requests must be a non-negative integer, got {text!r}"
         )
     return int(text)
+
+
+def parse_stale_status_minutes(text: str) -> int:
+    """Accept a non-negative integer; zero disables the stale status rule."""
+    if not re.fullmatch(r"\d+", text.strip()):
+        raise SelectionError(
+            f"stale_status_minutes must be a non-negative integer, got {text!r}"
+        )
+    return int(text)
+
+
+def load_stale_statuses(file: Path | None) -> list[str]:
+    """Read the commit status contexts that may go stale, in order.
+
+    One context per line, compared exactly as GitHub names it; ``#``
+    starts a comment and surrounding whitespace is dropped.
+    """
+    if file is None:
+        return []
+    if not file.is_file():
+        raise SelectionError(f"stale status file {file} is not a regular file")
+    names: list[str] = []
+    for line in file.read_text(encoding="utf-8").splitlines():
+        stripped = line.split("#", 1)[0].strip()
+        if not stripped:
+            continue
+        if not STATUS_CONTEXT_RE.fullmatch(stripped):
+            raise SelectionError(f"invalid status context {stripped!r} in {file}")
+        if stripped not in names:
+            names.append(stripped)
+    return names
 
 
 def parse_approve_tiers(text: str) -> list[str]:

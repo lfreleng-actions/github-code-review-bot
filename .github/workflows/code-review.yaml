@@ -72,6 +72,12 @@ on:
         description: 'Pull requests to review at most; 0 lifts the cap'
         type: string
         default: '20'
+      stale_status_minutes:
+        description: >-
+          Minutes a listed commit status (config/stale-statuses.txt) may
+          stay pending before CI is judged without it; 0 disables
+        type: string
+        default: '8'
       max_concurrent_agents:
         description: 'Review sessions running at once (1-30)'
         type: string
@@ -240,6 +246,7 @@ jobs:
         id: budget
         env:
           MAX_PRS: "${{ inputs.max_pull_requests }}"
+          STALE_MINUTES: "${{ inputs.stale_status_minutes }}"
           MAX_RUNTIME: "${{ inputs.max_runtime_minutes }}"
           MAX_AGENTS: "${{ inputs.max_concurrent_agents }}"
           MODEL: "${{ inputs.model }}"
@@ -248,6 +255,9 @@ jobs:
         run: |
           [[ "$MAX_PRS" =~ ^[0-9]+$ ]] || {
             echo '::error::max_pull_requests must be a non-negative integer'
+            exit 1; }
+          [[ "$STALE_MINUTES" =~ ^[0-9]+$ ]] || {
+            echo '::error::stale_status_minutes must be a non-negative integer'
             exit 1; }
           [[ "$MAX_RUNTIME" =~ ^[1-9][0-9]*$ ]] && [ "$MAX_RUNTIME" -le 120 ] ||
             { echo '::error::max_runtime_minutes must be 1-120'; exit 1; }
@@ -536,6 +546,7 @@ jobs:
           REPOSITORIES: "${{ steps.repositories.outputs.csv }}"
           EXCLUDE_REPOS: "${{ steps.exclusions.outputs.csv }}"
           MAX_PRS: "${{ inputs.max_pull_requests }}"
+          STALE_MINUTES: "${{ inputs.stale_status_minutes }}"
           BOT_SLUG: "${{ steps.app-token.outputs.app-slug }}"
         run: |
           extra=()
@@ -552,6 +563,8 @@ jobs:
             --bot-authors-file review-assets/config/antagonistic-authors.txt \
             --handback-authors-file review-assets/config/handback-authors.txt \
             --max-pull-requests "$MAX_PRS" \
+            --stale-statuses-file review-assets/config/stale-statuses.txt \
+            --stale-status-minutes "$STALE_MINUTES" \
             --bot-slug "$BOT_SLUG" "${extra[@]}"
           cat artefacts/selection-summary.md >> "$GITHUB_STEP_SUMMARY"
 

@@ -18,11 +18,13 @@ from __future__ import annotations
 import argparse
 import re
 from collections.abc import Callable
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, cast
 
 import bot_evidence as evidence
 import bot_github as github
+import pull_checks
 import pull_reads
 import review_files as files
 import review_policy as policy
@@ -131,6 +133,31 @@ def approval_body(
     )
 
 
+def stale_policy(selection: dict[str, Any]) -> pull_checks.StalePolicy | None:
+    """The stale status rule the selection judged CI by, applied again now.
+
+    The live re-read discounts the same listed statuses after the same
+    bound, so a status the selection found stale cannot hold the gate
+    at pending. A selection without the rule discounts nothing.
+    """
+    contexts = selection.get("stale_status_contexts")
+    minutes = selection.get("stale_status_minutes")
+    if contexts is None and minutes is None:
+        return None
+    if (
+        not isinstance(contexts, list)
+        or not all(isinstance(name, str) for name in cast("list[Any]", contexts))
+        or type(minutes) is not int
+        or minutes < 0
+    ):
+        raise ValueError("selection carries a malformed stale status rule")
+    return pull_checks.StalePolicy(
+        contexts=frozenset(cast("list[str]", contexts)),
+        minutes=minutes,
+        now=datetime.now(UTC),
+    )
+
+
 def gate_reasons(check: dict[str, Any], state: dict[str, Any]) -> list[str]:
     """Reasons the live pull request may no longer be approved."""
     reasons: list[str] = []
@@ -220,7 +247,7 @@ def approve_live(
     """
     repository, number = str(check["repository"]), int(check["number"])
     reasons = cast("list[str]", result["reasons"])
-    state = pull_reads.pull_state(repository, number)
+    state = pull_reads.pull_state(repository, number, stale_policy(selection))
     earlier = (
         own_approval(check, selection, args.run_url)
         if not args.dry_run and approved_by_self(selection, state)
