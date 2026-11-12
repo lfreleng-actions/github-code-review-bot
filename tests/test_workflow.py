@@ -403,9 +403,20 @@ class SelectContracts(ReusableWorkflowCase):
             '--approve-tiers "$APPROVE_TIERS"',
             '--max-pull-requests "$MAX_PRS"',
             "--exclude-file review-assets/config/excluded-repos.txt",
+            "--stale-statuses-file review-assets/config/stale-statuses.txt",
+            '--stale-status-minutes "$STALE_MINUTES"',
             '--bot-slug "$BOT_SLUG"',
         ):
             self.assertIn(flag, run)
+
+    def test_the_stale_status_bound_is_checked_and_forwarded(self) -> None:
+        """The bound is validated before any mint and reaches the selection."""
+        expected = "${{ inputs.stale_status_minutes }}"
+        budget = self.step("select", "Check inputs")
+        self.assertEqual(budget["env"]["STALE_MINUTES"], expected)
+        self.assertIn('[[ "$STALE_MINUTES" =~ ^[0-9]+$ ]]', budget["run"])
+        select = self.step("select", "Select pull requests")
+        self.assertEqual(select["env"]["STALE_MINUTES"], expected)
 
     def test_skip_agent_and_empty_selection_stop_the_sessions(self) -> None:
         """run_agent is false for plumbing runs and for runs that select nothing."""
@@ -1012,6 +1023,7 @@ class InputContracts(ReusableWorkflowCase):
                 "repositories",
                 "exclude_repos",
                 "max_pull_requests",
+                "stale_status_minutes",
                 "max_concurrent_agents",
                 "max_runtime_minutes",
                 "reassess",
@@ -1040,6 +1052,7 @@ class InputContracts(ReusableWorkflowCase):
         self.assertEqual(inputs["model"]["default"], "claude-opus-5.5")
         self.assertEqual(inputs["approve_tiers"]["default"], "trivial,low-risk")
         self.assertEqual(inputs["max_pull_requests"]["default"], "20")
+        self.assertEqual(inputs["stale_status_minutes"]["default"], "8")
         self.assertEqual(inputs["harden_runner_egress"]["default"], "block")
         self.assertEqual(inputs["harden_runner_supplemental_allowlist"]["default"], "")
         self.assertFalse(inputs["harden_runner_supplemental_unpinned"]["default"])
@@ -1084,12 +1097,18 @@ class CronContracts(WorkflowCase):
                 "pull_requests",
                 "repositories",
                 "max_pull_requests",
+                "stale_status_minutes",
                 "max_concurrent_agents",
                 "reassess",
             },
         )
         self.assertTrue(inputs["dry_run"]["default"])
         self.assertEqual(inputs["model"]["default"], "Claude Opus 5.5")
+        self.assertEqual(inputs["stale_status_minutes"]["default"], "8")
+        self.assertEqual(
+            self.jobs["code-review"]["with"]["stale_status_minutes"],
+            "${{ inputs.stale_status_minutes || '8' }}",
+        )
         self.assertEqual(
             inputs["approve_tiers"]["options"], ["trivial,low-risk", "trivial", "none"]
         )

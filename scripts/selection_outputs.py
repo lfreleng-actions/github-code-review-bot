@@ -52,9 +52,15 @@ def summary_markdown(selection: dict[str, Any]) -> str:
         "",
     ]
     for entry in chosen:
+        stale = cast("list[str]", entry.get("stale_statuses") or [])
+        note = (
+            f" (stale status: {', '.join(summary_text(name) for name in stale)})"
+            if stale
+            else ""
+        )
         lines.append(
             f"- [{entry['repo_name']}#{entry['number']}]({entry['url']}) "
-            f"{summary_text(entry['title'])}"
+            f"{summary_text(entry['title'])}{note}"
         )
     if not chosen:
         lines.append("Nothing selected.")

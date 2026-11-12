@@ -8,6 +8,7 @@ from __future__ import annotations
 import json
 import sys
 import unittest
+from datetime import UTC, datetime, timedelta
 from importlib import import_module
 from pathlib import Path
 from typing import Any
@@ -21,6 +22,8 @@ changes = import_module("pull_changes")
 HEAD = "a" * 40
 BASE = "b" * 40
 OLD_HEAD = "c" * 40
+NOW = datetime(2026, 11, 12, 2, 0, tzinfo=UTC)
+PRE_COMMIT = "pre-commit.ci - pr"
 
 
 def actor(login: str | None, kind: str = "User") -> dict[str, Any] | None:
@@ -65,6 +68,17 @@ def check_run(name: str, conclusion: str | None = "SUCCESS") -> dict[str, Any]:
         "name": name,
         "status": "COMPLETED" if conclusion else "IN_PROGRESS",
         "conclusion": conclusion,
+    }
+
+
+def status(name: str, state: str, minutes_ago: int) -> dict[str, Any]:
+    """One StatusContext created ``minutes_ago`` before ``NOW``."""
+    created = NOW - timedelta(minutes=minutes_ago)
+    return {
+        "__typename": "StatusContext",
+        "context": name,
+        "state": state,
+        "createdAt": created.strftime("%Y-%m-%dT%H:%M:%SZ"),
     }
 
 
@@ -296,6 +310,7 @@ class PullStateTest(ReadsCase):
                 "checks": [
                     {"name": "Testing", "status": "COMPLETED", "conclusion": "SUCCESS"}
                 ],
+                "stale_statuses": [],
                 "reviews": [],
                 "review_requests": [],
                 "unresolved_copilot_threads": 0,
@@ -544,6 +559,174 @@ class PullStateTest(ReadsCase):
         for index, node in enumerate(bad_nodes):
             with self.subTest(index=index), self.assertRaises(github.GitHubError):
                 self.state_of(node)
+
+
+class StaleStatusTest(ReadsCase):
+    """A listed commit status waiting past the bound does not hold CI pending."""
+
+    def read(
+        self,
+        rollup_state: str,
+        *contexts: dict[str, Any],
+        minutes: int = 8,
+        listed: tuple[str, ...] = (PRE_COMMIT,),
+        total: int | None = None,
+    ) -> dict[str, Any]:
+        """Run ``pull_state`` on one rollup under a stale status policy."""
+        node = pull_node(
+            commits={
+                "totalCount": 1,
+                "nodes": [
+                    {
+                        "commit": {
+                            "statusCheckRollup": {
+                                "state": rollup_state,
+                                "contexts": {
+                                    "totalCount": len(contexts)
+                                    if total is None
+                                    else total,
+                                    "nodes": list(contexts),
+                                },
+                            }
+                        }
+                    }
+                ],
+            }
+        )
+        policy = import_module("pull_checks").StalePolicy(
+            contexts=frozenset(listed), minutes=minutes, now=NOW
+        )
+        with patch.object(github, "run_gh", return_value=reply(node)):
+            return reads.pull_state("org/alpha", 7, policy)
+
+    def test_query_reads_when_a_status_was_created(self) -> None:
+        """The state query asks for each commit status's creation time."""
+        self.assertIn("StatusContext { context state createdAt }", reads.PULL_QUERY)
+        self.assertIn("contexts(first: 100) { totalCount", reads.PULL_QUERY)
+
+    def test_an_old_listed_status_leaves_ci_to_the_other_contexts(self) -> None:
+        """Past the bound the listed status is stale and recorded as such."""
+        state = self.read(
+            "PENDING", check_run("Testing"), status(PRE_COMMIT, "PENDING", 30)
+        )
+        self.assertEqual(state["ci"], "success")
+        self.assertEqual(state["stale_statuses"], [PRE_COMMIT])
+        self.assertEqual(
+            state["checks"][1],
+            {"name": PRE_COMMIT, "status": "COMPLETED", "conclusion": "PENDING"},
+        )
+
+    def test_an_expected_status_goes_stale_too(self) -> None:
+        """``EXPECTED`` waits like ``PENDING`` does."""
+        state = self.read(
+            "EXPECTED", check_run("Testing"), status(PRE_COMMIT, "EXPECTED", 30)
+        )
+        self.assertEqual(state["ci"], "success")
+
+    def test_the_other_contexts_still_decide(self) -> None:
+        """Another pending or failing context keeps its effect."""
+        for other, ci in (
+            (check_run("Lint", None), "pending"),
+            (check_run("Lint", "FAILURE"), "failure"),
+            (status("ci/x", "PENDING", 30), "pending"),
+            (status("ci/x", "ERROR", 30), "failure"),
+            (check_run("Lint", "NEUTRAL"), "success"),
+        ):
+            with self.subTest(other=other):
+                state = self.read("PENDING", other, status(PRE_COMMIT, "PENDING", 30))
+                self.assertEqual(state["ci"], ci)
+                self.assertEqual(state["stale_statuses"], [PRE_COMMIT])
+
+    def test_a_lone_stale_status_leaves_no_ci(self) -> None:
+        """With nothing else reporting, CI is absent rather than green."""
+        state = self.read("PENDING", status(PRE_COMMIT, "PENDING", 30))
+        self.assertEqual(state["ci"], "none")
+
+    def test_a_young_listed_status_keeps_ci_pending(self) -> None:
+        """Within the bound the status counts like any other."""
+        for minutes_ago in (2, 8):
+            with self.subTest(minutes_ago=minutes_ago):
+                state = self.read(
+                    "PENDING",
+                    check_run("Testing"),
+                    status(PRE_COMMIT, "PENDING", minutes_ago),
+                )
+                self.assertEqual(state["ci"], "pending")
+                self.assertEqual(state["stale_statuses"], [])
+
+    def test_an_unlisted_status_keeps_ci_pending_whatever_its_age(self) -> None:
+        """Only a listed context can go stale."""
+        state = self.read(
+            "PENDING", check_run("Testing"), status("ci/other", "PENDING", 600)
+        )
+        self.assertEqual(state["ci"], "pending")
+        self.assertEqual(state["stale_statuses"], [])
+
+    def test_a_check_run_never_goes_stale(self) -> None:
+        """A check run named like a listed status still holds CI pending."""
+        state = self.read("PENDING", check_run("Testing"), check_run(PRE_COMMIT, None))
+        self.assertEqual(state["ci"], "pending")
+        self.assertEqual(state["stale_statuses"], [])
+
+    def test_a_failing_listed_status_fails(self) -> None:
+        """A listed status that reported failure fails the head, however old."""
+        state = self.read(
+            "FAILURE", check_run("Testing"), status(PRE_COMMIT, "FAILURE", 600)
+        )
+        self.assertEqual(state["ci"], "failure")
+        self.assertEqual(state["stale_statuses"], [])
+
+    def test_zero_minutes_disables_the_rule(self) -> None:
+        """A bound of 0 leaves the rollup as GitHub reports it."""
+        state = self.read(
+            "PENDING",
+            check_run("Testing"),
+            status(PRE_COMMIT, "PENDING", 600),
+            minutes=0,
+        )
+        self.assertEqual(state["ci"], "pending")
+        self.assertEqual(state["stale_statuses"], [])
+
+    def test_a_partial_context_list_keeps_ci_pending(self) -> None:
+        """Contexts beyond the first page might be pending, so nothing lifts."""
+        state = self.read(
+            "PENDING",
+            check_run("Testing"),
+            status(PRE_COMMIT, "PENDING", 30),
+            total=150,
+        )
+        self.assertEqual(state["ci"], "pending")
+        self.assertEqual(state["stale_statuses"], [])
+
+    def test_without_a_policy_every_context_counts(self) -> None:
+        """The default read discounts nothing."""
+        node = pull_node(
+            commits={
+                "totalCount": 1,
+                "nodes": [
+                    {
+                        "commit": {
+                            "statusCheckRollup": rollup(
+                                "PENDING",
+                                check_run("Testing"),
+                                status(PRE_COMMIT, "PENDING", 600),
+                            )
+                        }
+                    }
+                ],
+            }
+        )
+        state = self.state_of(node)
+        self.assertEqual(state["ci"], "pending")
+        self.assertEqual(state["stale_statuses"], [])
+
+    def test_an_unreadable_creation_time_raises(self) -> None:
+        """A listed waiting status without a zoned timestamp is an API fault."""
+        for created in ("yesterday", "2026-11-12T00:00:00", None):
+            broken = status(PRE_COMMIT, "PENDING", 30)
+            broken["createdAt"] = created
+            with self.subTest(created=created), self.assertRaises(github.GitHubError):
+                self.read("PENDING", check_run("Testing"), broken)
 
 
 class PullStateBaseTest(ReadsCase):

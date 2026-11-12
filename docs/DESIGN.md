@@ -338,7 +338,7 @@ records a count for every reason, zero included:
 | `already_reviewed`   | Antagonistic mode alone: this App has a submitted review of the head (§19.2)                                                                                       |
 | `copilot_unreviewed` | Antagonistic mode alone: no submitted Copilot review of the head itself (§19.2)                                                                                    |
 | `copilot_findings`   | Antagonistic mode alone: Copilot's latest review of the head is not clean: yellow, findings in its body, no assessment, or unreadable (§19.2)                      |
-| `ci_pending`         | Status check rollup `PENDING` or `EXPECTED`; approve mode alone                                                                                                    |
+| `ci_pending`         | Status check rollup `PENDING` or `EXPECTED`, unless the wait is a stale listed status (below); approve mode alone                                                  |
 | `ci_failing`         | Rollup `FAILURE` or `ERROR`; approve mode alone                                                                                                                    |
 | `ci_none`            | No status check rollup at all; approve mode alone                                                                                                                  |
 | `already_assessed`   | The ledger holds this head (§6); `reassess` bypasses                                                                                                               |
@@ -347,6 +347,26 @@ records a count for every reason, zero included:
 | `cap`                | Over `max_pull_requests`, oldest `updated_at` first                                                                                                                |
 
 <!-- markdownlint-enable MD013 -->
+
+A commit status that some external service posts may sit at
+`PENDING` long after the service stopped working on the head:
+pre-commit.ci posts `pre-commit.ci - pr` and sometimes never
+completes it. Left alone, such a status holds the rollup at
+`PENDING` and the pull request skips as `ci_pending` on every run.
+`config/stale-statuses.txt` lists such contexts by exact name, and
+the `stale_status_minutes` input (default `8`, `0` disables) bounds
+how long one may wait. A listed status (a `StatusContext`, never a
+`CheckRun`) whose state is `PENDING` or `EXPECTED` and whose
+`createdAt` lies further than that bound before the read is
+stale. When the rollup is `PENDING`, the query saw every context,
+and at least one is stale, CI follows the other checks instead: any
+failing check gives `failure`, any still waiting gives `pending`,
+all passing give `success`, and none left gives `none`. The rule
+lifts a wait alone and never turns a failure into a pass. The entry
+records the stale contexts in `stale_statuses`, the selection
+summary names them, and the report lists them (§18.7). Code Monkey
+applies the same rule to its own CI gate
+(`lfreleng-actions/github-code-monkey-bot#168`).
 
 The `repository` and author rules run on the search result
 before any further read. One GraphQL query per survivor then
@@ -643,7 +663,8 @@ cannot approve anything.
 selection used and refuses, with a reason each, unless the pull
 request is `OPEN`, not a draft, by an `OWNER` or `MEMBER` author
 (§5), at the same head SHA, against the same base ref at the same
-base SHA, with CI `success`, with no reviewer requesting changes,
+base SHA, with CI `success` (the selection's stale status rule of §5
+applied again at the time of the re-read), with no reviewer requesting changes,
 with no Copilot review pending, with no unresolved Copilot thread,
 and with no standing approval on the head. The selection skipped approved pull
 requests, so an approval arriving here landed during the run, the
@@ -786,6 +807,7 @@ code working: a typed `needs-human` result and exit 0.
 | `repositories`                         | `''`                                      | Repository names to scan; commas and/or spaces                                                                      |
 | `exclude_repos`                        | `''`                                      | Repository names to skip; commas and/or spaces; overrides the bundled list                                          |
 | `max_pull_requests`                    | `20`                                      | Cap after ordering; `0` lifts it to 256                                                                             |
+| `stale_status_minutes`                 | `8`                                       | Minutes a status in `config/stale-statuses.txt` may stay pending before CI leaves it out; `0` disables (§5)         |
 | `max_concurrent_agents`                | `5`                                       | Review sessions at once, 1-30                                                                                       |
 | `max_runtime_minutes`                  | `20`                                      | Wall-clock budget per session, 1-120                                                                                |
 | `reassess`                             | `false`                                   | Review heads the ledger already records                                                                             |
@@ -831,7 +853,8 @@ canonical `owner/repo#N` form, never the raw inputs.
 Two cron entries, both UTC: `0 */3 * * 1-5` and `0 8,20 * * 0,6`.
 The `workflow_dispatch` form offers `dry_run` (default `true`), a
 model choice, `approve_tiers`, `pull_requests`, `repositories`,
-`max_pull_requests`, `max_concurrent_agents` and `reassess`.
+`max_pull_requests`, `stale_status_minutes`, `max_concurrent_agents`
+and `reassess`.
 
 The `options` job maps the display name to the identifier the CLI
 accepts: Claude Opus 5.5 to `claude-opus-5.5`, Claude Fable 5.1 to
@@ -1143,6 +1166,7 @@ whatever the result's provenance.
 | Antagonistic App key wired into the approving caller     | Token from the wrong App                   | Identity check against the mode's config fails the run before any read (§4.4)                                      |
 | Two antagonistic dispatches name one pull request        | Possible second comment review             | Apply locks per pull request across live runs and queues the rest; each re-read sees the review before it          |
 | Antagonistic scan slot outlasts the hour                 | Next slot would overlap it                 | The scan group runs slots one at a time and `queue: max` keeps each waiting; dispatches stay in their own groups   |
+| A listed commit status never completes                   | Rollup stays `PENDING`; `ci_pending`       | Past `stale_status_minutes` CI follows the other checks (§5)                                                       |
 
 <!-- markdownlint-enable MD013 -->
 
@@ -1164,6 +1188,7 @@ config/antagonistic-bot.json             antagonistic App slug
 config/antagonistic-authors.txt          bots the antagonistic mode reviews
 config/handback-authors.txt              bots it hands back to (§19.9)
 config/excluded-repos.txt                repositories the scan skips
+config/stale-statuses.txt                statuses that may go stale (§5)
 tools/copilot-cli/                       pinned CLI lockfile
 scripts/bot_github.py                    gh wrapper, REST and GraphQL
 scripts/bot_evidence.py                  evidence digests, file caps
@@ -1171,6 +1196,7 @@ scripts/artifact_fetch.py                bounded artifact extraction
 scripts/agent_outcome.py                 review legs' session outcomes (§18.5)
 scripts/ledger.py                        run-to-run memory (§6)
 scripts/pull_reads.py                    GitHub reads for selection
+scripts/pull_checks.py                   CI rollup, stale status rule
 scripts/pull_changes.py                  bounded files and commits
 scripts/select_pulls.py                  selection flow (§5)
 scripts/selection_rules.py               skip rules, both modes (§5)
@@ -1217,8 +1243,8 @@ plus `test_workflow.py`, which
 pins the workflow facts the scripts rely on: which job holds which
 credential, which step gates the write token, the artifact
 names, and that the comment path holds no approval event. The
-helpers split from `select_pulls`, `review_policy` and the appliers
-take their coverage through their parents. Linting runs through `prek`
+helpers split from `select_pulls`, `pull_reads`, `review_policy` and
+the appliers take their coverage through their parents. Linting runs through `prek`
 hooks including gitleaks, gitlint, ruff, mypy, basedpyright,
 actionlint, reuse, markdownlint, write-good, codespell and `aislop`
 at threshold 100.
@@ -1349,6 +1375,8 @@ against the trusted `selection.json`.
   "explicit_pull_requests": ["lfreleng-actions/repo#157"],
   "explicit_repositories": ["repo"],
   "exclusions": ["project-reporting-artifacts"],
+  "stale_status_contexts": ["pre-commit.ci - pr"],
+  "stale_status_minutes": 8,
   "candidates_seen": 13,
   "skip_counts": {"draft": 1, "bot_author": 2, "untrusted_author": 1,
                   "cap": 0},
@@ -1379,6 +1407,7 @@ against the trusted `selection.json`.
       "ci": "success",
       "checks": [{"name": "Testing", "status": "COMPLETED",
                   "conclusion": "SUCCESS"}],
+      "stale_statuses": [],
       "reviews": [{"author": "login", "is_bot": false,
                    "state": "COMMENTED", "commit": "<40 hex>",
                    "submitted_at": "..."}],
@@ -1405,6 +1434,9 @@ skip happened before a read. Entries sort by repository and number.
 request's `baseRefOid` (§5). `files` and `commits` come from REST
 `compare/{base_sha}...{head_sha}`, the comparison the entry records;
 a file GitHub returns without a patch has `patch: null`.
+`stale_status_contexts` and `stale_status_minutes` record the stale
+status rule (§5), which apply re-applies at its live re-read;
+`stale_statuses` names the listed contexts the entry's CI left out.
 
 ### 18.2 `matrix.json` (select to workflow)
 
@@ -1607,6 +1639,9 @@ a refusal at a live gate is never settled.
             "failed": 0, "skipped": 9, "candidates_seen": 13},
  "results": ["...result.json objects sorted by key..."],
  "skipped": ["...from selection.skipped..."],
+ "stale_statuses": [{"repository": "lfreleng-actions/repo",
+                     "number": 157, "url": "...",
+                     "contexts": ["pre-commit.ci - pr"]}],
  "premium_requests": 4.5, "agent_seconds": 300,
  "ledger_entries": 42}
 ```
@@ -1622,10 +1657,12 @@ the gather's notes on artifacts it left out, a table of
 results (pull request link, title, author, tier or comment count,
 verdict, review link or first reason), a table of skipped pull
 requests grouped by
-reason, and the spend line. Summaries and reasons pass through the
-same one-line sanitiser as the approval body. A result file that is
-unreadable or malformed stays out, with a note, so one broken
-matrix leg cannot hide every other verdict or stop the ledger.
+reason, a table of selected pull requests whose CI left out a stale
+status (§5) when there are any, and the spend line. Summaries and
+reasons pass through the same one-line sanitiser as the approval
+body. A result file that is unreadable or malformed stays out, with a
+note, so one broken matrix leg cannot hide every other verdict or
+stop the ledger.
 
 ## 19. The Antagonistic Mode
 

@@ -421,6 +421,39 @@ class ReportShapeTest(unittest.TestCase):
             [row["reason"] for row in built["skipped"]], ["ci_failing", "draft"]
         )
 
+    def test_stale_statuses_are_reported(self) -> None:
+        """Each entry judged without a stale status is listed, others are not."""
+        selection = make_selection()
+        selection["pull_requests"][0].update(
+            url=URL, stale_statuses=["pre-commit.ci - pr"]
+        )
+        selection["pull_requests"][1]["stale_statuses"] = []
+        built = report.build_report(selection, [make_result()], 0)
+        self.assertEqual(
+            built["stale_statuses"],
+            [
+                {
+                    "repository": "lfreleng-actions/repo",
+                    "number": 157,
+                    "url": URL,
+                    "contexts": ["pre-commit.ci - pr"],
+                }
+            ],
+        )
+        rendered = report.render_markdown(built, selection, [])
+        self.assertIn("## Stale statuses", rendered)
+        self.assertIn(
+            f"| [lfreleng-actions/repo#\u200b157]({URL}) | pre-commit.ci - pr |",
+            rendered,
+        )
+
+    def test_no_stale_status_means_no_section(self) -> None:
+        """A run that discounted nothing reports an empty list and no section."""
+        built = report.build_report(make_selection(), [make_result()], 0)
+        self.assertEqual(built["stale_statuses"], [])
+        rendered = report.render_markdown(built, make_selection(), [])
+        self.assertNotIn("Stale statuses", rendered)
+
     def test_markdown_rows(self) -> None:
         """Each result row carries link, author, tier, verdict and detail."""
         results = [

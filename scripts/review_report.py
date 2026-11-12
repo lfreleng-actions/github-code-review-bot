@@ -117,6 +117,24 @@ def skipped_rows(selection: dict[str, Any]) -> list[dict[str, Any]]:
     return sorted(rows_of(selection.get("skipped")), key=order)
 
 
+def stale_rows(selection: dict[str, Any]) -> list[dict[str, Any]]:
+    """The selected pull requests whose CI left a stale commit status out."""
+    rows: list[dict[str, Any]] = []
+    for entry in rows_of(selection.get("pull_requests")):
+        stale = entry.get("stale_statuses")
+        if not isinstance(stale, list) or not stale:
+            continue
+        rows.append(
+            {
+                "repository": entry.get("repository"),
+                "number": entry.get("number"),
+                "url": entry.get("url"),
+                "contexts": [str(name) for name in cast("list[Any]", stale)],
+            }
+        )
+    return rows
+
+
 def count_verdicts(
     selection: dict[str, Any], results: list[dict[str, Any]]
 ) -> dict[str, int]:
@@ -193,6 +211,7 @@ def build_report(
             1 for result in results if result.get("verified") is not True
         ),
         "skipped": skipped_rows(selection),
+        "stale_statuses": stale_rows(selection),
         "premium_requests": premium_requests,
         "agent_seconds": agent_seconds,
         "ledger_entries": ledger_entries,
@@ -228,6 +247,27 @@ def table(headers: list[str], rows: list[list[str]]) -> list[str]:
     ]
     lines.extend("| " + " | ".join(row) + " |" for row in rows)
     return lines
+
+
+def stale_section(report: dict[str, Any]) -> list[str]:
+    """The report section naming stale statuses CI left out, or nothing."""
+    rows = [
+        [
+            link(pull_label(row), row.get("url")),
+            ", ".join(one_line(name, 60) for name in row["contexts"]),
+        ]
+        for row in cast("list[dict[str, Any]]", report.get("stale_statuses") or [])
+    ]
+    if not rows:
+        return []
+    return [
+        "",
+        "## Stale statuses",
+        "",
+        "CI was judged without these listed commit statuses, pending past the bound.",
+        "",
+        *table(["PR", "Stale status"], rows),
+    ]
 
 
 def render_markdown(
@@ -299,6 +339,7 @@ def render_markdown(
     )
     lines.extend(["", "## Skipped", ""])
     lines.extend(table(["PR", "Title", "Reason"], skipped))
+    lines.extend(stale_section(report))
     lines.extend(
         [
             "",

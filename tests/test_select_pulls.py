@@ -12,6 +12,7 @@ import sys
 import tempfile
 import unittest
 from contextlib import redirect_stderr
+from datetime import UTC, datetime, timedelta
 from importlib import import_module
 from pathlib import Path
 from typing import Any
@@ -33,6 +34,7 @@ CLEAN = BODIES["v2-green-clean"]
 HEAD = "a" * 40
 BASE = "b" * 40
 OTHER = "c" * 40
+PRE_COMMIT = "pre-commit.ci - pr"
 PATCH = "@@ -1 +1 @@\n-a\n+b"
 REST_PATH_RE = re.compile(r"repos/([^/]+/[^/]+)/pulls/(\d+)/reviews\?per_page=100")
 COMPARE_PATH_RE = re.compile(
@@ -386,6 +388,43 @@ class ParseMaxPullRequestsTest(unittest.TestCase):
         for bad in ("-1", "ten", "", "1.5"):
             with self.subTest(bad=bad), self.assertRaises(reads.SelectionError):
                 select.parse_max_pull_requests(bad)
+
+
+class StaleStatusInputsTest(unittest.TestCase):
+    """The stale status bound and the list of contexts it covers."""
+
+    def test_minutes(self) -> None:
+        """A non-negative integer parses; zero disables the rule."""
+        self.assertEqual(select.parse_stale_status_minutes("0"), 0)
+        self.assertEqual(select.parse_stale_status_minutes(" 8 "), 8)
+        for bad in ("-1", "eight", "", "1.5"):
+            with self.subTest(bad=bad), self.assertRaises(reads.SelectionError):
+                select.parse_stale_status_minutes(bad)
+
+    def test_file_comments_blanks_and_repeats(self) -> None:
+        """Names keep their case and inner spaces; comments and repeats drop."""
+        with tempfile.TemporaryDirectory() as tmp:
+            file = Path(tmp) / "stale.txt"
+            file.write_text(
+                f"# heading\n\n  {PRE_COMMIT}  # trailing\nci/Other\n{PRE_COMMIT}\n",
+                encoding="utf-8",
+            )
+            self.assertEqual(select.load_stale_statuses(file), [PRE_COMMIT, "ci/Other"])
+
+    def test_nothing_bad_names_and_non_file(self) -> None:
+        """No file lists nothing; a control character or a non-file fails."""
+        self.assertEqual(select.load_stale_statuses(None), [])
+        with tempfile.TemporaryDirectory() as tmp:
+            file = Path(tmp) / "stale.txt"
+            file.write_text("bad\x07name\n", encoding="utf-8")
+            for path in (file, Path(tmp) / "absent", Path(tmp)):
+                with self.subTest(path=path), self.assertRaises(reads.SelectionError):
+                    select.load_stale_statuses(path)
+
+    def test_the_bundled_list_names_pre_commit_ci(self) -> None:
+        """The shipped configuration covers pre-commit.ci's pull request status."""
+        bundled = Path(__file__).resolve().parents[1] / "config" / "stale-statuses.txt"
+        self.assertEqual(select.load_stale_statuses(bundled), [PRE_COMMIT])
 
 
 class ParseApproveTiersTest(unittest.TestCase):
@@ -791,6 +830,131 @@ class SkipRulesTest(SelectionCase):
         self.assertEqual([e["key"] for e in selection["pull_requests"]], ["alpha-1"])
 
 
+def stale_rollup(state: str, minutes_ago: int, *, name: str = PRE_COMMIT) -> Any:
+    """A rollup of a green check and one commit status ``minutes_ago`` old."""
+    created = datetime.now(UTC) - timedelta(minutes=minutes_ago)
+    return {
+        "totalCount": 1,
+        "nodes": [
+            {
+                "commit": {
+                    "statusCheckRollup": {
+                        "state": state,
+                        "contexts": {
+                            "totalCount": 2,
+                            "nodes": [
+                                {
+                                    "__typename": "CheckRun",
+                                    "name": "Testing",
+                                    "status": "COMPLETED",
+                                    "conclusion": "SUCCESS",
+                                },
+                                {
+                                    "__typename": "StatusContext",
+                                    "context": name,
+                                    "state": state,
+                                    "createdAt": created.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                                },
+                            ],
+                        },
+                    }
+                }
+            }
+        ],
+    }
+
+
+class StaleStatusSelectionTest(SelectionCase):
+    """A listed commit status pending past the bound does not hold a head."""
+
+    def stale_args(self, minutes: str = "8") -> list[str]:
+        """The flags the workflow passes, with a list naming pre-commit.ci."""
+        holder = tempfile.TemporaryDirectory()
+        self.addCleanup(holder.cleanup)
+        listed = Path(holder.name) / "stale-statuses.txt"
+        listed.write_text(f"{PRE_COMMIT}\n", encoding="utf-8")
+        return [
+            "--stale-statuses-file",
+            str(listed),
+            "--stale-status-minutes",
+            minutes,
+        ]
+
+    def test_an_old_listed_status_is_recorded_and_does_not_hold_ci(self) -> None:
+        """The head is selected; the entry, header and summary name the status."""
+        self.gh.add("alpha", 1, commits=stale_rollup("PENDING", 30))
+        selection, out, _ = self.run_main(*self.stale_args())
+        self.assertEqual(selection["stale_status_contexts"], [PRE_COMMIT])
+        self.assertEqual(selection["stale_status_minutes"], 8)
+        (entry,) = selection["pull_requests"]
+        self.assertEqual(entry["ci"], "success")
+        self.assertEqual(entry["stale_statuses"], [PRE_COMMIT])
+        summary = (out / "selection-summary.md").read_text(encoding="utf-8")
+        self.assertIn(f"(stale status: {PRE_COMMIT})", summary)
+
+    def test_a_young_listed_status_keeps_ci_pending(self) -> None:
+        """Within the bound the status still holds the head."""
+        self.gh.add("alpha", 1, commits=stale_rollup("PENDING", 2))
+        selection, _, _ = self.run_main(*self.stale_args())
+        self.assert_only_skip(selection, "ci_pending")
+
+    def test_an_unlisted_status_keeps_ci_pending_whatever_its_age(self) -> None:
+        """Only a listed context can go stale."""
+        self.gh.add("alpha", 1, commits=stale_rollup("PENDING", 600, name="ci/x"))
+        selection, _, _ = self.run_main(*self.stale_args())
+        self.assert_only_skip(selection, "ci_pending")
+
+    def test_a_failing_listed_status_fails(self) -> None:
+        """A listed status that reported failure fails the head."""
+        self.gh.add("alpha", 1, commits=stale_rollup("FAILURE", 600))
+        selection, _, _ = self.run_main(*self.stale_args())
+        self.assert_only_skip(selection, "ci_failing")
+
+    def test_zero_minutes_disables_the_rule(self) -> None:
+        """A bound of 0 keeps every pending status pending."""
+        self.gh.add("alpha", 1, commits=stale_rollup("PENDING", 600))
+        selection, _, _ = self.run_main(*self.stale_args("0"))
+        self.assertEqual(selection["stale_status_minutes"], 0)
+        self.assert_only_skip(selection, "ci_pending")
+
+    def test_each_read_judges_age_at_its_own_time(self) -> None:
+        """A status that crosses the bound during the scan counts as stale."""
+        self.gh.add("alpha", 1, commits=stale_rollup("PENDING", 0))
+        self.gh.add("beta", 2, commits=stale_rollup("PENDING", 0))
+        clock = [datetime.now(UTC) + timedelta(minutes=5)]
+
+        class Clock(datetime):
+            @classmethod
+            def now(cls, tz: Any = None) -> Any:
+                return clock[0]
+
+        original = reads.pull_state
+
+        def read_then_advance(*args: Any) -> Any:
+            state = original(*args)
+            clock[0] += timedelta(minutes=25)
+            return state
+
+        with (
+            patch.object(select, "datetime", Clock),
+            patch.object(select.reads, "pull_state", side_effect=read_then_advance),
+        ):
+            selection, _, _ = self.run_main(*self.stale_args())
+        self.assertEqual([e["key"] for e in selection["pull_requests"]], ["beta-2"])
+        self.assertEqual(selection["skip_counts"]["ci_pending"], 1)
+        (row,) = selection["skipped"]
+        self.assertEqual(
+            (row["repository"], row["reason"]), ("org/alpha", "ci_pending")
+        )
+
+    def test_a_bad_bound_fails_the_run(self) -> None:
+        """A negative or non-numeric bound is an operator error."""
+        with self.assertRaises(SystemExit) as caught:
+            self.run_main(*self.stale_args("-1"))
+        self.assertEqual(caught.exception.code, 1)
+        self.assertIn("stale_status_minutes", self.stderr.getvalue())
+
+
 class AuthorAssociationTest(SelectionCase):
     """The approve mode reviews pull requests from organisation members alone."""
 
@@ -929,6 +1093,8 @@ class OutputsTest(SelectionCase):
         self.assertTrue(selection["dry_run"])
         self.assertEqual(selection["model"], "claude-opus-5.5")
         self.assertEqual(selection["approve_tiers"], ["low-risk", "trivial"])
+        self.assertEqual(selection["stale_status_contexts"], [])
+        self.assertEqual(selection["stale_status_minutes"], 0)
         self.assertEqual(selection["bot_login"], "my-app[bot]")
         self.assertEqual(selection["explicit_pull_requests"], [])
         self.assertEqual(selection["explicit_repositories"], [])
@@ -976,6 +1142,7 @@ class OutputsTest(SelectionCase):
                 "checks": [
                     {"name": "Testing", "status": "COMPLETED", "conclusion": "SUCCESS"}
                 ],
+                "stale_statuses": [],
                 "reviews": [],
                 "commits": [
                     {

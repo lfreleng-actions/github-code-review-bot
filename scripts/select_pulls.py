@@ -14,7 +14,8 @@ The mode decides whose pull requests qualify. ``approve`` reviews
 human authors alone and skips every bot. ``antagonistic`` inverts
 that: it reviews the bots the author file lists and skips humans and
 every other bot. CI state gates the approve mode alone, since only an
-approval relies on it.
+approval relies on it; a listed commit status waiting longer than
+``--stale-status-minutes`` is stale and does not hold CI at pending.
 
 Named pull requests bypass the exclusion list and the search alone;
 every other rule still applies to them. When both pull requests and
@@ -31,6 +32,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -39,15 +41,18 @@ import bot_github as github
 import ledger
 import pull_changes as changes
 import pull_reads as reads
+from pull_checks import StalePolicy
 from pull_reads import SelectionError
 from selection_inputs import (
     load_bot_authors,
     load_exclusions,
+    load_stale_statuses,
     parse_approve_tiers,
     parse_max_pull_requests,
     parse_mode,
     parse_pull_requests,
     parse_repositories,
+    parse_stale_status_minutes,
 )
 from selection_outputs import write_outputs
 from selection_rules import Rules, Skips, author_skip, first_skip
@@ -118,10 +123,17 @@ def searched_candidates(
     return kept, len(pulls)
 
 
-def read_state(candidate: dict[str, Any], *, named: bool) -> dict[str, Any]:
-    """Read one candidate's state, treating an unreadable named one as operator error."""
+def read_state(
+    candidate: dict[str, Any], *, named: bool, stale: StalePolicy
+) -> dict[str, Any]:
+    """Read one candidate's state, treating an unreadable named one as operator error.
+
+    The stale status rule judges age at the read itself, so a status
+    that crosses the bound while earlier candidates are read counts.
+    """
+    policy = replace(stale, now=datetime.now(UTC))
     try:
-        return reads.pull_state(candidate["repository"], candidate["number"])
+        return reads.pull_state(candidate["repository"], candidate["number"], policy)
     except github.GitHubError as exc:
         if not named:
             raise
@@ -137,6 +149,7 @@ def assess(
     named: bool,
     rules: Rules,
     skips: Skips,
+    stale: StalePolicy,
 ) -> list[dict[str, Any]]:
     """Read each candidate and keep the ones no skip rule catches.
 
@@ -145,7 +158,7 @@ def assess(
     """
     survivors: list[dict[str, Any]] = []
     for candidate in candidates:
-        state = read_state(candidate, named=named)
+        state = read_state(candidate, named=named, stale=stale)
         current = {**candidate, **{k: state[k] for k in ("repository", "url", "title")}}
         reason = first_skip(state, rules)
         if reason is not None:
@@ -201,6 +214,7 @@ def build_entry(state: dict[str, Any]) -> dict[str, Any]:
         "updated_at": state["updated_at"],
         "ci": state["ci"],
         "checks": state["checks"],
+        "stale_statuses": state["stale_statuses"],
         "reviews": state["reviews"],
         "commits": state["commits"],
         "files": state["files"],
@@ -241,6 +255,13 @@ def build_selection(args: argparse.Namespace) -> dict[str, Any]:
     exclusions = set(load_exclusions(args.exclude_file, args.exclude_repos))
     max_pull_requests = parse_max_pull_requests(args.max_pull_requests)
     approve_tiers = parse_approve_tiers(args.approve_tiers)
+    stale_minutes = parse_stale_status_minutes(args.stale_status_minutes)
+    stale_contexts = load_stale_statuses(args.stale_statuses_file)
+    stale = StalePolicy(
+        contexts=frozenset(stale_contexts),
+        minutes=stale_minutes,
+        now=datetime.now(UTC),
+    )
     bot_authors: list[str] = []
     handback_authors: list[str] = []
     if mode == "antagonistic":
@@ -278,7 +299,9 @@ def build_selection(args: argparse.Namespace) -> dict[str, Any]:
         candidates, seen = searched_candidates(
             args.org, explicit, exclusions=exclusions, rules=rules, skips=skips
         )
-    survivors = assess(candidates, named=bool(targets), rules=rules, skips=skips)
+    survivors = assess(
+        candidates, named=bool(targets), rules=rules, skips=skips, stale=stale
+    )
     chosen = choose(survivors, max_pull_requests=max_pull_requests, skips=skips)
     return {
         "schema": SCHEMA,
@@ -288,6 +311,8 @@ def build_selection(args: argparse.Namespace) -> dict[str, Any]:
         "dry_run": bool(args.dry_run),
         "model": args.model,
         "approve_tiers": approve_tiers,
+        "stale_status_contexts": stale_contexts,
+        "stale_status_minutes": stale_minutes,
         "bot_authors": bot_authors,
         "handback_authors": handback_authors,
         "bot_login": reads.bot_login(args.bot_slug),
@@ -321,6 +346,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--bot-authors-file", type=Path)
     parser.add_argument("--handback-authors-file", type=Path)
     parser.add_argument("--max-pull-requests", default="10")
+    parser.add_argument("--stale-statuses-file", type=Path)
+    parser.add_argument("--stale-status-minutes", default="0")
     parser.add_argument("--bot-slug", default="")
     return parser
 
