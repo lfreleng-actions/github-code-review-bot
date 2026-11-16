@@ -37,6 +37,11 @@ OTHER = "c" * 40
 PRE_COMMIT = "pre-commit.ci - pr"
 PATCH = "@@ -1 +1 @@\n-a\n+b"
 REST_PATH_RE = re.compile(r"repos/([^/]+/[^/]+)/pulls/(\d+)/reviews\?per_page=100")
+THREAD_PAGE = 50
+COMMENT_PAGE = 50
+# A fixture thread's full comment list, which the fake serves in pages
+# and strips from the thread read.
+ALL_COMMENTS = "allComments"
 COMPARE_PATH_RE = re.compile(
     r"repos/([^/]+/[^/]+)/compare/([0-9a-f]{40})\.\.\.([0-9a-f]{40})\?per_page=100"
 )
@@ -171,6 +176,12 @@ class FakeGitHub:
             tuple[str, str, str], tuple[list[dict[str, Any]], list[dict[str, Any]]]
         ] = {}
         self.reviews: dict[tuple[str, int], list[dict[str, Any]]] = {}
+        # Review threads per pull request for the earlier-rounds read,
+        # served in pages of ``THREAD_PAGE``; each read is recorded.
+        self.threads: dict[tuple[str, int], list[dict[str, Any]]] = {}
+        self.thread_reads: list[tuple[str, int]] = []
+        # Each read of a thread's older comments, by thread ID and cursor.
+        self.comment_reads: list[tuple[str, str]] = []
         self.calls: list[list[str]] = []
 
     def add(self, repo: str, number: int, **overrides: Any) -> None:
@@ -186,8 +197,13 @@ class FakeGitHub:
         if args[:2] == ["search", "prs"]:
             return json.dumps(self.search)
         if args[:2] == ["api", "graphql"]:
-            variables = json.loads(input or "{}")["variables"]
+            request = json.loads(input or "{}")
+            variables = request["variables"]
+            if "node(id: $id)" in request["query"]:
+                return self.older_comments(variables["id"], variables["cursor"])
             repo = f"{variables['owner']}/{variables['name']}"
+            if "reviewThreads(first: 50, after: $cursor)" in request["query"]:
+                return self.thread_page(repo, variables["number"], variables["cursor"])
             return json.dumps(
                 {
                     "data": {
@@ -209,6 +225,44 @@ class FakeGitHub:
             raise AssertionError(f"unexpected gh call {args}")
         key = (found.group(1), int(found.group(2)))
         return json.dumps([self.reviews.get(key, self.rest_reviews(key))])
+
+    def thread_page(self, repo: str, number: int, cursor: str | None) -> str:
+        """One page of the review threads, the cursor naming its start."""
+        key = (repo, number)
+        self.thread_reads.append(key)
+        start = int(cursor) if cursor is not None else 0
+        nodes = [
+            {k: v for k, v in node.items() if k != ALL_COMMENTS}
+            for node in self.threads.get(key, [])[start : start + THREAD_PAGE]
+        ]
+        more = start + THREAD_PAGE < len(self.threads.get(key, []))
+        connection = {
+            "pageInfo": {
+                "hasNextPage": more,
+                "endCursor": str(start + THREAD_PAGE) if more else None,
+            },
+            "nodes": nodes,
+        }
+        return json.dumps(
+            {"data": {"repository": {"pullRequest": {"reviewThreads": connection}}}}
+        )
+
+    def older_comments(self, thread_id: str, cursor: str) -> str:
+        """The page of a thread's comments before ``cursor``, an index into them."""
+        self.comment_reads.append((thread_id, cursor))
+        (thread,) = [
+            node
+            for threads in self.threads.values()
+            for node in threads
+            if node["id"] == thread_id
+        ]
+        end = int(cursor)
+        start = max(0, end - COMMENT_PAGE)
+        connection = {
+            "pageInfo": {"hasPreviousPage": start > 0, "startCursor": str(start)},
+            "nodes": thread[ALL_COMMENTS][start:end],
+        }
+        return json.dumps({"data": {"node": {"comments": connection}}})
 
     def diff(
         self, repository: str, base: str, head: str
@@ -1075,6 +1129,7 @@ class NamedPullRequestsTest(SelectionCase):
 class OutputsTest(SelectionCase):
     """The written files carry the documented shapes."""
 
+    @unittest.expectedFailure
     def test_selection_shape(self) -> None:
         """Header fields, every skip key, sorted entries and the entry shape."""
         self.gh.add("beta", 2)
@@ -1164,6 +1219,9 @@ class OutputsTest(SelectionCase):
                     }
                 ],
                 "diff_bytes": len(PATCH),
+                "earlier_reviews": [],
+                "earlier_findings": [],
+                "earlier_findings_truncated": False,
             },
         )
         self.assertRegex(entry["key"], r"^[A-Za-z0-9_.-]+$")
@@ -1706,6 +1764,319 @@ class AntagonisticSelectionTest(SelectionCase):
         self.add_bot("alpha", 1)
         selection, _, _ = self.run_main("--bot-authors-file", str(self.authors))
         self.assert_only_skip(selection, "bot_author")
+
+
+APP = "lf-releng-antagonistic-review-bot"
+APP_ACTOR = {"__typename": "Bot", "login": APP}
+FIRST_ROUND_AT = "2026-02-01T00:00:00Z"
+COPILOT_REST = {
+    "user": {"login": "copilot-pull-request-reviewer[bot]", "type": "Bot"},
+    "state": "COMMENTED",
+    "commit_id": HEAD,
+    "submitted_at": "2026-02-02T00:00:00Z",
+    "body": CLEAN,
+}
+
+
+def own_review(
+    body: str = "Two findings stand.", *, login: str = f"{APP}[bot]", kind: str = "Bot"
+) -> dict[str, Any]:
+    """A REST review of the earlier head ``OTHER``, by this App by default."""
+    return {
+        "user": {"login": login, "type": kind},
+        "state": "COMMENTED",
+        "commit_id": OTHER,
+        "submitted_at": FIRST_ROUND_AT,
+        "body": body,
+    }
+
+
+def thread_node(
+    actor: dict[str, Any] | None = None,
+    body: str = "The retry repeats the write.",
+    *,
+    replies: tuple[tuple[dict[str, Any] | None, str], ...] = (),
+    resolved: bool = False,
+    outdated: bool = False,
+    line: int | None = 12,
+    thread_id: str = "thread",
+) -> dict[str, Any]:
+    """One review thread as the earlier-rounds query returns it."""
+    first = {"id": "root", "body": body, "author": actor or APP_ACTOR}
+    later = [
+        {"id": f"reply-{index}", "body": text, "author": who}
+        for index, (who, text) in enumerate(replies)
+    ]
+    comments = [first, *later]
+    start = max(0, len(comments) - COMMENT_PAGE)
+    return {
+        "id": thread_id,
+        "isResolved": resolved,
+        "isOutdated": outdated,
+        "path": "scripts/fetch.py",
+        "line": line,
+        "root": {"nodes": [{**first, "pullRequestReview": {"commit": {"oid": OTHER}}}]},
+        "recent": {
+            "pageInfo": {"hasPreviousPage": start > 0, "startCursor": str(start)},
+            "nodes": comments[start:],
+        },
+        ALL_COMMENTS: comments,
+    }
+
+
+class EarlierRoundsTest(SelectionCase):
+    """A second round carries this App's earlier reviews and findings."""
+
+    def setUp(self) -> None:
+        """Write a bot author list naming Code Monkey."""
+        super().setUp()
+        holder = tempfile.TemporaryDirectory()
+        self.addCleanup(holder.cleanup)
+        self.authors = Path(holder.name) / "authors.txt"
+        self.authors.write_text("lf-releng-code-monkey-bot\n", encoding="utf-8")
+
+    def second_round(
+        self,
+        threads: list[dict[str, Any]],
+        history: list[dict[str, Any]] | None = None,
+    ) -> dict[str, Any]:
+        """Select one Code Monkey pull request this App reviewed before; its entry."""
+        (entry,) = self.run_second_round(threads, history)["pull_requests"]
+        return entry
+
+    def run_second_round(
+        self,
+        threads: list[dict[str, Any]],
+        history: list[dict[str, Any]] | None = None,
+    ) -> dict[str, Any]:
+        """Run one Code Monkey pull request this App reviewed before; selection.json."""
+        self.gh.search.append(search_pull("alpha", 1, author=MONKEY_SEARCH))
+        self.gh.pulls[("org/alpha", 1)] = pull_node(
+            "alpha", 1, author=MONKEY, reviews=COPILOT_ON_HEAD
+        )
+        self.gh.reviews[("org/alpha", 1)] = (
+            history if history is not None else [COPILOT_REST, own_review()]
+        )
+        self.gh.threads[("org/alpha", 1)] = threads
+        selection, _, _ = self.run_main(
+            "--mode",
+            "antagonistic",
+            "--approve-tiers",
+            "none",
+            "--bot-authors-file",
+            str(self.authors),
+            "--bot-slug",
+            APP,
+        )
+        return selection
+
+    @unittest.expectedFailure
+    def test_a_second_round_carries_the_first_rounds_review_and_threads(
+        self,
+    ) -> None:
+        """The review body and each thread arrive with their resolved and
+        outdated state, the reply that disputes one, and its review's head.
+        """
+        threads = [
+            thread_node(resolved=True, outdated=True, line=None),
+            thread_node(
+                body="The loop never ends.",
+                line=40,
+                replies=((MONKEY, "It ends at the cap; see line 38."),),
+            ),
+        ]
+        entry = self.second_round(threads)
+        self.assertEqual(
+            entry["earlier_reviews"],
+            [
+                {
+                    "head_sha": OTHER,
+                    "submitted_at": FIRST_ROUND_AT,
+                    "body": "Two findings stand.",
+                }
+            ],
+        )
+        self.assertEqual(
+            entry["earlier_findings"],
+            [
+                {
+                    "path": "scripts/fetch.py",
+                    "line": None,
+                    "body": "The retry repeats the write.",
+                    "head_sha": OTHER,
+                    "resolved": True,
+                    "outdated": True,
+                    "replies": [],
+                },
+                {
+                    "path": "scripts/fetch.py",
+                    "line": 40,
+                    "body": "The loop never ends.",
+                    "head_sha": OTHER,
+                    "resolved": False,
+                    "outdated": False,
+                    "replies": [
+                        {
+                            "author": "lf-releng-code-monkey-bot",
+                            "body": "It ends at the cap; see line 38.",
+                        }
+                    ],
+                },
+            ],
+        )
+        self.assertFalse(entry["earlier_findings_truncated"])
+        self.assertEqual(self.gh.thread_reads, [("org/alpha", 1)])
+
+    @unittest.expectedFailure
+    def test_a_human_named_like_the_app_contributes_nothing(self) -> None:
+        """A human's review is no earlier round, and a human's thread no finding."""
+        human = own_review("Looks wrong.", login=APP, kind="User")
+        entry = self.second_round([thread_node()], [COPILOT_REST, human])
+        self.assertEqual(entry["earlier_reviews"], [])
+        self.assertEqual(entry["earlier_findings"], [])
+        self.assertEqual(self.gh.thread_reads, [])
+        self.install(FakeGitHub())
+        lookalike = {"__typename": "User", "login": APP}
+        entry = self.second_round([thread_node(lookalike), thread_node()])
+        self.assertEqual(len(entry["earlier_findings"]), 1)
+        self.assertEqual(entry["earlier_findings"][0]["resolved"], False)
+
+    @unittest.expectedFailure
+    def test_copilot_and_maintainer_threads_are_left_out(self) -> None:
+        """Only threads this App opened are its findings."""
+        copilot = {"__typename": "Bot", "login": "copilot-pull-request-reviewer"}
+        maintainer = {"__typename": "User", "login": "alice"}
+        entry = self.second_round(
+            [thread_node(copilot), thread_node(maintainer), thread_node()]
+        )
+        self.assertEqual(
+            [f["body"] for f in entry["earlier_findings"]],
+            ["The retry repeats the write."],
+        )
+
+    @unittest.expectedFailure
+    def test_only_the_authors_newest_three_replies_are_kept(self) -> None:
+        """Replies by anyone but the author go; the author's keep their newest
+        three, each cut to 1 KiB.
+        """
+        others = (
+            ({"__typename": "User", "login": "alice"}, "Maintainer note."),
+            (APP_ACTOR, "This App again."),
+            ({"__typename": "User", "login": "lf-releng-code-monkey-bot"}, "Human."),
+            (None, "Deleted account."),
+        )
+        own = tuple((MONKEY, f"Reply {n}.") for n in range(4))
+        long = ((MONKEY, "é" * 1000),)
+        entry = self.second_round([thread_node(replies=own + others + long)])
+        replies = entry["earlier_findings"][0]["replies"]
+        self.assertEqual([r["body"] for r in replies[:2]], ["Reply 2.", "Reply 3."])
+        self.assertEqual(replies[2]["body"], "é" * 512)
+        self.assertEqual({r["author"] for r in replies}, {"lf-releng-code-monkey-bot"})
+        self.assertEqual(self.gh.comment_reads, [])
+
+    @unittest.expectedFailure
+    def test_replies_older_than_the_newest_fifty_comments_are_found(self) -> None:
+        """Fifty later comments by others do not hide the author's replies:
+        older pages are read until three are found or the thread ends.
+        """
+        alice = {"__typename": "User", "login": "alice"}
+        own = tuple((MONKEY, f"Reply {n}.") for n in range(4))
+        noise = tuple((alice, f"Note {n}.") for n in range(100))
+        entry = self.second_round([thread_node(replies=own + noise)])
+        replies = entry["earlier_findings"][0]["replies"]
+        self.assertEqual(
+            [r["body"] for r in replies], ["Reply 1.", "Reply 2.", "Reply 3."]
+        )
+        self.assertEqual(self.gh.comment_reads, [("thread", "55"), ("thread", "5")])
+        self.install(FakeGitHub())
+        entry = self.second_round([thread_node(replies=own[:2] + noise)])
+        replies = entry["earlier_findings"][0]["replies"]
+        self.assertEqual([r["body"] for r in replies], ["Reply 0.", "Reply 1."])
+        self.assertEqual(self.gh.comment_reads, [("thread", "53"), ("thread", "3")])
+
+    @unittest.expectedFailure
+    def test_the_thread_count_bound_sets_the_flag(self) -> None:
+        """Fifty threads, the oldest, read across pages; more sets the flag."""
+        threads = [thread_node(APP_ACTOR, f"Finding {n}.") for n in range(51)]
+        entry = self.second_round(threads[:50])
+        self.assertEqual(len(entry["earlier_findings"]), 50)
+        self.assertFalse(entry["earlier_findings_truncated"])
+        self.install(FakeGitHub())
+        entry = self.second_round(threads)
+        self.assertEqual(
+            [f["body"] for f in entry["earlier_findings"]],
+            [f"Finding {n}." for n in range(50)],
+        )
+        self.assertTrue(entry["earlier_findings_truncated"])
+        self.assertEqual(len(self.gh.thread_reads), 2)
+
+    @unittest.expectedFailure
+    def test_the_byte_bounds_hold(self) -> None:
+        """The findings stay within 64 KiB in all, and the review body is cut
+        to 8 KiB without splitting a character.
+        """
+        threads = [thread_node(APP_ACTOR, "x" * 8000) for _ in range(10)]
+        history = [COPILOT_REST, own_review("é" * 5000)]
+        entry = self.second_round(threads, history)
+        findings = entry["earlier_findings"]
+        self.assertLessEqual(len(json.dumps(findings).encode("utf-8")), 64 * 1024)
+        self.assertEqual(len(findings), 8)
+        self.assertTrue(entry["earlier_findings_truncated"])
+        self.assertEqual(entry["earlier_reviews"][0]["body"], "é" * 4096)
+
+    @unittest.expectedFailure
+    def test_the_byte_bound_counts_the_list_around_the_findings(self) -> None:
+        """Two findings whose list serialises to exactly 64 KiB both stay; one
+        byte more and the second goes, though the two alone still fit.
+        """
+        empty: dict[str, Any] = {
+            "path": "scripts/fetch.py",
+            "line": 12,
+            "body": "",
+            "head_sha": OTHER,
+            "resolved": False,
+            "outdated": False,
+            "replies": [],
+        }
+        # "[a, b]" adds two bytes per finding to the findings themselves.
+        fits = (64 * 1024 - 4) // 2 - len(json.dumps(empty).encode("utf-8"))
+        entry = self.second_round([thread_node(APP_ACTOR, "x" * fits)] * 2)
+        findings = entry["earlier_findings"]
+        self.assertEqual(len(json.dumps(findings).encode("utf-8")), 64 * 1024)
+        self.assertFalse(entry["earlier_findings_truncated"])
+        self.install(FakeGitHub())
+        entry = self.second_round([thread_node(APP_ACTOR, "x" * (fits + 1))] * 2)
+        self.assertEqual(len(entry["earlier_findings"]), 1)
+        self.assertTrue(entry["earlier_findings_truncated"])
+
+    @unittest.expectedFailure
+    def test_a_first_round_and_an_approve_entry_make_no_thread_read(self) -> None:
+        """No earlier review by this App, or the approve mode, costs nothing."""
+        entry = self.second_round([thread_node()], [COPILOT_REST])
+        self.assertEqual(entry["earlier_reviews"], [])
+        self.assertEqual(entry["earlier_findings"], [])
+        self.assertFalse(entry["earlier_findings_truncated"])
+        self.assertEqual(self.gh.thread_reads, [])
+        self.install(FakeGitHub())
+        self.gh.add("alpha", 1)
+        self.gh.threads[("org/alpha", 1)] = [thread_node()]
+        selection, _, _ = self.run_main("--bot-slug", APP)
+        (entry,) = selection["pull_requests"]
+        self.assertEqual(entry["earlier_findings"], [])
+        self.assertEqual(self.gh.thread_reads, [])
+
+    @unittest.expectedFailure
+    def test_the_earlier_rounds_count_toward_the_selection_size(self) -> None:
+        """An entry its earlier findings push past the byte cap is capped."""
+        entry = self.second_round([])
+        small = len(json.dumps(entry, indent=2).encode("utf-8"))
+        with patch.object(select, "MAX_SELECTION_BYTES", small + 100):
+            self.install(FakeGitHub())
+            self.assertEqual(len(self.second_round([])["earlier_reviews"]), 1)
+            self.install(FakeGitHub())
+            selection = self.run_second_round([thread_node(APP_ACTOR, "x" * 4000)])
+        self.assertEqual(selection["pull_requests"], [])
+        self.assertEqual(selection["skip_counts"]["cap"], 1)
 
 
 if __name__ == "__main__":
