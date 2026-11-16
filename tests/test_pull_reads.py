@@ -967,7 +967,7 @@ class PullComparisonCommitsTest(ReadsCase):
 
 
 class PullReviewsTest(ReadsCase):
-    """``pull_reviews`` keeps Copilot's review bodies alone, bounded."""
+    """``pull_reviews`` keeps Copilot's review bodies and this App's, bounded."""
 
     def read(self, entries: list[Any]) -> list[dict[str, Any]]:
         """Run ``pull_reviews`` against one page of REST reviews."""
@@ -1017,6 +1017,100 @@ class PullReviewsTest(ReadsCase):
         (over,) = self.read([{**entry, "body": "x" * (limit + 1)}])
         self.assertIsNone(over["body"])
         self.assertIsNone(over["submitted_at"])
+
+    def test_this_apps_body_kept_and_cut(self) -> None:
+        """The App's own body is kept for the next round, cut to 8 KiB;
+        a human named like it keeps none.
+        """
+        own = {
+            "user": {"login": "review-app[bot]", "type": "Bot"},
+            "state": "COMMENTED",
+            "commit_id": HEAD,
+            "submitted_at": None,
+            "body": "é" * 5000,
+        }
+        lookalike = {**own, "user": {"login": "review-app", "type": "User"}}
+        entries = [own, lookalike]
+        with patch.object(github, "run_gh", return_value=json.dumps([entries])):
+            kept, human = changes.pull_reviews("org/alpha", 7, "review-app[bot]")
+        self.assertEqual(kept["body"], "é" * (changes.MAX_OWN_BODY_BYTES // 2))
+        self.assertIsNone(human["body"])
+        self.assertEqual([r["body"] for r in self.read(entries)], [None, None])
+
+
+class EarlierFindingsTest(ReadsCase):
+    """``earlier_findings`` refuses a malformed thread rather than guess."""
+
+    def read(self, connection: dict[str, Any]) -> tuple[list[Any], bool]:
+        """Run ``earlier_findings`` against one page of review threads."""
+        rounds = import_module("pull_rounds")
+        payload = {"repository": {"pullRequest": {"reviewThreads": connection}}}
+        with patch.object(github, "run_gh", return_value=json.dumps({"data": payload})):
+            return rounds.earlier_findings(
+                "org/alpha",
+                7,
+                "review-app[bot]",
+                {"login": "monkey", "is_bot": True},
+            )
+
+    @staticmethod
+    def node(**overrides: Any) -> dict[str, Any]:
+        """One thread the App opened."""
+        root = {
+            "id": "c1",
+            "body": "Finding.",
+            "author": actor("review-app", "Bot"),
+            "pullRequestReview": None,
+        }
+        node: dict[str, Any] = {
+            "id": "t1",
+            "isResolved": False,
+            "isOutdated": False,
+            "path": "a.py",
+            "line": 3,
+            "root": {"nodes": [root]},
+            "recent": {
+                "pageInfo": {"hasPreviousPage": False, "startCursor": None},
+                "nodes": [root],
+            },
+        }
+        node.update(overrides)
+        return node
+
+    def test_a_review_less_thread_has_no_head(self) -> None:
+        """A first comment GitHub ties to no review records a null head."""
+        page = {"hasNextPage": False, "endCursor": None}
+        findings, truncated = self.read({"pageInfo": page, "nodes": [self.node()]})
+        self.assertIsNone(findings[0]["head_sha"])
+        self.assertFalse(truncated)
+
+    def test_malformed_threads_raise(self) -> None:
+        """A bad line, path, state or page marker fails the read, a comments
+        page marker included.
+        """
+        page = {"hasNextPage": False, "endCursor": None}
+        cases: dict[str, dict[str, Any]] = {
+            "line": {"pageInfo": page, "nodes": [self.node(line="3")]},
+            "path": {"pageInfo": page, "nodes": [self.node(path=None)]},
+            "resolved": {"pageInfo": page, "nodes": [self.node(isResolved=None)]},
+            "page": {"nodes": [self.node()]},
+            "cursor": {"pageInfo": {"hasNextPage": True}, "nodes": []},
+            "comments page": {
+                "pageInfo": page,
+                "nodes": [self.node(recent={"nodes": []})],
+            },
+            "comments cursor": {
+                "pageInfo": page,
+                "nodes": [
+                    self.node(
+                        recent={"pageInfo": {"hasPreviousPage": True}, "nodes": []}
+                    )
+                ],
+            },
+        }
+        for name, connection in cases.items():
+            with self.subTest(name=name), self.assertRaises(github.GitHubError):
+                self.read(connection)
 
 
 if __name__ == "__main__":

@@ -41,6 +41,7 @@ import bot_github as github
 import ledger
 import pull_changes as changes
 import pull_reads as reads
+import pull_rounds as rounds
 from pull_checks import StalePolicy
 from pull_reads import SelectionError
 from selection_inputs import (
@@ -154,7 +155,9 @@ def assess(
     """Read each candidate and keep the ones no skip rule catches.
 
     Each survivor carries its state plus the files and commits the
-    entry needs; the diff is read last because it is the costly part.
+    entry needs, and in the antagonistic mode this App's earlier
+    rounds; the diff and the rounds are read last because they are the
+    costly part.
     """
     survivors: list[dict[str, Any]] = []
     for candidate in candidates:
@@ -174,9 +177,43 @@ def assess(
             skips.add(current, "moved")
             continue
         survivors.append(
-            {**state, "files": files, "diff_bytes": diff_bytes, "commits": commits}
+            {
+                **state,
+                "files": files,
+                "diff_bytes": diff_bytes,
+                "commits": commits,
+                **earlier_rounds(state, rules),
+            }
         )
     return survivors
+
+
+def earlier_rounds(state: dict[str, Any], rules: Rules) -> dict[str, Any]:
+    """This App's earlier reviews and findings on the pull request.
+
+    Empty, at no read, in the approve mode and on a first round: only
+    a full review history holding a submitted review by this App
+    sends the selection to read the review threads.
+    """
+    rounds_read: dict[str, Any] = {
+        "earlier_reviews": [],
+        "earlier_findings": [],
+        "earlier_findings_truncated": False,
+    }
+    if rules.mode != "antagonistic" or not rules.bot_login or rules.history is None:
+        return rounds_read
+    repository, number = str(state["repository"]), int(state["number"])
+    reviews = rounds.earlier_reviews(rules.history(repository, number), rules.bot_login)
+    if not reviews:
+        return rounds_read
+    findings, truncated = rounds.earlier_findings(
+        repository, number, rules.bot_login, state["author"]
+    )
+    return {
+        "earlier_reviews": reviews,
+        "earlier_findings": findings,
+        "earlier_findings_truncated": truncated,
+    }
 
 
 def moved(state: dict[str, Any]) -> bool:
@@ -219,6 +256,9 @@ def build_entry(state: dict[str, Any]) -> dict[str, Any]:
         "commits": state["commits"],
         "files": state["files"],
         "diff_bytes": state["diff_bytes"],
+        "earlier_reviews": state["earlier_reviews"],
+        "earlier_findings": state["earlier_findings"],
+        "earlier_findings_truncated": state["earlier_findings_truncated"],
     }
 
 
@@ -279,7 +319,9 @@ def build_selection(args: argparse.Namespace) -> dict[str, Any]:
         """The full review history, read once per pull request."""
         key = (repository, number)
         if key not in histories:
-            histories[key] = changes.pull_reviews(repository, number)
+            histories[key] = changes.pull_reviews(
+                repository, number, reads.bot_login(args.bot_slug)
+            )
         return histories[key]
 
     rules = Rules(
