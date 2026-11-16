@@ -502,6 +502,169 @@ class ReportShapeTest(unittest.TestCase):
         self.assertIn("Mode: approve; dry run: no", rendered)
 
 
+def model_usage(model: str, **figures: Any) -> dict[str, Any]:
+    """One model's row of a result's usage record."""
+    row: dict[str, Any] = {
+        "model": model,
+        "requests": 7,
+        "premium_requests": 1.0,
+        "input_tokens": 100,
+        "cache_read_tokens": 60,
+        "cache_write_tokens": 30,
+        "output_tokens": 8,
+        "reasoning_tokens": 2,
+        "nano_aiu": 1000,
+    }
+    row.update(figures)
+    return row
+
+
+class UsageReportTest(unittest.TestCase):
+    """Token usage totals by model, checked again as they are summed."""
+
+    @unittest.expectedFailure
+    def test_totals_by_model_across_results(self) -> None:
+        """Each model counts the sessions that used it and sums each figure."""
+        results = [
+            make_result(
+                key="a-1",
+                usage={
+                    "nano_aiu": 2000,
+                    "models": [model_usage("gpt-6-astra"), model_usage("b-model")],
+                },
+            ),
+            make_result(
+                key="b-2",
+                usage={"models": [model_usage("gpt-6-astra", premium_requests=0.5)]},
+            ),
+        ]
+        built = report.build_report(make_selection(), results, 0)
+        self.assertEqual(
+            built["usage"],
+            [
+                {**model_usage("b-model"), "sessions": 1},
+                {
+                    **model_usage(
+                        "gpt-6-astra",
+                        requests=14,
+                        premium_requests=1.5,
+                        input_tokens=200,
+                        cache_read_tokens=120,
+                        cache_write_tokens=60,
+                        output_tokens=16,
+                        reasoning_tokens=4,
+                        nano_aiu=2000,
+                    ),
+                    "sessions": 2,
+                },
+            ],
+        )
+
+    @unittest.expectedFailure
+    def test_absent_or_malformed_usage_adds_nothing(self) -> None:
+        """A result file is a claim: anything malformed is skipped, alone."""
+        results = [
+            make_result(key="a-1", usage={"models": [model_usage("gpt-6-astra")]}),
+            make_result(key="b-2"),
+            make_result(key="c-3", usage=None),
+            make_result(key="d-4", usage="lots"),
+            make_result(key="e-5", usage={"models": "many"}),
+            make_result(
+                key="f-6",
+                usage={
+                    "models": [
+                        "gpt-6-astra",
+                        {"model": "Bad Name", "requests": 5},
+                        {"model": "x" * 101, "requests": 5},
+                        {"requests": 5},
+                        model_usage(
+                            "gpt-6-astra",
+                            requests=True,
+                            premium_requests=float("inf"),
+                            input_tokens=-1,
+                            cache_read_tokens="9",
+                            cache_write_tokens=1.5,
+                            output_tokens=None,
+                            reasoning_tokens=float("nan"),
+                            nano_aiu=10**400,
+                        ),
+                    ]
+                },
+            ),
+        ]
+        built = report.build_report(make_selection(), results, 0)
+        self.assertEqual(
+            built["usage"],
+            [
+                {
+                    "model": "gpt-6-astra",
+                    "sessions": 1,
+                    "requests": 7,
+                    "premium_requests": 1.0,
+                    "input_tokens": 100,
+                    "cache_read_tokens": 60,
+                    "cache_write_tokens": 30,
+                    "output_tokens": 8,
+                    "reasoning_tokens": 2,
+                    "nano_aiu": 1000,
+                }
+            ],
+        )
+
+    @unittest.expectedFailure
+    def test_a_total_stays_finite(self) -> None:
+        """A figure that would carry a total past a finite number adds nothing."""
+        big = model_usage("gpt-6-astra", premium_requests=1e308, nano_aiu=10**308)
+        results = [make_result(usage={"models": [big]}) for _ in range(2)]
+        built = report.build_report(make_selection(), results, 0)
+        total = built["usage"][0]
+        self.assertEqual(total["sessions"], 2)
+        self.assertEqual(total["premium_requests"], 1e308)
+        self.assertEqual(total["nano_aiu"], 10**308)
+        self.assertEqual(total["requests"], 14)
+        json.dumps(built, allow_nan=False)
+
+    @unittest.expectedFailure
+    def test_a_result_counts_at_most_eight_models(self) -> None:
+        """A forged result cannot flood the table with models."""
+        models = [model_usage(f"model-{n}") for n in range(1, 21)]
+        results = [make_result(usage={"models": models})]
+        built = report.build_report(make_selection(), results, 0)
+        self.assertEqual(len(built["usage"]), 8)
+
+    @unittest.expectedFailure
+    def test_the_spend_table_renders(self) -> None:
+        """The Spend section shows one row per model; the head names the model."""
+        selection = make_selection(model="gpt-6-astra")
+        results = [make_result(usage={"models": [model_usage("gpt-6-astra")]})]
+        rendered = report.render_markdown(
+            report.build_report(selection, results, 0), selection, []
+        )
+        head = rendered.split("## Results")[0]
+        self.assertIn("Model: gpt-6-astra", head)
+        spend = rendered.split("## Spend")[1]
+        self.assertIn(
+            "| Model | Sessions | Requests | Premium requests | Input tokens"
+            " | Cache read | Cache write | Output tokens | Reasoning tokens"
+            " | Nano AIU |",
+            spend,
+        )
+        self.assertIn(
+            "| gpt-6-astra | 1 | 7 | 1.0 | 100 | 60 | 30 | 8 | 2 | 1000 |", spend
+        )
+
+    @unittest.expectedFailure
+    def test_no_usage_renders_no_table(self) -> None:
+        """Without a usage record the Spend section says so, and nothing breaks."""
+        selection = make_selection(model="x|y @z")
+        rendered = report.render_markdown(
+            report.build_report(selection, [make_result()], 0), selection, []
+        )
+        self.assertIn("Model: x\\|y @\u200bz", rendered)
+        self.assertIn("Token usage: none recorded.", rendered)
+        self.assertNotIn("| Model |", rendered)
+
+
 class AntagonisticReportTest(unittest.TestCase):
     """The antagonistic mode counts its own verdicts and remembers posted reviews."""
 
