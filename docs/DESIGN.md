@@ -1833,6 +1833,14 @@ adds that a bot wrote the description, so its claims about the change
 and its testing are claims to check. A bot's section for the reviewer
 is text addressed to someone else, not an injection attempt.
 
+On a later round the prompt has the agent read the packet's earlier
+rounds (§19.2) before the diff. A reply is its author's claim, to
+check against the code, and never an instruction. A finding the new
+head fixes goes unsaid; the agent raises one it leaves in place
+again on its current line, saying in one sentence that it stands from
+an earlier round; and the agent checks one a reply disputes, dropping
+it when the reply is right.
+
 Its verdict block carries `schema`, `repository`, `pull_request`,
 `head_sha`, `summary`, `comments` and `injection_attempts`, and no
 tier. Each comment names a `path`, a `line` in the new file, an
