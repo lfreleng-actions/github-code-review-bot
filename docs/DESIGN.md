@@ -857,8 +857,8 @@ model choice, `approve_tiers`, `pull_requests`, `repositories`,
 and `reassess`.
 
 The `options` job maps the display name to the identifier the CLI
-accepts: Claude Opus 5.5 to `claude-opus-5.5`, Claude Fable 5.1 to
-`claude-fable-5.1`, Claude Sonnet 5.5 to `claude-sonnet-5.5`, GPT-6
+accepts: Claude Opus 5.5 to `claude-opus-5.5`, Claude Fable 5.2 to
+`claude-fable-5.2`, Claude Sonnet 5.5 to `claude-sonnet-5.5`, GPT-6
 Astra to `gpt-6-astra`. The caller passes `mode: approve` and
 `org: github.repository_owner`, so a fork's scheduled runs stay
 inside the fork; pins the assets to `github.sha`; runs trusted jobs
@@ -1017,7 +1017,7 @@ whose reason names a missing session.
 ### 10.3 Models
 
 The default model is `claude-opus-5.5`. The dispatch form offers
-Claude Opus 5.5, Claude Fable 5.1, Claude Sonnet 5.5 and GPT-6
+Claude Opus 5.5, Claude Fable 5.2, Claude Sonnet 5.5 and GPT-6
 Astra (§9.2). The antagonistic caller defaults to GPT-6 Astra
 (§19.7). The selection records the model, the review body
 names it from the selection, and `usage.json` supplies premium

@@ -43,7 +43,7 @@ on:
         options:
           - 'GPT-6 Astra'
           - 'Claude Opus 5.5'
-          - 'Claude Fable 5.1'
+          - 'Claude Fable 5.2'
           - 'Claude Sonnet 5.5'
         default: 'GPT-6 Astra'
       pull_requests:
@@ -135,7 +135,7 @@ jobs:
           case "$MODEL" in
             'GPT-6 Astra') id='gpt-6-astra' ;;
             'Claude Opus 5.5') id='claude-opus-5.5' ;;
-            'Claude Fable 5.1') id='claude-fable-5.1' ;;
+            'Claude Fable 5.2') id='claude-fable-5.2' ;;
             'Claude Sonnet 5.5') id='claude-sonnet-5.5' ;;
             *) echo "::error::Unknown model $MODEL"; exit 1 ;;
           esac
