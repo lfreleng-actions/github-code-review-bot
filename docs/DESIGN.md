@@ -1206,6 +1206,7 @@ scripts/ledger.py                        run-to-run memory (§6)
 scripts/pull_reads.py                    GitHub reads for selection
 scripts/pull_checks.py                   CI rollup, stale status rule
 scripts/pull_changes.py                  bounded files and commits
+scripts/pull_rounds.py                   earlier rounds (§19.2)
 scripts/select_pulls.py                  selection flow (§5)
 scripts/selection_rules.py               skip rules, both modes (§5)
 scripts/selection_inputs.py              input parsing contract
@@ -1425,7 +1426,16 @@ against the trusted `selection.json`.
                  "additions": 1, "deletions": 1,
                  "previous_path": null, "patch": "@@ ... @@",
                  "patch_truncated": false}],
-      "diff_bytes": 1234
+      "diff_bytes": 1234,
+      "earlier_reviews": [{"head_sha": "<40 hex>", "submitted_at": "...",
+                           "body": "bounded 8 KiB"}],
+      "earlier_findings": [{"path": "scripts/fetch.py", "line": 44,
+                            "body": "as posted",
+                            "head_sha": "<40 hex>",
+                            "resolved": false, "outdated": true,
+                            "replies": [{"author": "login",
+                                         "body": "bounded 1 KiB"}]}],
+      "earlier_findings_truncated": false
     }
   ]
 }
@@ -1445,6 +1455,11 @@ a file GitHub returns without a patch has `patch: null`.
 `stale_status_contexts` and `stale_status_minutes` record the stale
 status rule (§5), which apply re-applies at its live re-read;
 `stale_statuses` names the listed contexts the entry's CI left out.
+`earlier_reviews`, `earlier_findings` and `earlier_findings_truncated`
+carry this App's earlier rounds in the antagonistic mode (§19.2); an
+approve entry and a first round carry empty lists and `false`. Like
+every other field, they count toward the entry's size when `choose`
+caps the selection by bytes.
 
 ### 18.2 `matrix.json` (select to workflow)
 
@@ -1746,16 +1761,52 @@ saying the review was clean does not make it so, and the check runs
 before any agent session starts. The approve mode does not read the
 body.
 
-The selection keeps the body of Copilot's reviews alone from the
-history read (`pull_changes.pull_reviews`), and drops one past the
+The selection keeps the body of Copilot's reviews from the history
+read (`pull_changes.pull_reviews`), and drops one past the
 classifier's 64 KiB bound rather than store it, so a large review
-cannot grow the run's memory. `review_verdict.py`,
-`review_sections.py` and `review_text.py`, with
-`tests/test_review_verdict.py` and `tests/review_fixtures.py`, come
-byte for byte from
+cannot grow the run's memory. It keeps the body of this App's own
+reviews too, cut to 8 KiB, for the next round, and drops every other
+review's body. `review_verdict.py`, `review_sections.py` and
+`review_text.py`, with `tests/test_review_verdict.py` and
+`tests/review_fixtures.py`, come byte for byte from
 [`lfreleng-actions/github-code-monkey-bot`](https://github.com/lfreleng-actions/github-code-monkey-bot)
 at commit `7506d5e`. Fix them in Code Monkey first, then copy; never
 patch a copy alone.
+
+**Earlier rounds.** Each round otherwise starts blind: the packet's
+`reviews` give an earlier review's author, state, commit and time,
+and nothing it said, so a session could neither confirm a fix nor
+avoid raising a point again in other words. For a pull request that
+reaches selection, after every rule above and the diff read, the
+selection checks the full review history for a submitted review by
+this App (a bot by GitHub's account type, its login matching
+`bot_login`). When there is one, it records:
+
+- `earlier_reviews`: this App's submitted reviews, oldest first, each
+  with its `head_sha`, `submitted_at` and `body`, cut to 8 KiB;
+- `earlier_findings`: this App's review threads, read through
+  GraphQL (`pull_rounds.earlier_findings`) in GitHub's order, oldest
+  first. A thread is this App's when its first comment's author is,
+  by the same bot test, so a human named like the App, Copilot and a
+  maintainer contribute nothing. Each finding has the thread's `path`,
+  its `line` (null when GitHub no longer places it), the first
+  comment's `body` as posted, the `head_sha` of the review it came
+  with, `resolved`, `outdated`, and `replies`: up to the three newest
+  later comments by the pull request's author (same login and same
+  account type), each cut to 1 KiB, with the author's login. The
+  thread read carries a thread's newest 50 comments; while those hold
+  fewer than three replies by the author, the selection reads older
+  pages (`pull_rounds.replies_of`) until it finds three or the thread
+  ends, so other participants cannot push a dispute out of sight;
+- `earlier_findings_truncated`: `true` when this App has more threads
+  than the 50, or the 64 KiB the findings take as a serialised list,
+  the entry holds.
+
+An approve entry and a first round carry empty lists and cost no
+thread read. A failed thread read fails the selection like every
+other read it makes. The apply job sanitised this App's comments when
+it posted them; a reply is the author's words, bounded here, and the
+prompt treats it as a claim to check (§19.4).
 
 `approve_tiers`
 must be `none`; the select job and the selection script both refuse

@@ -1018,7 +1018,6 @@ class PullReviewsTest(ReadsCase):
         self.assertIsNone(over["body"])
         self.assertIsNone(over["submitted_at"])
 
-    @unittest.expectedFailure
     def test_this_apps_body_kept_and_cut(self) -> None:
         """The App's own body is kept for the next round, cut to 8 KiB;
         a human named like it keeps none.
@@ -1078,7 +1077,6 @@ class EarlierFindingsTest(ReadsCase):
         node.update(overrides)
         return node
 
-    @unittest.expectedFailure
     def test_a_review_less_thread_has_no_head(self) -> None:
         """A first comment GitHub ties to no review records a null head."""
         page = {"hasNextPage": False, "endCursor": None}
@@ -1086,7 +1084,6 @@ class EarlierFindingsTest(ReadsCase):
         self.assertIsNone(findings[0]["head_sha"])
         self.assertFalse(truncated)
 
-    @unittest.expectedFailure
     def test_malformed_threads_raise(self) -> None:
         """A bad line, path, state or page marker fails the read, a comments
         page marker included.

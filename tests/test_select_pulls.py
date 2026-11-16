@@ -1129,7 +1129,6 @@ class NamedPullRequestsTest(SelectionCase):
 class OutputsTest(SelectionCase):
     """The written files carry the documented shapes."""
 
-    @unittest.expectedFailure
     def test_selection_shape(self) -> None:
         """Header fields, every skip key, sorted entries and the entry shape."""
         self.gh.add("beta", 2)
@@ -1870,7 +1869,6 @@ class EarlierRoundsTest(SelectionCase):
         )
         return selection
 
-    @unittest.expectedFailure
     def test_a_second_round_carries_the_first_rounds_review_and_threads(
         self,
     ) -> None:
@@ -1927,7 +1925,6 @@ class EarlierRoundsTest(SelectionCase):
         self.assertFalse(entry["earlier_findings_truncated"])
         self.assertEqual(self.gh.thread_reads, [("org/alpha", 1)])
 
-    @unittest.expectedFailure
     def test_a_human_named_like_the_app_contributes_nothing(self) -> None:
         """A human's review is no earlier round, and a human's thread no finding."""
         human = own_review("Looks wrong.", login=APP, kind="User")
@@ -1941,7 +1938,6 @@ class EarlierRoundsTest(SelectionCase):
         self.assertEqual(len(entry["earlier_findings"]), 1)
         self.assertEqual(entry["earlier_findings"][0]["resolved"], False)
 
-    @unittest.expectedFailure
     def test_copilot_and_maintainer_threads_are_left_out(self) -> None:
         """Only threads this App opened are its findings."""
         copilot = {"__typename": "Bot", "login": "copilot-pull-request-reviewer"}
@@ -1954,7 +1950,6 @@ class EarlierRoundsTest(SelectionCase):
             ["The retry repeats the write."],
         )
 
-    @unittest.expectedFailure
     def test_only_the_authors_newest_three_replies_are_kept(self) -> None:
         """Replies by anyone but the author go; the author's keep their newest
         three, each cut to 1 KiB.
@@ -1974,7 +1969,6 @@ class EarlierRoundsTest(SelectionCase):
         self.assertEqual({r["author"] for r in replies}, {"lf-releng-code-monkey-bot"})
         self.assertEqual(self.gh.comment_reads, [])
 
-    @unittest.expectedFailure
     def test_replies_older_than_the_newest_fifty_comments_are_found(self) -> None:
         """Fifty later comments by others do not hide the author's replies:
         older pages are read until three are found or the thread ends.
@@ -1994,7 +1988,6 @@ class EarlierRoundsTest(SelectionCase):
         self.assertEqual([r["body"] for r in replies], ["Reply 0.", "Reply 1."])
         self.assertEqual(self.gh.comment_reads, [("thread", "53"), ("thread", "3")])
 
-    @unittest.expectedFailure
     def test_the_thread_count_bound_sets_the_flag(self) -> None:
         """Fifty threads, the oldest, read across pages; more sets the flag."""
         threads = [thread_node(APP_ACTOR, f"Finding {n}.") for n in range(51)]
@@ -2010,7 +2003,6 @@ class EarlierRoundsTest(SelectionCase):
         self.assertTrue(entry["earlier_findings_truncated"])
         self.assertEqual(len(self.gh.thread_reads), 2)
 
-    @unittest.expectedFailure
     def test_the_byte_bounds_hold(self) -> None:
         """The findings stay within 64 KiB in all, and the review body is cut
         to 8 KiB without splitting a character.
@@ -2024,7 +2016,6 @@ class EarlierRoundsTest(SelectionCase):
         self.assertTrue(entry["earlier_findings_truncated"])
         self.assertEqual(entry["earlier_reviews"][0]["body"], "é" * 4096)
 
-    @unittest.expectedFailure
     def test_the_byte_bound_counts_the_list_around_the_findings(self) -> None:
         """Two findings whose list serialises to exactly 64 KiB both stay; one
         byte more and the second goes, though the two alone still fit.
@@ -2049,7 +2040,6 @@ class EarlierRoundsTest(SelectionCase):
         self.assertEqual(len(entry["earlier_findings"]), 1)
         self.assertTrue(entry["earlier_findings_truncated"])
 
-    @unittest.expectedFailure
     def test_a_first_round_and_an_approve_entry_make_no_thread_read(self) -> None:
         """No earlier review by this App, or the approve mode, costs nothing."""
         entry = self.second_round([thread_node()], [COPILOT_REST])
@@ -2065,7 +2055,6 @@ class EarlierRoundsTest(SelectionCase):
         self.assertEqual(entry["earlier_findings"], [])
         self.assertEqual(self.gh.thread_reads, [])
 
-    @unittest.expectedFailure
     def test_the_earlier_rounds_count_toward_the_selection_size(self) -> None:
         """An entry its earlier findings push past the byte cap is capped."""
         entry = self.second_round([])

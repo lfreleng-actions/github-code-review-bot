@@ -27,6 +27,9 @@ from pull_reads import (
 from review_verdict import MAX_BODY_BYTES as MAX_REVIEW_BODY_BYTES
 from selection_inputs import bot_identity
 
+# This App's own review bodies, which the next round reads.
+MAX_OWN_BODY_BYTES = 8 * 1024
+
 
 def pull_comparison(
     repository: str, base_sha: str, head_sha: str
@@ -137,7 +140,22 @@ def commit_entry(item: Any, context: str) -> dict[str, Any]:
     }
 
 
-def pull_reviews(repository: str, number: int) -> list[dict[str, Any]]:
+def kept_body(
+    body: Any, login: Any, *, is_bot: bool, own_login: str | None
+) -> str | None:
+    """The review body the history keeps, or None."""
+    if not is_bot or not isinstance(login, str) or not isinstance(body, str):
+        return None
+    if is_copilot(bot_identity(login)):
+        return body if len(body.encode("utf-8")) <= MAX_REVIEW_BODY_BYTES else None
+    if own_login is not None and bot_identity(login) == bot_identity(own_login):
+        return truncate_utf8(body, MAX_OWN_BODY_BYTES)
+    return None
+
+
+def pull_reviews(
+    repository: str, number: int, own_login: str | None = None
+) -> list[dict[str, Any]]:
     """Every review of the pull request, oldest first, however many there are.
 
     The state query reads the last 100. A rule that must know whether a
@@ -149,8 +167,11 @@ def pull_reviews(repository: str, number: int) -> list[dict[str, Any]]:
     The body is kept for Copilot's reviews alone, which the
     antagonistic mode classifies (DESIGN.md section 19.2), and only up
     to the size the classifier reads: a larger one is dropped to null,
-    which the classifier reads as no assessment, never clean. Every
-    other review's body is null, so no other text grows the run.
+    which the classifier reads as no assessment, never clean. The
+    body of a review by the App ``own_login`` names is kept too, cut to
+    ``MAX_OWN_BODY_BYTES``, for the next round to read (section 19.2).
+    Only an author GitHub marks as a bot keeps a body, and every other
+    review's body is null, so no other text grows the run.
     """
     context = f"{repository}#{number} review"
     reviews: list[dict[str, Any]] = []
@@ -162,16 +183,6 @@ def pull_reviews(repository: str, number: int) -> list[dict[str, Any]]:
         login = data.get("login")
         commit = entry.get("commit_id")
         is_bot = data.get("type") == "Bot"
-        body = entry.get("body")
-        kept = (
-            body
-            if is_bot
-            and isinstance(login, str)
-            and is_copilot(bot_identity(login))
-            and isinstance(body, str)
-            and len(body.encode("utf-8")) <= MAX_REVIEW_BODY_BYTES
-            else None
-        )
         reviews.append(
             {
                 "author": login if isinstance(login, str) else None,
@@ -179,7 +190,9 @@ def pull_reviews(repository: str, number: int) -> list[dict[str, Any]]:
                 "state": github.require_str(entry, "state", context),
                 "commit": commit if isinstance(commit, str) else None,
                 "submitted_at": optional_str(entry.get("submitted_at"), context),
-                "body": kept,
+                "body": kept_body(
+                    entry.get("body"), login, is_bot=is_bot, own_login=own_login
+                ),
             }
         )
     return reviews
