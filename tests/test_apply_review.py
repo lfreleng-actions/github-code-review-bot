@@ -176,7 +176,6 @@ class CheckCommandTests(unittest.TestCase):
         self.assertIn("repo#157", summary)
         self.assertIn("Approvable: yes", summary)
 
-    @unittest.expectedFailure
     def test_an_unreadable_usage_file_still_completes(self) -> None:
         """A bad or absent usage.json costs the usage record, not the check."""
         (self.session / "session-summary.md").write_text(verdict_text())
@@ -300,7 +299,6 @@ class ApplyCommandTests(unittest.TestCase):
         self.assertEqual(result["reasons"], ["tier low-risk not enabled for approval"])
         self.assertEqual(result["run_attempt"], 2)
 
-    @unittest.expectedFailure
     def test_the_result_carries_the_checks_usage(self) -> None:
         """result.json copies the check's usage record beside the spend figures."""
         usage = {

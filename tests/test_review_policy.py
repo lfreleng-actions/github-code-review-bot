@@ -799,7 +799,6 @@ SAMPLE_RECORD = {
 class UsageRecordTests(unittest.TestCase):
     """The token usage check.json carries from an untrusted usage.json."""
 
-    @unittest.expectedFailure
     def test_the_sample_reads_into_the_record(self) -> None:
         """Every figure of the sample lands under its own name."""
         got = policy.check(entry(), verdict(), approve_tiers=ALL, usage=sample_usage())
@@ -807,7 +806,6 @@ class UsageRecordTests(unittest.TestCase):
         self.assertEqual(got["premium_requests"], 1.0)
         self.assertEqual(got["agent_seconds"], 31)
 
-    @unittest.expectedFailure
     def test_a_bad_figure_is_left_out(self) -> None:
         """A non-finite, negative, boolean or non-numeric figure is dropped alone."""
         for bad in (float("inf"), float("nan"), -1, True, "7", None, 10**400):
@@ -825,7 +823,6 @@ class UsageRecordTests(unittest.TestCase):
                 self.assertNotIn("output_tokens", model)
                 self.assertEqual(model["reasoning_tokens"], 80)
 
-    @unittest.expectedFailure
     def test_a_count_is_stored_as_an_integer(self) -> None:
         """A count written as a float is kept as an int; cost stays a float."""
         usage = sample_usage()
@@ -835,7 +832,6 @@ class UsageRecordTests(unittest.TestCase):
         self.assertIsInstance(record["last_call_input_tokens"], int)
         self.assertIsInstance(record["models"][0]["premium_requests"], float)
 
-    @unittest.expectedFailure
     def test_a_model_name_outside_the_pattern_is_left_out(self) -> None:
         """Only a lower-case model identifier of at most 100 characters is kept."""
         usage = sample_usage()
@@ -850,7 +846,6 @@ class UsageRecordTests(unittest.TestCase):
         names = [model["model"] for model in record["models"]]
         self.assertEqual(names, ["gpt-6-astra", "y" * 100])
 
-    @unittest.expectedFailure
     def test_a_ninth_model_is_dropped(self) -> None:
         """At most eight models are kept, sorted by name."""
         usage = sample_usage()
@@ -861,7 +856,6 @@ class UsageRecordTests(unittest.TestCase):
         names = [model["model"] for model in record["models"]]
         self.assertEqual(names, [f"model-{n}" for n in range(1, 9)])
 
-    @unittest.expectedFailure
     def test_a_model_with_no_figure_is_left_out(self) -> None:
         """An empty model is dropped before the limit and cannot displace one."""
         self.assertIsNone(policy.usage_record({"modelMetrics": {"gpt-6-astra": {}}}))
@@ -873,7 +867,6 @@ class UsageRecordTests(unittest.TestCase):
         assert record is not None
         self.assertEqual(record["models"], SAMPLE_RECORD["models"])
 
-    @unittest.expectedFailure
     def test_no_usage_is_null(self) -> None:
         """An absent file, or one holding none of the figures, gives null."""
         self.assertIsNone(policy.usage_record(None))

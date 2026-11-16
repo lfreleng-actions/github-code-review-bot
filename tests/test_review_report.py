@@ -522,7 +522,6 @@ def model_usage(model: str, **figures: Any) -> dict[str, Any]:
 class UsageReportTest(unittest.TestCase):
     """Token usage totals by model, checked again as they are summed."""
 
-    @unittest.expectedFailure
     def test_totals_by_model_across_results(self) -> None:
         """Each model counts the sessions that used it and sums each figure."""
         results = [
@@ -560,7 +559,6 @@ class UsageReportTest(unittest.TestCase):
             ],
         )
 
-    @unittest.expectedFailure
     def test_absent_or_malformed_usage_adds_nothing(self) -> None:
         """A result file is a claim: anything malformed is skipped, alone."""
         results = [
@@ -611,7 +609,6 @@ class UsageReportTest(unittest.TestCase):
             ],
         )
 
-    @unittest.expectedFailure
     def test_a_total_stays_finite(self) -> None:
         """A figure that would carry a total past a finite number adds nothing."""
         big = model_usage("gpt-6-astra", premium_requests=1e308, nano_aiu=10**308)
@@ -624,7 +621,6 @@ class UsageReportTest(unittest.TestCase):
         self.assertEqual(total["requests"], 14)
         json.dumps(built, allow_nan=False)
 
-    @unittest.expectedFailure
     def test_a_result_counts_at_most_eight_models(self) -> None:
         """A forged result cannot flood the table with models."""
         models = [model_usage(f"model-{n}") for n in range(1, 21)]
@@ -632,7 +628,6 @@ class UsageReportTest(unittest.TestCase):
         built = report.build_report(make_selection(), results, 0)
         self.assertEqual(len(built["usage"]), 8)
 
-    @unittest.expectedFailure
     def test_the_spend_table_renders(self) -> None:
         """The Spend section shows one row per model; the head names the model."""
         selection = make_selection(model="gpt-6-astra")
@@ -653,7 +648,6 @@ class UsageReportTest(unittest.TestCase):
             "| gpt-6-astra | 1 | 7 | 1.0 | 100 | 60 | 30 | 8 | 2 | 1000 |", spend
         )
 
-    @unittest.expectedFailure
     def test_no_usage_renders_no_table(self) -> None:
         """Without a usage record the Spend section says so, and nothing breaks."""
         selection = make_selection(model="x|y @z")

@@ -13,7 +13,6 @@ on. Nothing here talks to GitHub.
 from __future__ import annotations
 
 import json
-import math
 import re
 from typing import Any, cast
 
@@ -24,6 +23,7 @@ from review_vetoes import (
     classify_trivial,
     find_vetoes,
 )
+from session_usage import usage_numbers, usage_record
 
 __all__ = [
     "ACTION_RE",
@@ -38,6 +38,8 @@ __all__ = [
     "find_vetoes",
     "parse_approve_tiers",
     "sanitise",
+    "usage_numbers",
+    "usage_record",
 ]
 
 SCHEMA = 1
@@ -321,25 +323,6 @@ def parse_approve_tiers(text: str) -> frozenset[str]:
     return frozenset(tokens)
 
 
-def finite_number(value: object) -> float | None:
-    """A finite, non-negative number from usage.json, or None."""
-    if isinstance(value, bool) or not isinstance(value, int | float):
-        return None
-    number = float(value)
-    if not math.isfinite(number) or number < 0:
-        return None
-    return number
-
-
-def usage_numbers(usage: dict[str, Any] | None) -> tuple[float | None, int | None]:
-    """Premium request cost and agent seconds from the session usage file."""
-    if usage is None:
-        return None, None
-    cost = finite_number(usage.get("totalPremiumRequestCost"))
-    duration = finite_number(usage.get("totalApiDurationMs"))
-    return cost, None if duration is None else int(duration // 1000)
-
-
 def target_mismatch(entry: dict[str, Any], verdict: dict[str, Any]) -> str | None:
     """A reason when the verdict describes a different pull request or head."""
     expected = (
@@ -427,4 +410,5 @@ def check(
         "vetoes": vetoes,
         "premium_requests": premium_requests,
         "agent_seconds": agent_seconds,
+        "usage": usage_record(usage),
     }

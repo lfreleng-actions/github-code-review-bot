@@ -1027,9 +1027,14 @@ whose reason names a missing session.
 The default model is `claude-opus-5.5`. The dispatch form offers
 Claude Opus 5.5, Claude Fable 5.2, Claude Sonnet 5.5 and GPT-6
 Astra (§9.2). The antagonistic caller defaults to GPT-6 Astra
-(§19.7). The selection records the model, the review body
-names it from the selection, and `usage.json` supplies premium
-request cost and API seconds per session, which the report sums.
+(§19.7). The selection records the model, the review body and the
+report's opening lines name it from the selection, and `usage.json`
+supplies premium request cost, API seconds and, for each model the
+session called, its requests, premium requests, input, cache-read,
+cache-write, output and reasoning tokens and nano AIU. The report
+sums the spend figures, and the token figures by model with the
+number of sessions that used each, so the 90-day record says what a
+run consumed after the session artifact expires.
 
 ## 11. Scheduling and Concurrency
 
@@ -1555,7 +1560,14 @@ first 25 comments; a malformed one costs itself alone (§19.5).
   "classifier": {"trivial": false,
                  "non_trivial_paths": [".github/workflows/ci.yaml"]},
   "vetoes": [],
-  "premium_requests": 1.5, "agent_seconds": 42
+  "premium_requests": 1.5, "agent_seconds": 42,
+  "usage": {"nano_aiu": 51939650000, "last_call_input_tokens": 30972,
+            "models": [{"model": "gpt-6-astra", "requests": 7,
+                        "premium_requests": 1.0, "input_tokens": 122814,
+                        "cache_read_tokens": 91824,
+                        "cache_write_tokens": 30969,
+                        "output_tokens": 805, "reasoning_tokens": 80,
+                        "nano_aiu": 51939650000}]}
 }
 ```
 
@@ -1566,6 +1578,20 @@ and vetoes; `approvable` is `tier in approve_tiers`. `agent_tier` is
 `null` when the check could read no verdict; `tier` is then
 `needs-human` and `reasons` says why. `premium_requests` and
 `agent_seconds` come from `usage.json` when present and finite.
+
+`usage` is the session's token usage, read from the same untrusted
+file: `totalNanoAiu`, `lastCallInputTokens` and, from
+`modelMetrics`, each model's request count and cost, token counts
+and nano AIU. `input_tokens` includes the cache reads and writes.
+Every figure passes the check `premium_requests` does (finite, not
+negative, not a boolean), and the check stores a count as an integer.
+It keeps a model whose name matches the `model` input's pattern
+(`^[a-z0-9.-]+$`) and runs to at most 100 characters and that
+carries at least one accepted figure, and keeps at most eight,
+sorted by name. It leaves out an absent or malformed
+figure, and `usage` is `null` when the file is absent, unreadable or
+holds none of it. Nothing in it fails the check. The antagonistic `check.json`
+carries the same `usage`.
 
 The antagonistic `check.json` has no `tier` and no `approvable`:
 
@@ -1585,7 +1611,7 @@ The antagonistic `check.json` has no `tier` and no `approvable`:
   "capped": 0,
   "summary_finding": false,
   "injection_attempts": [],
-  "premium_requests": 1.5, "agent_seconds": 42
+  "premium_requests": 1.5, "agent_seconds": 42, "usage": null
 }
 ```
 
@@ -1625,18 +1651,20 @@ succeed stay unsettled, and the next run retries them.
   "injection_attempts": [],
   "review_url": "https://github.com/.../pull/157#pullrequestreview-1",
   "dry_run": false, "run_attempt": 1,
-  "premium_requests": 1.5, "agent_seconds": 42
+  "premium_requests": 1.5, "agent_seconds": 42,
+  "usage": {"models": ["...as check.json..."]}
 }
 ```
 
 `verdict` is `approved`, `would-approve`, `needs-human` or
-`failed`. The workflow's fallback step writes `failed` with the same
-keys when apply never produced a result; `tier` is then `null` and
-`reasons` names the step outcomes.
+`failed`. `usage` copies the check's. The workflow's fallback step
+writes `failed` with the same keys, less `usage`, when apply never
+produced a result; `tier` is then `null` and `reasons` names the step
+outcomes.
 
 An antagonistic `result.json` has the same identity, `reasons`,
 `summary`, `injection_attempts`, `review_url`, `dry_run`,
-`run_attempt` and spend keys, `tier: null` and `findings: []`, and:
+`run_attempt`, spend and `usage` keys, `tier: null` and `findings: []`, and:
 
 ```json
 {
@@ -1666,6 +1694,11 @@ a refusal at a live gate is never settled.
                      "number": 157, "url": "...",
                      "contexts": ["pre-commit.ci - pr"]}],
  "premium_requests": 4.5, "agent_seconds": 300,
+ "usage": [{"model": "gpt-6-astra", "sessions": 3, "requests": 21,
+            "premium_requests": 3.0, "input_tokens": 368442,
+            "cache_read_tokens": 275472, "cache_write_tokens": 92907,
+            "output_tokens": 2415, "reasoning_tokens": 240,
+            "nano_aiu": 155818950000}],
  "ledger_entries": 42}
 ```
 
@@ -1674,14 +1707,25 @@ antagonistic report counts `commented`, `would-comment`, `refused`
 and `failed`, and the report leaves out a result carrying the other
 mode's verdict as unreadable. Each result carries `verified` (§12),
 and `unverified` counts those without it, which the ledger leaves
-out. `report.md` carries a heading with the
-mode, a one-line count summary, a line naming any unverified result,
+out. `usage` lists, for each model any result's `usage` names, the
+number of sessions that used it and the sum of each figure, sorted by
+model. A result file is a claim, so the report checks each figure
+again as it sums, as it does the spend figures: at most eight models
+per result, a model name of the `model` input's pattern, and finite,
+non-negative numbers, integers for the counts. A result without
+`usage`, or with a malformed one, adds nothing, and a model row with
+no accepted figure neither adds a figure nor counts a session. A
+figure that would carry a total past a finite number adds nothing,
+which keeps `report.json` strict JSON. `report.md` carries a
+heading with the mode, a line naming the model the selection
+recorded, a one-line count summary, a line naming any unverified result,
 the gather's notes on artifacts it left out, a table of
 results (pull request link, title, author, tier or comment count,
 verdict, review link or first reason), a table of skipped pull
 requests grouped by
 reason, a table of selected pull requests whose CI left out a stale
-status (§5) when there are any, and the spend line. Summaries and
+status (§5) when there are any, and the Spend section: the spend
+line and a table of token usage, one row per model. Summaries and
 reasons pass through the same one-line sanitiser as the approval
 body. A result file that is unreadable or malformed stays out, with a
 note, so one broken matrix leg cannot hide every other verdict or

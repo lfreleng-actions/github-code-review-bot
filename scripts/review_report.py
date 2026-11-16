@@ -32,6 +32,7 @@ import ledger
 from bot_evidence import MAX_EVIDENCE_BYTES, read_regular
 from result_binding import load_results, rows_of
 from review_policy import defuse
+from session_usage import USAGE_COUNTS, usage_totals
 
 SCHEMA = 1
 # Per mode: the verdicts a result may carry, and those that make a head
@@ -214,6 +215,7 @@ def build_report(
         "stale_statuses": stale_rows(selection),
         "premium_requests": premium_requests,
         "agent_seconds": agent_seconds,
+        "usage": usage_totals(results),
         "ledger_entries": ledger_entries,
     }
 
@@ -270,6 +272,30 @@ def stale_section(report: dict[str, Any]) -> list[str]:
     ]
 
 
+def usage_section(report: dict[str, Any]) -> list[str]:
+    """The Spend section's token usage table, one row per model."""
+    rows = [
+        [
+            one_line(total["model"]),
+            str(total["sessions"]),
+            str(total["requests"]),
+            str(total["premium_requests"]),
+            *(str(total[field]) for field, _ in USAGE_COUNTS[1:]),
+        ]
+        for total in cast("list[dict[str, Any]]", report.get("usage") or [])
+    ]
+    if not rows:
+        return ["Token usage: none recorded."]
+    headers = [
+        "Model",
+        "Sessions",
+        USAGE_COUNTS[0][1],
+        "Premium requests",
+        *(heading for _, heading in USAGE_COUNTS[1:]),
+    ]
+    return ["Token usage by model:", "", *table(headers, rows)]
+
+
 def render_markdown(
     report: dict[str, Any],
     selection: dict[str, Any],
@@ -288,6 +314,8 @@ def render_markdown(
         "# Code review run",
         "",
         f"Mode: {mode}; dry run: {'yes' if report['dry_run'] else 'no'}",
+        "",
+        f"Model: {one_line(selection.get('model') or '?')}",
         "",
         ", ".join(
             f"{name.replace('_', ' ')}: {count}" for name, count in counts.items()
@@ -347,6 +375,8 @@ def render_markdown(
             "",
             f"Premium requests: {report['premium_requests']}; "
             f"agent seconds: {report['agent_seconds']}.",
+            "",
+            *usage_section(report),
             "",
             f"Ledger entries: {report['ledger_entries']}.",
             "",

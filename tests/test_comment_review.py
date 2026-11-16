@@ -180,7 +180,6 @@ class CheckCommandTests(Tree):
             check["comments"][0]["body"], "Retries the POST; see #\u200b4."
         )
 
-    @unittest.expectedFailure
     def test_the_check_reads_the_session_usage(self) -> None:
         """check.json carries the usage record, or null without a usage file."""
         (self.session / "session-summary.md").write_text(verdict_text())
@@ -888,7 +887,6 @@ class CommentCommandTests(Tree):
         self.assertEqual(result["verdict"], "refused")
         self.assertEqual(result["reasons"], ["no session summary"])
 
-    @unittest.expectedFailure
     def test_the_result_carries_the_checks_usage(self) -> None:
         """result.json copies the check's usage record beside the spend figures."""
         usage = {
