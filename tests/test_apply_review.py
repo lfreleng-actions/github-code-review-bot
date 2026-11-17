@@ -176,6 +176,20 @@ class CheckCommandTests(unittest.TestCase):
         self.assertIn("repo#157", summary)
         self.assertIn("Approvable: yes", summary)
 
+    def test_an_unreadable_usage_file_still_completes(self) -> None:
+        """A bad or absent usage.json costs the usage record, not the check."""
+        (self.session / "session-summary.md").write_text(verdict_text())
+        out = run(self.check_argv())
+        self.assertEqual(out, "approvable=true\ntier=trivial\n")
+        check = json.loads((self.root / "out" / "check.json").read_text())
+        self.assertIsNone(check["usage"])
+        (self.session / "usage.json").write_text("{not json")
+        out = run(self.check_argv())
+        self.assertEqual(out, "approvable=true\ntier=trivial\n")
+        check = json.loads((self.root / "out" / "check.json").read_text())
+        self.assertIsNone(check["usage"])
+        self.assertIsNone(check["premium_requests"])
+
     def test_missing_summary_and_failure_flag_refuse(self) -> None:
         """No session output, or an upstream failure, is a typed refusal."""
         out = run(self.check_argv())
@@ -284,6 +298,18 @@ class ApplyCommandTests(unittest.TestCase):
         self.assertEqual(result["verdict"], "needs-human")
         self.assertEqual(result["reasons"], ["tier low-risk not enabled for approval"])
         self.assertEqual(result["run_attempt"], 2)
+
+    def test_the_result_carries_the_checks_usage(self) -> None:
+        """result.json copies the check's usage record beside the spend figures."""
+        usage = {
+            "nano_aiu": 5,
+            "models": [{"model": "gpt-6-astra", "requests": 7, "output_tokens": 805}],
+        }
+        self.check["approvable"] = False
+        self.check["tier"] = "needs-human"
+        self.check["usage"] = usage
+        self.write_check()
+        self.assertEqual(self.apply()["usage"], usage)
 
     def test_each_failing_gate_refuses(self) -> None:
         """Any live change since selection withholds the approval."""

@@ -380,6 +380,7 @@ def run_comment(args: argparse.Namespace) -> None:
         "run_attempt": args.run_attempt,
         "premium_requests": check.get("premium_requests"),
         "agent_seconds": check.get("agent_seconds"),
+        "usage": check.get("usage"),
     }
     reasons = cast("list[str]", result["reasons"])
     if check.get("commentable") is True:

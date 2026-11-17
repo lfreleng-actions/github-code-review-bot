@@ -180,6 +180,25 @@ class CheckCommandTests(Tree):
             check["comments"][0]["body"], "Retries the POST; see #\u200b4."
         )
 
+    def test_the_check_reads_the_session_usage(self) -> None:
+        """check.json carries the usage record, or null without a usage file."""
+        (self.session / "session-summary.md").write_text(verdict_text())
+        _, check = self.check()
+        self.assertIsNone(check["usage"])
+        (self.session / "usage.json").write_text(
+            json.dumps(
+                {
+                    "totalNanoAiu": 9,
+                    "modelMetrics": {"gpt-6-astra": {"requests": {"count": 2}}},
+                }
+            )
+        )
+        _, check = self.check()
+        self.assertEqual(
+            check["usage"],
+            {"nano_aiu": 9, "models": [{"model": "gpt-6-astra", "requests": 2}]},
+        )
+
     def test_the_summary_names_every_finding_left_out(self) -> None:
         """The posted review points here, so each rejection and its reason shows."""
         text = verdict_text(
@@ -867,6 +886,17 @@ class CommentCommandTests(Tree):
         self.write.assert_not_called()
         self.assertEqual(result["verdict"], "refused")
         self.assertEqual(result["reasons"], ["no session summary"])
+
+    def test_the_result_carries_the_checks_usage(self) -> None:
+        """result.json copies the check's usage record beside the spend figures."""
+        usage = {
+            "nano_aiu": 5,
+            "models": [{"model": "gpt-6-astra", "requests": 7, "output_tokens": 805}],
+        }
+        self.check = comments.check(entry(), None, failure="no session summary")
+        self.check["usage"] = usage
+        self.write_check()
+        self.assertEqual(self.comment()["usage"], usage)
 
     def test_a_settled_check_yields_a_settled_refusal(self) -> None:
         """The report records this refusal, so it carries the check's flag."""

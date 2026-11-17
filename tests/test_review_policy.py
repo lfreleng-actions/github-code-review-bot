@@ -754,5 +754,127 @@ class CheckTests(unittest.TestCase):
         self.assertIsNone(got["premium_requests"])
 
 
+def sample_usage() -> dict[str, Any]:
+    """What @github/copilot 1.0.105 wrote in one session, cut to the fields read."""
+    return {
+        "totalPremiumRequestCost": 1,
+        "totalNanoAiu": 51939650000,
+        "totalApiDurationMs": 31330,
+        "lastCallInputTokens": 30972,
+        "modelMetrics": {
+            "gpt-6-astra": {
+                "requests": {"count": 7, "cost": 1},
+                "usage": {
+                    "inputTokens": 122814,
+                    "outputTokens": 805,
+                    "cacheReadTokens": 91824,
+                    "cacheWriteTokens": 30969,
+                    "reasoningTokens": 80,
+                },
+                "totalNanoAiu": 51939650000,
+            }
+        },
+    }
+
+
+SAMPLE_RECORD = {
+    "nano_aiu": 51939650000,
+    "last_call_input_tokens": 30972,
+    "models": [
+        {
+            "model": "gpt-6-astra",
+            "requests": 7,
+            "premium_requests": 1.0,
+            "input_tokens": 122814,
+            "cache_read_tokens": 91824,
+            "cache_write_tokens": 30969,
+            "output_tokens": 805,
+            "reasoning_tokens": 80,
+            "nano_aiu": 51939650000,
+        }
+    ],
+}
+
+
+class UsageRecordTests(unittest.TestCase):
+    """The token usage check.json carries from an untrusted usage.json."""
+
+    def test_the_sample_reads_into_the_record(self) -> None:
+        """Every figure of the sample lands under its own name."""
+        got = policy.check(entry(), verdict(), approve_tiers=ALL, usage=sample_usage())
+        self.assertEqual(got["usage"], SAMPLE_RECORD)
+        self.assertEqual(got["premium_requests"], 1.0)
+        self.assertEqual(got["agent_seconds"], 31)
+
+    def test_a_bad_figure_is_left_out(self) -> None:
+        """A non-finite, negative, boolean or non-numeric figure is dropped alone."""
+        for bad in (float("inf"), float("nan"), -1, True, "7", None, 10**400):
+            usage = sample_usage()
+            usage["totalNanoAiu"] = bad
+            metrics = usage["modelMetrics"]["gpt-6-astra"]
+            metrics["requests"]["count"] = bad
+            metrics["usage"]["outputTokens"] = bad
+            with self.subTest(bad=bad):
+                record = policy.usage_record(usage)
+                assert record is not None
+                self.assertNotIn("nano_aiu", record)
+                model = record["models"][0]
+                self.assertNotIn("requests", model)
+                self.assertNotIn("output_tokens", model)
+                self.assertEqual(model["reasoning_tokens"], 80)
+
+    def test_a_count_is_stored_as_an_integer(self) -> None:
+        """A count written as a float is kept as an int; cost stays a float."""
+        usage = sample_usage()
+        usage["lastCallInputTokens"] = 30972.0
+        record = policy.usage_record(usage)
+        assert record is not None
+        self.assertIsInstance(record["last_call_input_tokens"], int)
+        self.assertIsInstance(record["models"][0]["premium_requests"], float)
+
+    def test_a_model_name_outside_the_pattern_is_left_out(self) -> None:
+        """Only a lower-case model identifier of at most 100 characters is kept."""
+        usage = sample_usage()
+        metrics = usage["modelMetrics"]
+        sample = metrics["gpt-6-astra"]
+        for name in ("GPT-6", "gpt 6", "@someone", "x" * 101, "", "a|b"):
+            metrics[name] = sample
+        metrics["y" * 100] = sample
+        metrics["not-an-object"] = [1, 2]
+        record = policy.usage_record(usage)
+        assert record is not None
+        names = [model["model"] for model in record["models"]]
+        self.assertEqual(names, ["gpt-6-astra", "y" * 100])
+
+    def test_a_ninth_model_is_dropped(self) -> None:
+        """At most eight models are kept, sorted by name."""
+        usage = sample_usage()
+        sample = usage["modelMetrics"].pop("gpt-6-astra")
+        usage["modelMetrics"] = {f"model-{n}": sample for n in range(9, 0, -1)}
+        record = policy.usage_record(usage)
+        assert record is not None
+        names = [model["model"] for model in record["models"]]
+        self.assertEqual(names, [f"model-{n}" for n in range(1, 9)])
+
+    def test_a_model_with_no_figure_is_left_out(self) -> None:
+        """An empty model is dropped before the limit and cannot displace one."""
+        self.assertIsNone(policy.usage_record({"modelMetrics": {"gpt-6-astra": {}}}))
+        usage = sample_usage()
+        usage["modelMetrics"].update(
+            {f"a-{n}": {"requests": {"count": True}} for n in range(8)}
+        )
+        record = policy.usage_record(usage)
+        assert record is not None
+        self.assertEqual(record["models"], SAMPLE_RECORD["models"])
+
+    def test_no_usage_is_null(self) -> None:
+        """An absent file, or one holding none of the figures, gives null."""
+        self.assertIsNone(policy.usage_record(None))
+        self.assertIsNone(policy.usage_record({"totalPremiumRequestCost": 1}))
+        self.assertIsNone(policy.usage_record({"modelMetrics": "nope"}))
+        got = policy.check(entry(), verdict(), approve_tiers=ALL)
+        self.assertIsNone(got["usage"])
+
+
 if __name__ == "__main__":
     unittest.main()

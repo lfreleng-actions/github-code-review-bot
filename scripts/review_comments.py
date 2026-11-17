@@ -301,4 +301,5 @@ def check(
         "injection_attempts": [] if verdict is None else verdict["injection_attempts"],
         "premium_requests": premium_requests,
         "agent_seconds": agent_seconds,
+        "usage": policy.usage_record(usage),
     }
