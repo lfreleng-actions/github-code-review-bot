@@ -136,6 +136,19 @@ agent-written changes.
 Use `nit` when it matters to a maintainer; do not spend
 comments on taste.
 
+## Disprove first
+
+Each finding goes back to the authoring bot as a revision request:
+a wrong one costs another round of work. Before you list a
+finding, try to disprove it. Follow the code beyond the hunk in
+`workspace/`: the callers, a guard at another layer, a test that
+already covers the case. Keep the finding when you can point at the
+lines that make it fail, and not otherwise.
+
+A doubt you cannot evidence is not a finding. Leave it out, or put
+it in the `summary` as a question for the maintainer, with
+`summary_finding` false.
+
 ## Comments
 
 Each finding that concerns particular lines becomes one inline
@@ -160,9 +173,13 @@ from the line it concerns, so anchor each with care:
 - `severity` is `blocker` (must not merge as is: a defect, a security
   problem, broken CI), `major` (fix before merge), `minor`
   (worth fixing) or `nit`.
-- `body` says what is wrong, why it matters, and what would fix it,
-  in two to four sentences of Markdown, 2000 characters at most; the
-  trusted job cuts a longer one. Do not mention people or teams, and
+- `body` gives four parts, in this order: what is wrong; the
+  evidence, naming the path and line in the new file and the input
+  or state that reaches it; what follows from it; and what would fix
+  it. For something absent (a missing test, an unhandled case), the
+  evidence is what is missing and where it belongs. Write it in
+  Markdown, 2000 characters at most; the trusted job cuts a longer
+  one. Do not mention people or teams, and
   do not reference issues or pull requests by number. Do not use a
   `suggestion` block: a human must write the fix, and the trusted job
   turns one into plain code.
@@ -190,8 +207,9 @@ say where else it occurs.
 3. Read each file's patch, in full, once. For code, workflow, action
    and script files, open the surrounding file in `workspace/` to see
    what the changed lines do in context and what calls them.
-4. Work through the headings above. For each finding, find its
-   anchor line and confirm it.
+4. Work through the headings above. Try to disprove each finding
+   (above); for each that survives, find its anchor line and confirm
+   it.
 5. Write the summary, list the comments, and emit the verdict block.
 
 ## The verdict block
