@@ -530,7 +530,9 @@ lead to a write.
   alone change), lockfiles, README and documentation, comments, or pure
   formatting and typo fixes, and touches no workflow logic,
   triggers, permissions, shell logic, action inputs or outputs, or
-  anything else that changes runtime behaviour.
+  anything else that changes runtime behaviour. Documentation
+  excludes every sensitive path in §8.2: agent instruction files,
+  bot prompts, licences, and review or gate configuration.
 - **`low-risk`**: the diff does touch workflow, action, script or
   code logic, and a full review finds no issue under three heads:
   security (no new or widened permissions, no secrets newly read or
@@ -643,7 +645,7 @@ from `review_vetoes.py`:
    every changed file trivial, or the tier drops to `needs-human`
    with the non-trivial paths as the reason. A file is trivial
    when its name marks it as documentation (`.md`, `.markdown`, `.rst`,
-   `.adoc`, `LICENSE*`, `NOTICE*`, images under `docs/`; never
+   `.adoc`, `NOTICE*`, images under `docs/`; never
    a sensitive path below or a `requirements*` file), a lockfile by name
    (`uv.lock`, `poetry.lock`, `package-lock.json`, `yarn.lock`,
    `pnpm-lock.yaml`, `Cargo.lock`, `go.sum`, `Gemfile.lock` or any
@@ -663,22 +665,31 @@ from `review_vetoes.py`:
    no approval may carry, whatever the agent concluded. First, for
    any status (added, modified, removed, renamed, on either side of
    a rename), a sensitive path: "`<path>` changes an agent
-   instruction or review-governance file". `is_sensitive` matches,
-   without regard to case:
+   instruction, licence or review-governance file". `is_sensitive`
+   matches, without regard to case:
    - a basename of `AGENTS.md`, `CLAUDE.md`, `GEMINI.md`,
-     `copilot-instructions.md`, `SKILL.md`, `.cursorrules`,
-     `.windsurfrules`, `.clinerules` or `CODEOWNERS`, at any depth;
+     `copilot-instructions.md`, `SKILL.md`, `PROMPT.md`,
+     `.cursorrules`, `.windsurfrules`, `.clinerules`, `CODEOWNERS`,
+     `.gitlint` or `REUSE.toml`, at any depth;
    - a directory component of `.copilot`, `.claude`, `.cursor`,
-     `.agents`, `.windsurf`, `.clinerules`, `.gemini` or `.codex`,
-     at any depth;
+     `.agents`, `.windsurf`, `.clinerules`, `.gemini`, `.codex`,
+     `prompt` or `prompts`, at any depth;
    - a path under `.github/instructions/`, `.github/prompts/`,
      `.github/agents/`, `.github/skills/`, `.github/copilot/` or
      `.aislop/`;
-   - `SECURITY.md`, `.zizmor.yml` or `.zizmor.yaml` at the root.
+   - `SECURITY.md`, `.zizmor.yml` or `.zizmor.yaml` at the root, and
+     `zizmor.yml` or `zizmor.yaml`, the names zizmor discovers, at
+     the root or directly under `.github/` (a workflow under
+     `.github/workflows/` is not caught by this rule).
+
+   It also matches, in upper case as written, a basename starting
+   with `LICENSE` or `LICENCE` and a directory component of
+   `LICENSES`, at any depth, so `src/licenses.py` stays code.
 
    These files decide what every later agent session in the
-   repository obeys, this bot's included, or who reviews and how,
-   and are never documentation either. Then, over the changed
+   repository obeys, this bot's included, who reviews and how,
+   which commits and files pass the hooks, or the terms the code
+   ships under, and are never documentation either. Then, over the changed
    lines of every non-documentation file:
    - a truncated or missing patch: "patch for `<path>` is
      unreadable";
@@ -1390,8 +1401,9 @@ Decided:
   and must agree before an approval goes out under that tier.
 - **Vetoes on every approvable tier.** Some changes no approval may
   carry whatever a reviewer concludes: a change to an agent
-  instruction or review-governance file (`AGENTS.md`,
-  `.github/copilot-instructions.md`, `CODEOWNERS` and the rest of
+  instruction, bot prompt, licence or review-governance file
+  (`AGENTS.md`, `.github/copilot-instructions.md`, `prompt/`,
+  `LICENSE`, `CODEOWNERS`, `.gitlint`, `REUSE.toml` and the rest of
   §8.2's list), a new `pull_request_target` trigger, a write
   permission, an unpinned action, a secret reference, a removed
   action input, a download piped into a shell. The list is short

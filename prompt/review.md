@@ -98,7 +98,10 @@ Every condition below holds:
   change and nothing else), lockfiles, README and documentation,
   comments, or pure formatting and typo fixes. Documentation here
   excludes agent instruction files such as `AGENTS.md` and
-  `.github/copilot-instructions.md`, `CODEOWNERS`, `SECURITY.md`.
+  `.github/copilot-instructions.md`, bot prompts (anything under a
+  `prompt/` or `prompts/` directory, `PROMPT.md`), licences
+  (`LICENSE*`, `LICENCE*`, `LICENSES/`), `CODEOWNERS`, `SECURITY.md`,
+  `.gitlint`, `REUSE.toml` and the zizmor configuration.
 - The diff does **not** touch workflow job logic or steps, `on:`
   triggers, `permissions:` blocks, shell script logic, `action.yaml`
   inputs or outputs, or anything else that changes runtime behaviour.
@@ -137,8 +140,11 @@ Everything else: any security or CI/CD concern, any uncertainty, any
 feedback you would want a maintainer to weigh in on, any change to an
 agent instruction file (`AGENTS.md`, `CLAUDE.md`,
 `.github/copilot-instructions.md`, `.github/instructions/` and the
-like) or to `CODEOWNERS`, `SECURITY.md`, `.aislop/` or
-`.zizmor.yml`, a diff too large
+like), to a bot prompt (`prompt/`, `prompts/`, `PROMPT.md`), to a
+licence (`LICENSE*`, `LICENCE*`, `LICENSES/`), or to `CODEOWNERS`,
+`SECURITY.md`, `.aislop/`, `.gitlint`, `REUSE.toml` or the zizmor
+configuration (`zizmor.yml` or `zizmor.yaml` at the root or under
+`.github/`), a diff too large
 or too tangled to review with confidence, or a change whose
 correctness you cannot judge from the diff and the checkout. When in
 doubt, classify here. Put what you found in `findings`: a human
