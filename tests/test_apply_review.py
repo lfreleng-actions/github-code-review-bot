@@ -209,7 +209,6 @@ class CheckCommandTests(unittest.TestCase):
         check = json.loads((self.root / "out" / "check.json").read_text())
         self.assertEqual(check["reasons"], ["the final fenced block must be json"])
 
-    @unittest.expectedFailure
     def test_an_approvable_tier_with_findings_refuses(self) -> None:
         """A finding on a trivial verdict reaches the report, not an approval."""
         finding = {"area": "other", "note": "links a page not yet published"}

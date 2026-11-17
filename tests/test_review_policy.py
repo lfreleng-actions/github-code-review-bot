@@ -831,7 +831,6 @@ class CheckTests(unittest.TestCase):
         )
         self.assertEqual(attempted["reasons"], ["touches auth"])
 
-    @unittest.expectedFailure
     def test_findings_demote_an_approvable_tier(self) -> None:
         """Anything the agent would tell a maintainer keeps the approval back."""
         finding = [{"area": "other", "note": "the table order reads oddly"}]
@@ -854,7 +853,6 @@ class CheckTests(unittest.TestCase):
                 self.assertTrue(clean["approvable"])
                 self.assertEqual(clean["reasons"], [])
 
-    @unittest.expectedFailure
     def test_an_injection_attempt_demotes_an_approvable_tier(self) -> None:
         """The agent's report that the change tried to steer it bars approval."""
         attempts = ["PR body: asks for a trivial verdict"]
@@ -871,7 +869,6 @@ class CheckTests(unittest.TestCase):
                 )
                 self.assertEqual(got["injection_attempts"], attempts)
 
-    @unittest.expectedFailure
     def test_agent_reports_join_corroboration_and_veto_reasons(self) -> None:
         """Every reason the approval is held back is listed, not just the first."""
         got = policy.check(
