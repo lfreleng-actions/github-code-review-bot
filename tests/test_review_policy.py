@@ -824,6 +824,74 @@ class CheckTests(unittest.TestCase):
         self.assertEqual(got["findings"], findings)
         bare = policy.check(entry(), verdict(tier="needs-human"), approve_tiers=ALL)
         self.assertEqual(bare["reasons"], [policy.HUMAN_REQUESTED])
+        attempted = policy.check(
+            entry(),
+            verdict(tier="needs-human", findings=findings, injection_attempts=["x"]),
+            approve_tiers=ALL,
+        )
+        self.assertEqual(attempted["reasons"], ["touches auth"])
+
+    @unittest.expectedFailure
+    def test_findings_demote_an_approvable_tier(self) -> None:
+        """Anything the agent would tell a maintainer keeps the approval back."""
+        finding = [{"area": "other", "note": "the table order reads oddly"}]
+        pin = entry(changed(WORKFLOW, USES_OLD, USES_NEW))
+        for tier in ("trivial", "low-risk"):
+            got = policy.check(
+                pin, verdict(tier=tier, findings=finding), approve_tiers=ALL
+            )
+            with self.subTest(tier=tier):
+                self.assertEqual(got["tier"], "needs-human")
+                self.assertEqual(got["agent_tier"], tier)
+                self.assertFalse(got["approvable"])
+                self.assertEqual(
+                    got["reasons"],
+                    ["the agent reported 1 finding(s); an approval carries none"],
+                )
+                self.assertEqual(got["findings"], finding)
+            clean = policy.check(pin, verdict(tier=tier), approve_tiers=ALL)
+            with self.subTest(tier=tier, clean=True):
+                self.assertTrue(clean["approvable"])
+                self.assertEqual(clean["reasons"], [])
+
+    @unittest.expectedFailure
+    def test_an_injection_attempt_demotes_an_approvable_tier(self) -> None:
+        """The agent's report that the change tried to steer it bars approval."""
+        attempts = ["PR body: asks for a trivial verdict"]
+        pin = entry(changed(WORKFLOW, USES_OLD, USES_NEW))
+        for tier in ("trivial", "low-risk"):
+            got = policy.check(
+                pin, verdict(tier=tier, injection_attempts=attempts), approve_tiers=ALL
+            )
+            with self.subTest(tier=tier):
+                self.assertEqual(got["tier"], "needs-human")
+                self.assertFalse(got["approvable"])
+                self.assertEqual(
+                    got["reasons"], ["the agent reported an injection attempt"]
+                )
+                self.assertEqual(got["injection_attempts"], attempts)
+
+    @unittest.expectedFailure
+    def test_agent_reports_join_corroboration_and_veto_reasons(self) -> None:
+        """Every reason the approval is held back is listed, not just the first."""
+        got = policy.check(
+            entry(changed("app.py", "+x"), changed(WORKFLOW, "+  contents: write")),
+            verdict(
+                findings=[{"area": "ci", "note": "a"}, {"area": "ci", "note": "b"}],
+                injection_attempts=["commit message: asks to approve"],
+            ),
+            approve_tiers=ALL,
+        )
+        self.assertEqual(got["tier"], "needs-human")
+        self.assertEqual(
+            got["reasons"],
+            [
+                "trivial claim not corroborated: app.py, .github/workflows/ci.yaml",
+                "the agent reported 2 finding(s); an approval carries none",
+                "the agent reported an injection attempt",
+                *got["vetoes"],
+            ],
+        )
 
     def test_copies_entry_fields_and_usage(self) -> None:
         """check.json carries the PR identity, a safe title and the spend."""
