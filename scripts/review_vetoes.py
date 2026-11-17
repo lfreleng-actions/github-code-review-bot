@@ -90,9 +90,10 @@ SECRET_RE = re.compile(
 ACTION_PORT_RE = re.compile(r"^-\s{2}[A-Za-z0-9_-]+:\s*$")
 PIPE_TO_SHELL_RE = re.compile(r"\b(curl|wget)\b.*\|\s*(ba)?sh\b")
 TRIGGER_TARGET = "pull_request_target"
-# Files an agent harness reads as instructions, or that govern review.
-# Compared in lower case, since a case-insensitive checkout or harness
-# reads AGENTS.md and agents.md alike.
+# Files an agent harness reads as instructions, bot prompts, licences,
+# and files that govern review or the commit gates. Compared in lower
+# case, since a case-insensitive checkout or harness reads AGENTS.md
+# and agents.md alike; licences alone match as written.
 SENSITIVE_NAMES = frozenset(
     {
         "agents.md",
@@ -100,10 +101,13 @@ SENSITIVE_NAMES = frozenset(
         "gemini.md",
         "copilot-instructions.md",
         "skill.md",
+        "prompt.md",
         ".cursorrules",
         ".windsurfrules",
         ".clinerules",
         "codeowners",
+        ".gitlint",
+        "reuse.toml",
     }
 )
 SENSITIVE_DIRS = frozenset(
@@ -116,6 +120,8 @@ SENSITIVE_DIRS = frozenset(
         ".clinerules",
         ".gemini",
         ".codex",
+        "prompt",
+        "prompts",
     }
 )
 SENSITIVE_PREFIXES = (
@@ -126,8 +132,23 @@ SENSITIVE_PREFIXES = (
     ".github/copilot/",
     ".aislop/",
 )
-SENSITIVE_ROOT_FILES = frozenset({"security.md", ".zizmor.yml", ".zizmor.yaml"})
-SENSITIVE_VETO = "changes an agent instruction or review-governance file"
+# zizmor discovers zizmor.y?ml at the root or directly under .github/;
+# the dotted names are kept as well.
+SENSITIVE_PATHS = frozenset(
+    {
+        "security.md",
+        ".zizmor.yml",
+        ".zizmor.yaml",
+        "zizmor.yml",
+        "zizmor.yaml",
+        ".github/zizmor.yml",
+        ".github/zizmor.yaml",
+    }
+)
+# Matched as written, so src/licenses.py stays ordinary code.
+LICENCE_PREFIXES = ("LICENSE", "LICENCE")
+LICENCE_DIR = "LICENSES"
+SENSITIVE_VETO = "changes an agent instruction, licence or review-governance file"
 
 
 def changed_lines(patch: str) -> list[str]:
@@ -141,18 +162,22 @@ def changed_lines(patch: str) -> list[str]:
 
 
 def is_sensitive(path: str) -> bool:
-    """Whether a path instructs an agent or governs review.
+    """Whether a path instructs an agent, licenses, or governs review.
 
     Such a file decides what every later agent session in the
-    repository obeys, or who reviews, so no approval may carry it.
+    repository obeys, who reviews, which commits pass the gates, or
+    the terms the code ships under, so no approval may carry it.
     """
+    written = path.split("/")
     lowered = path.lower()
     parts = lowered.split("/")
     return (
         parts[-1] in SENSITIVE_NAMES
-        or lowered in SENSITIVE_ROOT_FILES
+        or lowered in SENSITIVE_PATHS
         or lowered.startswith(SENSITIVE_PREFIXES)
         or not SENSITIVE_DIRS.isdisjoint(parts[:-1])
+        or written[-1].startswith(LICENCE_PREFIXES)
+        or LICENCE_DIR in written[:-1]
     )
 
 
@@ -169,14 +194,15 @@ def is_doc(path: str) -> bool:
     """Whether a path is documentation the classifier trusts by name alone.
 
     Under ``docs/`` only prose and images count: a build hook or a
-    requirements pin living there is code or configuration. An agent
-    instruction or review-governance file is never documentation.
+    requirements pin living there is code or configuration. A sensitive
+    path (an agent instruction, a bot prompt, a licence, a review or
+    gate configuration) is never documentation.
     """
     name = posixpath.basename(path)
     if is_sensitive(path) or REQUIREMENTS_RE.match(name):
         return False
     lowered = path.lower()
-    if lowered.endswith(DOC_SUFFIXES) or name.startswith(("LICENSE", "NOTICE")):
+    if lowered.endswith(DOC_SUFFIXES) or name.startswith("NOTICE"):
         return True
     return path.startswith("docs/") and lowered.endswith(IMAGE_SUFFIXES)
 
