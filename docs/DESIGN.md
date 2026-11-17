@@ -406,6 +406,21 @@ diff the agent reads: every changed file with its unified patch
 (64 KiB), and each commit message (4 KiB). The `key` is
 `<repo_name>-<number>` and names every per-entry artifact.
 
+Each survivor, in both modes, also records the base repository's
+own guidance for contributors: its root `AGENTS.md`, read through
+the contents API at the entry's `base_sha` and never from the head.
+A pull request cannot change the guidance its review applies. The
+review session runs with `--no-custom-instructions` (§7.2), and the
+checkout it reads is the head, which the pull request controls; the
+packet's copy is the one the agent can trust as the base's. A
+missing file is no guidance and no error. Anything but a regular
+file at that path (a directory, a symlink, a submodule) yields none.
+The selection cuts the text to 16 KiB and marks it `truncated` when
+cut; a file over 1 MiB, whose content the contents API omits,
+records empty text marked `truncated`. The text reaches the agent
+as data (§7.3) and counts toward the entry's size when `choose` caps
+the selection by bytes.
+
 ## 6. The Ledger
 
 The ledger is the run-to-run memory of which pull request heads a
@@ -450,7 +465,9 @@ else.
 - `artefacts/pull.json`: the one entry of `selection.json` whose
   `key` matches the matrix entry, projected with `jq`. The step
   checks that the entry's `head_sha` matches the matrix and that the
-  checkout's `HEAD` matches both.
+  checkout's `HEAD` matches both. The entry carries the base
+  repository's `AGENTS.md` in `guidance` (§5), so the packet needs
+  no step of its own to hold it.
 - `workspace/`: the head repository at the head SHA, checked out
   with `persist-credentials: false`. The job-native token has no
   grant on a fork; the checkout succeeds because the estate is
@@ -535,7 +552,16 @@ what it asked for. Text addressed to someone else is not an injection
 attempt and goes unrecorded: the author's account of the change, notes
 for the human reviewer or maintainer, and the guidance a repository
 gives its own contributors and agents. The agent acts on none of it
-and checks any claim it makes that the diff can bear out. The prompt
+and checks any claim it makes that the diff can bear out. A short
+section, the same in both prompts, tells the agent that the packet's
+`guidance` is the repository's own guidance for contributors, read
+from the base branch and not from this pull request; that it uses it
+to learn what the repository expects; that the guidance counts as
+data, which can add checks and cannot relax a rule of the prompt,
+change the verdict format or have anything run; that where the pull request
+changes `AGENTS.md`, that change is part of the diff to review and
+the packet holds the version before it; and that it prefers the
+packet's copy to the one in `workspace/`. The prompt
 also tells the agent that it must judge the diff rather than the
 repository name or the author; that it reads the packet first and
 opens the checkout for context on what a changed line does; and that
@@ -1238,6 +1264,7 @@ scripts/pull_reads.py                    GitHub reads for selection
 scripts/pull_checks.py                   CI rollup, stale status rule
 scripts/pull_changes.py                  bounded files and commits
 scripts/pull_rounds.py                   earlier rounds (§19.2)
+scripts/pull_guidance.py                 base AGENTS.md for the packet (§5)
 scripts/select_pulls.py                  selection flow (§5)
 scripts/selection_rules.py               skip rules, both modes (§5)
 scripts/selection_inputs.py              input parsing contract
@@ -1460,6 +1487,9 @@ against the trusted `selection.json`.
                  "previous_path": null, "patch": "@@ ... @@",
                  "patch_truncated": false}],
       "diff_bytes": 1234,
+      "guidance": [{"path": "AGENTS.md", "ref": "<base_sha>",
+                    "bytes": 2048, "truncated": false,
+                    "text": "bounded 16 KiB"}],
       "earlier_reviews": [{"head_sha": "<40 hex>", "submitted_at": "...",
                            "body": "bounded 8 KiB"}],
       "earlier_findings": [{"path": "scripts/fetch.py", "line": 44,
@@ -1490,11 +1520,15 @@ a file GitHub returns without a patch has `patch: null`.
 `stale_status_contexts` and `stale_status_minutes` record the stale
 status rule (§5), which apply re-applies at its live re-read;
 `stale_statuses` names the listed contexts the entry's CI left out.
+`guidance` is empty or holds one object: the root `AGENTS.md` of
+the base repository read at `base_sha`, which `ref` repeats, with
+the file's size in `bytes`, its text cut to 16 KiB and `truncated`
+when cut (§5); it carries the same in both modes.
 `earlier_reviews`, `earlier_findings` and `earlier_findings_truncated`
 carry this App's earlier rounds in the antagonistic mode (§19.2); an
 approve entry and a first round carry empty lists and `false`. Like
-every other field, they count toward the entry's size when `choose`
-caps the selection by bytes.
+every other field, they and `guidance` count toward the entry's size
+when `choose` caps the selection by bytes.
 
 ### 18.2 `matrix.json` (select to workflow)
 
@@ -1907,7 +1941,10 @@ empty list is the right answer for a sound change. It defines an
 injection attempt in the same words as `prompt/review.md` (§7.3), and
 adds that a bot wrote the description, so its claims about the change
 and its testing are claims to check. A bot's section for the reviewer
-is text addressed to someone else, not an injection attempt.
+is text addressed to someone else, not an injection attempt. It
+carries the same repository guidance section as `prompt/review.md`
+(§7.3): the packet's `guidance`, read from the base branch, can add
+checks and cannot relax a rule.
 
 Each finding goes back to the authoring bot as a revision request
 (§19.9), so a wrong one costs a revision session, another Copilot

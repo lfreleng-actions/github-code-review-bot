@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import base64
 import json
 import sys
 import unittest
@@ -18,6 +19,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 github = import_module("bot_github")
 reads = import_module("pull_reads")
 changes = import_module("pull_changes")
+guidance = import_module("pull_guidance")
 
 HEAD = "a" * 40
 BASE = "b" * 40
@@ -1111,6 +1113,105 @@ class EarlierFindingsTest(ReadsCase):
         for name, connection in cases.items():
             with self.subTest(name=name), self.assertRaises(github.GitHubError):
                 self.read(connection)
+
+
+def contents(text: str = "# Guide\n", **overrides: Any) -> str:
+    """The contents API reply for a regular file at the root AGENTS.md."""
+    raw = text.encode("utf-8")
+    data: dict[str, Any] = {
+        "type": "file",
+        "path": "AGENTS.md",
+        "size": len(raw),
+        "encoding": "base64",
+        "content": base64.encodebytes(raw).decode("ascii"),
+    }
+    data.update(overrides)
+    return json.dumps(data)
+
+
+class BaseGuidanceTest(ReadsCase):
+    """``base_guidance`` reads the base's root AGENTS.md, bounded, or nothing."""
+
+    def read(self, **kwargs: Any) -> list[dict[str, Any]]:
+        """Run the read against one canned reply or failure."""
+        with patch.object(github, "run_gh", **kwargs) as gh:
+            result = guidance.base_guidance("org/alpha", BASE)
+        self.assertEqual(
+            gh.call_args.args[0],
+            ["api", f"repos/org/alpha/contents/AGENTS.md?ref={BASE}"],
+        )
+        return result
+
+    def test_a_present_file_is_recorded_at_the_base_sha(self) -> None:
+        """The entry names the path, the base SHA as its ref, and the text."""
+        self.assertEqual(
+            self.read(return_value=contents("# Guide\n")),
+            [
+                {
+                    "path": "AGENTS.md",
+                    "ref": BASE,
+                    "bytes": len("# Guide\n"),
+                    "truncated": False,
+                    "text": "# Guide\n",
+                }
+            ],
+        )
+
+    def test_an_absent_file_is_no_guidance(self) -> None:
+        """A 404 or 410 yields an empty list and no failure."""
+        for status in (404, 410):
+            with self.subTest(status=status):
+                failure = github.GitHubError(f"gh: Gone (HTTP {status})", status)
+                self.assertEqual(self.read(side_effect=failure), [])
+
+    def test_another_failure_fails_the_read(self) -> None:
+        """Only absence is no guidance; a refused read stays an error."""
+        failure = github.GitHubError("gh: Forbidden (HTTP 403)", 403)
+        with self.assertRaises(github.GitHubError):
+            self.read(side_effect=failure)
+
+    def test_a_file_over_the_cap_is_cut_and_flagged(self) -> None:
+        """The text stops at the cap without splitting a character."""
+        text = "a" + "\u00e9" * guidance.MAX_GUIDANCE_BYTES
+        (entry,) = self.read(return_value=contents(text))
+        self.assertTrue(entry["truncated"])
+        self.assertEqual(entry["bytes"], len(text.encode("utf-8")))
+        self.assertEqual(
+            len(entry["text"].encode("utf-8")), guidance.MAX_GUIDANCE_BYTES - 1
+        )
+        self.assertTrue(text.startswith(entry["text"]))
+
+    def test_a_file_github_sends_without_content_is_flagged(self) -> None:
+        """Over 1 MiB GitHub omits the content: empty text, flagged cut."""
+        (entry,) = self.read(
+            return_value=contents(encoding="none", content="", size=2 * 1024 * 1024)
+        )
+        self.assertEqual((entry["text"], entry["truncated"]), ("", True))
+        self.assertEqual(entry["bytes"], 2 * 1024 * 1024)
+
+    def test_a_path_that_is_not_a_regular_file_is_left_out(self) -> None:
+        """A directory, a symlink, a submodule or a followed symlink is no guidance."""
+        cases = {
+            "directory": json.dumps([{"type": "file", "path": "AGENTS.md/x"}]),
+            "symlink": contents(type="symlink"),
+            "submodule": contents(type="submodule"),
+            "followed symlink": contents(path="docs/AGENTS.md"),
+        }
+        for name, raw in cases.items():
+            with self.subTest(name=name):
+                self.assertEqual(self.read(return_value=raw), [])
+
+    def test_a_malformed_reply_fails_the_read(self) -> None:
+        """A bad size, encoding or base64 payload is an operational failure."""
+        cases = {
+            "size": contents(size=-1),
+            "encoding": contents(encoding="utf-8"),
+            "content": contents(content=None),
+            "base64": contents(content="abc"),
+        }
+        for name, raw in cases.items():
+            with self.subTest(name=name), self.assertRaises(github.GitHubError):
+                self.read(return_value=raw)
 
 
 if __name__ == "__main__":

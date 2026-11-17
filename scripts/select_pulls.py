@@ -8,7 +8,8 @@ pull requests of an organisation, or reads the ones named on the
 command line, drops every one a skip rule catches, orders the rest
 oldest-updated first and caps the list. For each survivor it records
 the head SHA the review job will check out, the reviews and checks
-the apply job will re-verify, and the bounded diff the agent reads.
+the apply job will re-verify, the bounded diff the agent reads and
+the base repository's own ``AGENTS.md`` at the base SHA.
 
 The mode decides whose pull requests qualify. ``approve`` reviews
 human authors alone and skips every bot. ``antagonistic`` inverts
@@ -40,6 +41,7 @@ from typing import Any
 import bot_github as github
 import ledger
 import pull_changes as changes
+import pull_guidance as guidance
 import pull_reads as reads
 import pull_rounds as rounds
 from pull_checks import StalePolicy
@@ -157,9 +159,9 @@ def assess(
     """Read each candidate and keep the ones no skip rule catches.
 
     Each survivor carries its state plus the files and commits the
-    entry needs, and in the antagonistic mode this App's earlier
-    rounds; the diff and the rounds are read last because they are the
-    costly part.
+    entry needs, the base repository's guidance, and in the
+    antagonistic mode this App's earlier rounds; the diff and the
+    rounds are read last because they are the costly part.
     """
     survivors: list[dict[str, Any]] = []
     for candidate in candidates:
@@ -184,6 +186,9 @@ def assess(
                 "files": files,
                 "diff_bytes": diff_bytes,
                 "commits": commits,
+                "guidance": guidance.base_guidance(
+                    state["repository"], state["base_sha"]
+                ),
                 **earlier_rounds(state, rules),
             }
         )
@@ -258,6 +263,7 @@ def build_entry(state: dict[str, Any]) -> dict[str, Any]:
         "commits": state["commits"],
         "files": state["files"],
         "diff_bytes": state["diff_bytes"],
+        "guidance": state["guidance"],
         "earlier_reviews": state["earlier_reviews"],
         "earlier_findings": state["earlier_findings"],
         "earlier_findings_truncated": state["earlier_findings_truncated"],
