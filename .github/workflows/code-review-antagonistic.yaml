@@ -46,6 +46,16 @@ on:
           - 'Claude Fable 5.2'
           - 'Claude Sonnet 5.5'
         default: 'GPT-6 Astra'
+      reasoning_effort:
+        description: >-
+          Reasoning effort per session (none, minimal, low, medium,
+          high, xhigh or max; empty = the model's default)
+        type: string
+        default: ''
+      max_ai_credits:
+        description: 'AI credits per session at most (empty = no cap)'
+        type: string
+        default: ''
       pull_requests:
         description: >-
           Review these pull requests instead of scanning
@@ -161,6 +171,8 @@ jobs:
       dry_run: >-
         ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run }}
       model: "${{ needs.options.outputs.model }}"
+      reasoning_effort: "${{ inputs.reasoning_effort || '' }}"
+      max_ai_credits: "${{ inputs.max_ai_credits || '' }}"
       pull_requests: "${{ inputs.pull_requests || '' }}"
       repositories: "${{ inputs.repositories || '' }}"
       max_pull_requests: "${{ inputs.max_pull_requests || '10' }}"

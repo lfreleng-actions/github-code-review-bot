@@ -700,6 +700,185 @@ class ReviewContracts(ReusableWorkflowCase):
         self.assertTrue(cleanup["continue-on-error"])
 
 
+FAKE_COPILOT = """#!/bin/bash
+printf '%s\\n' "$@" > "$COPILOT_ARGS"
+"""
+# Every level the Copilot CLI lists for --reasoning-effort.
+REASONING_EFFORTS = ("none", "minimal", "low", "medium", "high", "xhigh", "max")
+TUNING_INPUTS = ("reasoning_effort", "max_ai_credits")
+
+
+class SessionTuningContracts(ReusableWorkflowCase):
+    """The reasoning effort and credit cap: checked, recorded, then passed."""
+
+    def test_both_are_checked_before_any_mint(self) -> None:
+        """The select job reads each from an env entry before a token mints."""
+        step = self.step("select", "Check inputs")
+        self.assertEqual(
+            step["env"]["REASONING_EFFORT"], "${{ inputs.reasoning_effort }}"
+        )
+        self.assertEqual(step["env"]["MAX_AI_CREDITS"], "${{ inputs.max_ai_credits }}")
+        self.assertLess(
+            self.position("select", "Check inputs"),
+            self.position("select", "Mint read-only App token"),
+        )
+
+    def test_the_selection_records_both(self) -> None:
+        """The selection script receives both from env entries."""
+        step = self.step("select", "Select pull requests")
+        self.assertEqual(
+            step["env"]["REASONING_EFFORT"], "${{ inputs.reasoning_effort }}"
+        )
+        self.assertEqual(step["env"]["MAX_AI_CREDITS"], "${{ inputs.max_ai_credits }}")
+        run = flatten(step["run"])
+        self.assertIn('--reasoning-effort "$REASONING_EFFORT"', run)
+        self.assertIn('--max-ai-credits "$MAX_AI_CREDITS"', run)
+
+    def test_the_agent_reads_both_from_env_alone(self) -> None:
+        """No expression in the agent's script names either input."""
+        step = self.step("review", "Run review agent (Copilot)")
+        self.assertEqual(
+            step["env"]["REASONING_EFFORT"], "${{ inputs.reasoning_effort }}"
+        )
+        self.assertEqual(step["env"]["MAX_AI_CREDITS"], "${{ inputs.max_ai_credits }}")
+        self.assertNotIn("${{", step["run"])
+
+
+class SessionTuningRuns(ReusableWorkflowCase):
+    """Run the input check and the agent step's scripts."""
+
+    def setUp(self) -> None:
+        """Lay out a workspace with a fake ``copilot`` on ``PATH``."""
+        super().setUp()
+        self.tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.tmp)
+        bin_dir = self.tmp / "bin"
+        bin_dir.mkdir()
+        copilot = bin_dir / "copilot"
+        copilot.write_text(FAKE_COPILOT, encoding="utf-8")
+        copilot.chmod(0o755)
+        self.path = f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}"
+
+    def run_step(self, job: str, name: str, env: dict[str, str]) -> int:
+        """Run one step's script under bash as Actions does; its exit code."""
+        script = self.tmp / "step.sh"
+        script.write_text(self.step(job, name)["run"], encoding="utf-8")
+        output = self.tmp / "output"
+        output.write_text("", encoding="utf-8")
+        done = subprocess.run(
+            ["bash", "-eo", "pipefail", str(script)],
+            cwd=self.tmp,
+            env={"PATH": self.path, "GITHUB_OUTPUT": str(output), **env},
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.output = done.stdout + done.stderr
+        return done.returncode
+
+    def check(self, effort: str, credits: str) -> int:
+        """Run the select job's input check with every other input valid."""
+        return self.run_step(
+            "select",
+            "Check inputs",
+            {
+                "MAX_PRS": "20",
+                "STALE_MINUTES": "8",
+                "MAX_RUNTIME": "20",
+                "MAX_AGENTS": "5",
+                "MODEL": "claude-opus-5.5",
+                "REASONING_EFFORT": effort,
+                "MAX_AI_CREDITS": credits,
+                "MODE": "approve",
+                "APPROVE_TIERS": "trivial,low-risk",
+            },
+        )
+
+    def agent_arguments(self, effort: str, credits: str) -> list[str]:
+        """Run the agent step; the arguments the CLI received."""
+        artefacts = self.tmp / "artefacts"
+        artefacts.mkdir(exist_ok=True)
+        (artefacts / "prompt.md").write_text("Review.", encoding="utf-8")
+        arguments = self.tmp / "arguments"
+        code = self.run_step(
+            "review",
+            "Run review agent (Copilot)",
+            {
+                "COPILOT_GITHUB_TOKEN": "github_pat_x",
+                "COPILOT_ARGS": str(arguments),
+                "MODEL": "claude-opus-5.5",
+                "REASONING_EFFORT": effort,
+                "MAX_AI_CREDITS": credits,
+            },
+        )
+        self.assertEqual(code, 0, self.output)
+        return arguments.read_text(encoding="utf-8").splitlines()
+
+    def test_the_check_accepts_empty_and_every_level(self) -> None:
+        """Empty passes, as does each level and any positive integer."""
+        self.assertEqual(self.check("", ""), 0, self.output)
+        for level in REASONING_EFFORTS:
+            with self.subTest(level=level):
+                self.assertEqual(self.check(level, "1"), 0, self.output)
+        self.assertEqual(self.check("", "250"), 0, self.output)
+
+    def test_the_check_refuses_anything_else(self) -> None:
+        """An unknown level or a cap that is not a positive integer fails."""
+        for effort in ("High", "extreme", "default", "high low"):
+            with self.subTest(effort=effort):
+                self.assertNotEqual(self.check(effort, ""), 0)
+                self.assertIn("reasoning_effort must be", self.output)
+        for credits in ("0", "-1", "07", "1.5", "ten", " 5", "5 "):
+            with self.subTest(credits=credits):
+                self.assertNotEqual(self.check("", credits), 0)
+                self.assertIn("max_ai_credits must be", self.output)
+
+    def test_empty_inputs_pass_neither_flag(self) -> None:
+        """Empty leaves the CLI at its own defaults."""
+        arguments = self.agent_arguments("", "")
+        self.assertIn("--model=claude-opus-5.5", arguments)
+        self.assertIn("--share=artefacts/session-summary.md", arguments)
+        self.assertFalse(
+            [a for a in arguments if a.startswith(("--reasoning", "--max-ai"))]
+        )
+
+    def test_each_set_input_passes_its_flag_alone(self) -> None:
+        """Each flag appears when its input is set and not otherwise."""
+        arguments = self.agent_arguments("xhigh", "")
+        self.assertIn("--reasoning-effort=xhigh", arguments)
+        self.assertFalse([a for a in arguments if a.startswith("--max-ai")])
+        arguments = self.agent_arguments("", "40")
+        self.assertIn("--max-ai-credits=40", arguments)
+        self.assertFalse([a for a in arguments if a.startswith("--reasoning")])
+        arguments = self.agent_arguments("low", "7")
+        self.assertIn("--reasoning-effort=low", arguments)
+        self.assertIn("--max-ai-credits=7", arguments)
+
+
+class SessionTuningCallers(unittest.TestCase):
+    """Each dispatch form offers both, empty by default, and forwards them."""
+
+    def test_each_caller_offers_and_forwards_both(self) -> None:
+        """A schedule has no inputs, so its forwarded values are empty."""
+        for path, job in (
+            (CRON, "code-review"),
+            (ANTAGONISTIC, "code-review"),
+            (TESTING, "dry-run"),
+        ):
+            loaded = cast(
+                dict[str | bool, Any], yaml.safe_load(path.read_text(encoding="utf-8"))
+            )
+            form = loaded[TRIGGERS]["workflow_dispatch"]["inputs"]
+            call = cast(dict[str, Any], loaded["jobs"][job])
+            for name in TUNING_INPUTS:
+                with self.subTest(caller=path.name, input=name):
+                    self.assertEqual(form[name]["type"], "string")
+                    self.assertEqual(form[name]["default"], "")
+                    self.assertEqual(
+                        call["with"][name], f"${{{{ inputs.{name} || '' }}}}"
+                    )
+
+
 class ApplyContracts(ReusableWorkflowCase):
     """The trusted apply job: verification, bounded fetch, the one write."""
 
@@ -1018,6 +1197,8 @@ class InputContracts(ReusableWorkflowCase):
                 "mode",
                 "dry_run",
                 "model",
+                "reasoning_effort",
+                "max_ai_credits",
                 "approve_tiers",
                 "pull_requests",
                 "repositories",
@@ -1050,6 +1231,8 @@ class InputContracts(ReusableWorkflowCase):
         self.assertEqual(inputs["mode"]["default"], "approve")
         self.assertTrue(inputs["dry_run"]["default"])
         self.assertEqual(inputs["model"]["default"], "claude-opus-5.5")
+        self.assertEqual(inputs["reasoning_effort"]["default"], "")
+        self.assertEqual(inputs["max_ai_credits"]["default"], "")
         self.assertEqual(inputs["approve_tiers"]["default"], "trivial,low-risk")
         self.assertEqual(inputs["max_pull_requests"]["default"], "20")
         self.assertEqual(inputs["stale_status_minutes"]["default"], "8")
@@ -1093,6 +1276,8 @@ class CronContracts(WorkflowCase):
             {
                 "dry_run",
                 "model",
+                "reasoning_effort",
+                "max_ai_credits",
                 "approve_tiers",
                 "pull_requests",
                 "repositories",
@@ -1341,6 +1526,8 @@ class AntagonisticCallerContracts(WorkflowCase):
             {
                 "dry_run",
                 "model",
+                "reasoning_effort",
+                "max_ai_credits",
                 "pull_requests",
                 "repositories",
                 "max_pull_requests",

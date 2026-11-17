@@ -5,9 +5,9 @@
 
 Kept apart from the selection flow so the accepted spellings of a
 repository list, a pull request list, the review mode, the approval
-tiers, the bot author list and the stale status rule read as one
-contract, and so the flow in ``select_pulls`` stays short enough to
-follow.
+tiers, the bot author list, the stale status rule and the session
+tuning read as one contract, and so the flow in ``select_pulls``
+stays short enough to follow.
 """
 
 from __future__ import annotations
@@ -28,6 +28,8 @@ APPROVABLE_TIERS = frozenset({"trivial", "low-risk"})
 # ``approve`` reviews human pull requests and may approve them;
 # ``antagonistic`` reviews listed bots' pull requests and may comment.
 MODES = ("approve", "antagonistic")
+# The Copilot CLI's --reasoning-effort levels; empty keeps the model's.
+REASONING_EFFORTS = ("none", "minimal", "low", "medium", "high", "xhigh", "max")
 BOT_LOGIN_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9-]*")
 # A commit status context name: printable, without the comment marker.
 STATUS_CONTEXT_RE = re.compile(r"[^\x00-\x1f\x7f#]{1,255}")
@@ -89,6 +91,29 @@ def parse_stale_status_minutes(text: str) -> int:
     if not re.fullmatch(r"\d+", text.strip()):
         raise SelectionError(
             f"stale_status_minutes must be a non-negative integer, got {text!r}"
+        )
+    return int(text)
+
+
+def parse_reasoning_effort(text: str) -> str | None:
+    """Accept an empty value, meaning the model's default, or one CLI level."""
+    if not text:
+        return None
+    if text not in REASONING_EFFORTS:
+        raise SelectionError(
+            f"reasoning_effort must be empty or one of "
+            f"{', '.join(REASONING_EFFORTS)}, got {text!r}"
+        )
+    return text
+
+
+def parse_max_ai_credits(text: str) -> int | None:
+    """Accept an empty value, meaning no cap, or a positive integer."""
+    if not text:
+        return None
+    if not re.fullmatch(r"[1-9][0-9]*", text):
+        raise SelectionError(
+            f"max_ai_credits must be empty or a positive integer, got {text!r}"
         )
     return int(text)
 

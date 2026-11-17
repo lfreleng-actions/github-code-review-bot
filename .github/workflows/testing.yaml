@@ -29,6 +29,16 @@ on:
           - 'approve'
           - 'antagonistic'
         default: 'approve'
+      reasoning_effort:
+        description: >-
+          Reasoning effort per session (none, minimal, low, medium,
+          high, xhigh or max; empty = the model's default)
+        type: string
+        default: ''
+      max_ai_credits:
+        description: 'AI credits per session at most (empty = no cap)'
+        type: string
+        default: ''
       pull_requests:
         description: 'Pull requests for the manual dry-run (see cron form)'
         type: string
@@ -104,6 +114,8 @@ jobs:
       approve_tiers: >-
         ${{ inputs.mode == 'antagonistic' && 'none' || 'trivial,low-risk' }}
       dry_run: true
+      reasoning_effort: "${{ inputs.reasoning_effort || '' }}"
+      max_ai_credits: "${{ inputs.max_ai_credits || '' }}"
       pull_requests: "${{ inputs.pull_requests || '' }}"
       repositories: "${{ inputs.repositories || '' }}"
       max_pull_requests: "${{ inputs.max_pull_requests || '2' }}"

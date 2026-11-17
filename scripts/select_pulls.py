@@ -49,9 +49,11 @@ from selection_inputs import (
     load_exclusions,
     load_stale_statuses,
     parse_approve_tiers,
+    parse_max_ai_credits,
     parse_max_pull_requests,
     parse_mode,
     parse_pull_requests,
+    parse_reasoning_effort,
     parse_repositories,
     parse_stale_status_minutes,
 )
@@ -295,6 +297,8 @@ def build_selection(args: argparse.Namespace) -> dict[str, Any]:
     exclusions = set(load_exclusions(args.exclude_file, args.exclude_repos))
     max_pull_requests = parse_max_pull_requests(args.max_pull_requests)
     approve_tiers = parse_approve_tiers(args.approve_tiers)
+    reasoning_effort = parse_reasoning_effort(args.reasoning_effort)
+    max_ai_credits = parse_max_ai_credits(args.max_ai_credits)
     stale_minutes = parse_stale_status_minutes(args.stale_status_minutes)
     stale_contexts = load_stale_statuses(args.stale_statuses_file)
     stale = StalePolicy(
@@ -352,6 +356,8 @@ def build_selection(args: argparse.Namespace) -> dict[str, Any]:
         "generated_at": datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "dry_run": bool(args.dry_run),
         "model": args.model,
+        "reasoning_effort": reasoning_effort,
+        "max_ai_credits": max_ai_credits,
         "approve_tiers": approve_tiers,
         "stale_status_contexts": stale_contexts,
         "stale_status_minutes": stale_minutes,
@@ -378,6 +384,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--model", required=True)
     parser.add_argument("--approve-tiers", required=True)
+    parser.add_argument("--reasoning-effort", default="")
+    parser.add_argument("--max-ai-credits", default="")
     parser.add_argument("--ledger", type=Path, required=True)
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--reassess", action="store_true")
