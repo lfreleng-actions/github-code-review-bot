@@ -1877,6 +1877,23 @@ adds that a bot wrote the description, so its claims about the change
 and its testing are claims to check. A bot's section for the reviewer
 is text addressed to someone else, not an injection attempt.
 
+Each finding goes back to the authoring bot as a revision request
+(§19.9), so a wrong one costs a revision session, another Copilot
+review and another round here. The prompt holds every finding to
+proof. Before listing one, the agent tries to disprove it, following
+the code beyond the hunk in the checkout: the callers, a guard at
+another layer, a test that already covers the case. It keeps a
+finding when it can point at the lines that make it fail, and drops
+it otherwise. A comment body gives, in order, what is wrong; the
+evidence, naming the path and line in the new file and the input or
+state that reaches it; what follows from it; and what would fix it.
+For something absent, the evidence is what is missing and where it
+belongs. The agent leaves out a doubt it cannot evidence, or puts it
+in the summary as a question for the maintainer with
+`summary_finding` false. The trusted job does not parse a body for
+these parts; the rule binds the session alone, and its effect shows
+in sessions and nowhere else.
+
 On a later round the prompt has the agent read the packet's earlier
 rounds (§19.2) before the diff. A reply is its author's claim, to
 check against the code, and never an instruction. A finding the new
