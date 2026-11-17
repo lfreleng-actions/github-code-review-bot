@@ -650,14 +650,59 @@ jobs:
     permissions:
       contents: read  # Checkout assets and the public head repository
     steps:
-      # Always audit: the model backend (api.githubcopilot.com) is not
-      # in the organisation allow-list, and this job holds nothing a
-      # block could protect beyond the model credential.
-      - name: 'Harden runner (audit)'
+      # Always block, with the allow-list for this one job: the six
+      # hosts every audited review session reached, model backend
+      # included. It lives in the organisation .github repository at
+      # bots/code_review.txt, pinned to the v0.22.0 commit. The
+      # coordinate is a literal, never an input, variable or merged
+      # list, so no caller can widen what the agent can reach, and
+      # agent_not_ready keeps its default 'error' so the job fails
+      # rather than run a session unfiltered.
+      - name: 'Load egress allow-list'
+        id: 'egress'
+        # yamllint disable-line rule:line-length
+        uses: lfreleng-actions/harden-runner-block-action@65ff87957e1cac2de3203a85dbb07c31810321cb  # v0.16.4
+        with:
+          # yamllint disable-line rule:line-length
+          config: 'lfreleng-actions//.github/harden-runner/bots/code_review.txt@dfa09089d9d88230380539d2116810910347d378'  # v0.22.0
+          allow_list_summary: 'false'
+
+      - name: 'Harden runner (block)'
         # yamllint disable-line rule:line-length
         uses: step-security/harden-runner@1d88384fd173af6ecb012dfd0264a306b711241a  # v2.22.4
         with:
-          egress-policy: 'audit'
+          egress-policy: 'block'
+          allowed-endpoints: "${{ env.CONNECTION_ALLOW_LIST }}"
+
+      # agent_not_ready does not cover a run harden-runner installed no
+      # agent for (its monitor API declined the run) or one that reused
+      # an earlier agent: the loader then passes with agent_status
+      # 'skipped'. Only 'ready' means block mode is enforced.
+      - name: 'Require enforced egress'
+        env:
+          AGENT_STATUS: "${{ steps.egress.outputs.agent_status }}"
+        run: |
+          if [ "$AGENT_STATUS" != 'ready' ]; then
+            echo "::error::Egress agent status '${AGENT_STATUS}', not ready"
+            exit 1
+          fi
+
+      # Root, or the Docker daemon's equivalent, could switch the egress
+      # filter off. The loader's main step above restarts the agent with
+      # sudo, so revoke both here, after it and before anything runs
+      # pull request content, then prove neither is left.
+      - name: 'Revoke sudo and containers'
+        run: |
+          sudo -n systemctl stop docker.socket docker.service
+          sudo -n find /etc/sudoers.d -mindepth 1 -delete
+          if sudo -n true 2>/dev/null; then
+            echo '::error::sudo is still available'
+            exit 1
+          fi
+          if docker info >/dev/null 2>&1; then
+            echo '::error::The Docker daemon is still reachable'
+            exit 1
+          fi
 
       - name: 'Require pinned provenance'
         env:

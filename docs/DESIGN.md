@@ -195,11 +195,15 @@ credential: `COPILOT_GITHUB_TOKEN` is a fine-grained PAT with Copilot
 Requests and no repository grants, and the job-native token carries
 `contents: read` alone, with `persist-credentials: false` on every
 checkout. Whatever the session does, it cannot approve, comment,
-push or read a private repository. Its sole product is text, and
-the apply job treats that text as hostile input: bounded on fetch,
-parsed into a validated shape, cross-checked against the trusted
-selection, corroborated against the diff, and then re-verified
-against the live pull request before the one write.
+push or read a private repository, and harden-runner blocks its
+egress to the hosts a review session needs, with sudo and the Docker
+daemon revoked before the session starts (§7.5), so it cannot send
+the model credential or the packet anywhere else. Its sole product
+is text, and the apply job treats that text as hostile input:
+bounded on fetch, parsed into a validated shape, cross-checked
+against the trusted selection, corroborated against the diff, and
+then re-verified against the live pull request before the one
+write.
 
 ### 4.2 What the design trusts the caller with
 
@@ -619,12 +623,37 @@ path.
 
 ### 7.5 Egress
 
-The review job runs harden-runner in `audit` mode whatever the
-caller's `harden_runner_egress`. The model backend,
-`api.githubcopilot.com`, is absent from the organisation allow-list,
-and the job holds nothing a block could protect beyond the model
-credential. §16 records the switch to block mode as a later
-capability.
+The review job runs harden-runner in `block` mode whatever the
+caller's `harden_runner_egress`, with an allow-list of its own: the
+six hosts in `harden-runner/bots/code_review.txt` of the
+organisation `.github` repository, model backend included, built
+from harden-runner's audit records of 344 review sessions, every one
+of which reached those hosts and no other. The job loads it with
+`harden-runner-block-action` before harden-runner starts, pinned to
+the `.github` v0.22.0 commit.
+
+The coordinate is a literal in the job, never an input, a variable
+or a dispatch field, and the job merges in no organisation list,
+supplemental list or extra endpoint, so no caller can widen what a
+session steered by hostile pull request text can reach. The loader
+keeps `agent_not_ready` at `error`: if the egress agent does not
+report ready, the job fails rather than run a session unfiltered.
+That input does not cover a run harden-runner installed no agent for,
+when the StepSecurity API declines the run, or one that reused an
+earlier agent: the loader then passes with `agent_status` `skipped`.
+So a step after harden-runner requires `agent_status` to be `ready`
+before anything else runs.
+
+Root on the runner, or the Docker daemon that stands in for it, could
+switch the filter off. The loader restarts the agent with sudo after a
+transient revert, and harden-runner's `disable-sudo-and-containers`
+hands the revocation to its agent at setup, ahead of those restarts.
+The next step revokes both instead, after the loader finishes: it stops
+Docker, deletes the runner's sudoers drop-ins, and fails unless both
+`sudo -n` and `docker info` then fail. No later step uses sudo.
+
+`preflight.py` checks the trusted jobs' coordinate alone; the
+contract tests pin this one.
 
 ## 8. The Apply Job
 
@@ -1401,9 +1430,6 @@ at threshold 100.
 
 ## 16. Later Capabilities
 
-- **Block-mode egress for the review job**, once the organisation
-  allow-list carries the Copilot backend. The job would then share
-  the trusted jobs' `harden_runner_egress` rather than forcing `audit`.
 - **A supplemental notification channel** for `needs-human`
   verdicts, if humans want one beyond the run report: a digest
   issue, a chat message, or a label on the pull request. Each is a
@@ -2003,7 +2029,8 @@ anything else, so no caller can configure this mode to approve.
 
 The review job does not change: the same packet, the same
 credential-free checkout, the same confined CLI with the model
-credential alone. The
+credential alone, and the same block-mode egress to the review
+job's own allow-list (§7.5). The
 runtime context names the mode and says the trusted job may comment
 and never approve.
 
