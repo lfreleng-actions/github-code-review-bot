@@ -64,6 +64,7 @@ FENCE_RE = re.compile(r"^[ \t]*+(`{3,}+|~{3,}+)([^\r\n]*+)\r?$", re.MULTILINE)
 CONTROL_RE = re.compile(r"[\x00-\x1f\x7f-\x9f\u2028\u2029]")
 NO_VERDICT = "no verdict"
 HUMAN_REQUESTED = "agent judged the change needs a human review"
+INJECTION_REPORTED = "the agent reported an injection attempt"
 # GitHub decodes character references before it links mentions and
 # references, so ``&#64;name`` still mentions and ``&#35;12`` still
 # links. A zero-width space after the trigger is what stops both; the
@@ -353,7 +354,12 @@ def listed_paths(paths: list[str]) -> str:
 def effective_tier(
     verdict: dict[str, Any], trivial: bool, non_trivial: list[str], vetoes: list[str]
 ) -> tuple[str, list[str]]:
-    """Apply corroboration and vetoes to the agent's tier."""
+    """Apply corroboration, the agent's own reports and vetoes to its tier.
+
+    An approval body carries the summary alone, so a finding on an
+    approved change would reach nobody: any finding, like any reported
+    injection attempt, keeps an approvable tier back for a human.
+    """
     tier = str(verdict["tier"])
     reasons: list[str] = []
     if tier == "needs-human":
@@ -361,6 +367,12 @@ def effective_tier(
         return tier, notes or [HUMAN_REQUESTED]
     if tier == "trivial" and not trivial:
         reasons.append(f"trivial claim not corroborated: {listed_paths(non_trivial)}")
+    if findings := verdict["findings"]:
+        reasons.append(
+            f"the agent reported {len(findings)} finding(s); an approval carries none"
+        )
+    if verdict["injection_attempts"]:
+        reasons.append(INJECTION_REPORTED)
     reasons.extend(sanitise(veto, MAX_REASON_CHARS) for veto in vetoes)
     return ("needs-human" if reasons else tier), reasons
 

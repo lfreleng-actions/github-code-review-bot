@@ -209,6 +209,18 @@ class CheckCommandTests(unittest.TestCase):
         check = json.loads((self.root / "out" / "check.json").read_text())
         self.assertEqual(check["reasons"], ["the final fenced block must be json"])
 
+    def test_an_approvable_tier_with_findings_refuses(self) -> None:
+        """A finding on a trivial verdict reaches the report, not an approval."""
+        finding = {"area": "other", "note": "links a page not yet published"}
+        (self.session / "session-summary.md").write_text(
+            verdict_text(findings=[finding])
+        )
+        out = run(self.check_argv())
+        self.assertEqual(out, "approvable=false\ntier=needs-human\n")
+        check = json.loads((self.root / "out" / "check.json").read_text())
+        self.assertEqual(check["agent_tier"], "trivial")
+        self.assertEqual(check["findings"], [finding])
+
     def test_unknown_key_or_tier_fails_the_step(self) -> None:
         """Operator mistakes are operational failures, exit 1."""
         argv = self.check_argv()
