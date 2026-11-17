@@ -444,6 +444,31 @@ class ParseMaxPullRequestsTest(unittest.TestCase):
                 select.parse_max_pull_requests(bad)
 
 
+class SessionTuningInputsTest(unittest.TestCase):
+    """The reasoning effort and the AI credit cap each session runs with."""
+
+    @unittest.expectedFailure
+    def test_reasoning_effort(self) -> None:
+        """Empty keeps the model's default; each CLI level parses as spelt."""
+        self.assertIsNone(select.parse_reasoning_effort(""))
+        for level in ("none", "minimal", "low", "medium", "high", "xhigh", "max"):
+            with self.subTest(level=level):
+                self.assertEqual(select.parse_reasoning_effort(level), level)
+        for bad in ("High", " high", "extreme", "default"):
+            with self.subTest(bad=bad), self.assertRaises(reads.SelectionError):
+                select.parse_reasoning_effort(bad)
+
+    @unittest.expectedFailure
+    def test_max_ai_credits(self) -> None:
+        """Empty sets no cap; a positive integer parses; anything else fails."""
+        self.assertIsNone(select.parse_max_ai_credits(""))
+        self.assertEqual(select.parse_max_ai_credits("1"), 1)
+        self.assertEqual(select.parse_max_ai_credits("250"), 250)
+        for bad in ("0", "-1", "07", "1.5", "ten", " 5"):
+            with self.subTest(bad=bad), self.assertRaises(reads.SelectionError):
+                select.parse_max_ai_credits(bad)
+
+
 class StaleStatusInputsTest(unittest.TestCase):
     """The stale status bound and the list of contexts it covers."""
 
@@ -1128,6 +1153,25 @@ class NamedPullRequestsTest(SelectionCase):
 
 class OutputsTest(SelectionCase):
     """The written files carry the documented shapes."""
+
+    @unittest.expectedFailure
+    def test_selection_records_the_session_tuning(self) -> None:
+        """The checked effort and credit cap sit beside the model."""
+        selection, _, _ = self.run_main(
+            "--reasoning-effort", "xhigh", "--max-ai-credits", "40"
+        )
+        self.assertEqual(selection["model"], "claude-opus-5.5")
+        self.assertEqual(selection["reasoning_effort"], "xhigh")
+        self.assertEqual(selection["max_ai_credits"], 40)
+
+    @unittest.expectedFailure
+    def test_bad_session_tuning_fails_the_run(self) -> None:
+        """An unknown level or a cap that is not a positive integer stops it."""
+        for flag, bad in (("--reasoning-effort", "huge"), ("--max-ai-credits", "0")):
+            with self.subTest(flag=flag), self.assertRaises(SystemExit) as caught:
+                self.run_main(flag, bad)
+            self.assertEqual(caught.exception.code, 1)
+            self.assertIn(flag[2:].replace("-", "_"), self.stderr.getvalue())
 
     def test_selection_shape(self) -> None:
         """Header fields, every skip key, sorted entries and the entry shape."""

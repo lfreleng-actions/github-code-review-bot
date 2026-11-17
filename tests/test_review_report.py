@@ -501,6 +501,29 @@ class ReportShapeTest(unittest.TestCase):
         self.assertEqual(rendered.count("None."), 2)
         self.assertIn("Mode: approve; dry run: no", rendered)
 
+    @unittest.expectedFailure
+    def test_mode_line_names_the_session_tuning(self) -> None:
+        """The effort and the credit cap the selection recorded follow the mode."""
+        selection = make_selection(skipped=[], pull_requests=[])
+        rendered = report.render_markdown(
+            report.build_report(selection, [], 0), selection, []
+        )
+        self.assertIn(
+            "Mode: approve; dry run: no; reasoning effort: default;"
+            " AI credit cap: none",
+            rendered,
+        )
+        selection = make_selection(
+            skipped=[], pull_requests=[], reasoning_effort="high", max_ai_credits=30
+        )
+        rendered = report.render_markdown(
+            report.build_report(selection, [], 0), selection, []
+        )
+        self.assertIn(
+            "Mode: approve; dry run: no; reasoning effort: high; AI credit cap: 30",
+            rendered,
+        )
+
 
 def model_usage(model: str, **figures: Any) -> dict[str, Any]:
     """One model's row of a result's usage record."""
