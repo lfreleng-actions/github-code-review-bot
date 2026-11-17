@@ -274,8 +274,9 @@ Accepted spellings: `repo/pull/N`, `owner/repo/pull/N`, `repo#N`,
 Named pull requests bypass the exclusion list and the scan, nothing
 else.
 Every other rule still applies: a draft, a red build, a pending
-Copilot review or a standing approval still skips the pull request,
-and the report says so. Add `-f reassess=true` to review a head the
+Copilot review, a standing approval or, in the approve mode, a
+repository on `config/governing-repos.txt` still skips the pull
+request, and the report says so. Add `-f reassess=true` to review a head the
 ledger already records.
 
 ## Recovery

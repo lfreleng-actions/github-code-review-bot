@@ -19,9 +19,9 @@ approval relies on it; a listed commit status waiting longer than
 ``--stale-status-minutes`` is stale and does not hold CI at pending.
 
 Named pull requests bypass the exclusion list and the search alone;
-every other rule still applies to them. When both pull requests and
-repositories are named, the pull requests win and the repository
-scope is recorded but not searched.
+every other rule, the governing repository rule too, applies to them.
+When both pull requests and repositories are named, the pull requests
+win and the repository scope is recorded but not searched.
 
 Outputs in ``--output-dir``: ``selection.json``, ``matrix.json``,
 ``excluded-repos.txt`` and ``selection-summary.md``. The prior ledger
@@ -49,6 +49,7 @@ from pull_reads import SelectionError
 from selection_inputs import (
     load_bot_authors,
     load_exclusions,
+    load_governing_repos,
     load_stale_statuses,
     parse_approve_tiers,
     parse_max_ai_credits,
@@ -60,7 +61,7 @@ from selection_inputs import (
     parse_stale_status_minutes,
 )
 from selection_outputs import write_outputs
-from selection_rules import Rules, Skips, author_skip, first_skip
+from selection_rules import Rules, Skips, author_skip, first_skip, governing_skip
 
 SCHEMA = 1
 # GitHub expands at most 256 jobs from one matrix; a larger selection
@@ -114,7 +115,7 @@ def searched_candidates(
             skips.add(candidate, "repository")
             continue
         author = pull.get("author")
-        reason = author_skip(
+        reason = governing_skip(name, rules) or author_skip(
             reads.require_object(author, "search author")
             if author is not None
             else None,
@@ -336,6 +337,7 @@ def build_selection(args: argparse.Namespace) -> dict[str, Any]:
 
     rules = Rules(
         mode=mode,
+        governing=frozenset(load_governing_repos(args.governing_repos_file, mode)),
         bot_authors=bot_authors,
         prior=ledger.load_ledger(args.ledger),
         dry_run=bool(args.dry_run),
@@ -375,6 +377,7 @@ def build_selection(args: argparse.Namespace) -> dict[str, Any]:
         ],
         "explicit_repositories": explicit,
         "exclusions": sorted(exclusions),
+        "governing_repositories": sorted(rules.governing),
         "candidates_seen": seen,
         "skip_counts": skips.counts,
         "skipped": skips.rows,
@@ -399,6 +402,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--repositories", default="")
     parser.add_argument("--exclude-file", type=Path)
     parser.add_argument("--exclude-repos", default="")
+    parser.add_argument("--governing-repos-file", type=Path)
     parser.add_argument("--bot-authors-file", type=Path)
     parser.add_argument("--handback-authors-file", type=Path)
     parser.add_argument("--max-pull-requests", default="10")
