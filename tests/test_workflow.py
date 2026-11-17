@@ -120,6 +120,14 @@ ISOLATION_ROUTES = {
 COMMIT_PIN = re.compile(r"^[^@\s]+@[0-9a-f]{40}$")
 SECRET_REFERENCE = re.compile(r"secrets\.[A-Za-z0-9_]+")
 ALLOW_CONFIG = re.compile(r"^@[0-9a-f]{40}$")
+# The review job's own allow-list: the bot list at .github v0.22.0.
+REVIEW_ALLOW_CONFIG = (
+    "lfreleng-actions//.github/harden-runner/bots/code_review.txt"
+    "@dfa09089d9d88230380539d2116810910347d378"
+)
+REVIEW_ALLOW_CONFIG_SHAPE = re.compile(
+    r"^lfreleng-actions//\.github/harden-runner/bots/code_review\.txt@[0-9a-f]{40}$"
+)
 
 
 def squash(text: str) -> str:
@@ -269,26 +277,100 @@ class TopLevelContracts(ReusableWorkflowCase):
                 with self.subTest(job=job, path=step["with"].get("path")):
                     self.assertIs(step["with"]["persist-credentials"], False)
 
+    @unittest.expectedFailure
     def test_harden_runner_leads_every_job(self) -> None:
         """Egress hardening is the first action in each job; trusted jobs honour the input."""
         for job in self.jobs:
             steps = self.steps(job)
             first_action = next(s for s in steps if "uses" in s)
             with self.subTest(job=job):
+                self.assertTrue(is_action(first_action, BLOCK_ACTION))
+                harden = self.action(job, HARDEN_RUNNER)
+                self.assertLess(steps.index(first_action), steps.index(harden))
                 if job in TRUSTED_JOBS:
-                    self.assertTrue(is_action(first_action, BLOCK_ACTION))
-                    harden = self.action(job, HARDEN_RUNNER)
                     self.assertEqual(
                         harden["with"]["egress-policy"],
                         "${{ inputs.harden_runner_egress }}",
                     )
-                else:
-                    self.assertTrue(is_action(first_action, HARDEN_RUNNER))
-                    self.assertEqual(first_action["with"]["egress-policy"], "audit")
 
-    def test_review_job_never_loads_the_allow_list(self) -> None:
-        """The review job audits: the model backend is outside the allow-list."""
-        self.assertEqual(self.actions("review", BLOCK_ACTION), [])
+    @unittest.expectedFailure
+    def test_review_job_blocks_egress_to_the_bot_list(self) -> None:
+        """The review job always blocks, with a literal, pinned bot list.
+
+        No input, variable or merged list reaches the loader, so no
+        caller can widen what the agent can reach, and the loader
+        keeps failing closed when the egress agent is not ready.
+        """
+        steps = self.steps("review")
+        loader = self.action("review", BLOCK_ACTION)
+        harden = self.action("review", HARDEN_RUNNER)
+        self.assertLess(steps.index(loader), steps.index(harden))
+        self.assertNotIn("if", loader)
+        self.assertEqual(loader["with"]["config"], REVIEW_ALLOW_CONFIG)
+        self.assertRegex(loader["with"]["config"], REVIEW_ALLOW_CONFIG_SHAPE)
+        for key in ("supplemental_config", "extra_endpoints"):
+            with self.subTest(key=key):
+                self.assertNotIn(key, loader["with"])
+        self.assertEqual(loader["with"].get("agent_not_ready", "error"), "error")
+        self.assertEqual(harden["with"]["egress-policy"], "block")
+        self.assertEqual(
+            harden["with"]["allowed-endpoints"], "${{ env.CONNECTION_ALLOW_LIST }}"
+        )
+
+    @unittest.expectedFailure
+    def test_review_job_requires_a_ready_egress_agent(self) -> None:
+        """The session waits on an agent that reports ready, never skipped.
+
+        The loader passes with ``agent_status`` ``skipped`` when
+        harden-runner installed no agent, whatever ``agent_not_ready``
+        says, so a gate after harden-runner and before the session
+        accepts ``ready`` alone.
+        """
+        loader = self.action("review", BLOCK_ACTION)
+        harden = self.action("review", HARDEN_RUNNER)
+        gate = self.step("review", "Require enforced egress")
+        steps = self.steps("review")
+        self.assertLess(steps.index(harden), steps.index(gate))
+        self.assertLess(steps.index(gate), self.position("review", "agent"))
+        self.assertEqual(
+            gate["env"]["AGENT_STATUS"],
+            f"${{{{ steps.{loader['id']}.outputs.agent_status }}}}",
+        )
+        for key in ("if", "continue-on-error"):
+            with self.subTest(key=key):
+                self.assertNotIn(key, gate)
+        script = flatten(gate["run"])
+        self.assertIn("if [ \"$AGENT_STATUS\" != 'ready' ]; then", script)
+        self.assertIn("exit 1", script)
+
+    @unittest.expectedFailure
+    def test_review_job_revokes_sudo_and_containers(self) -> None:
+        """Root and the Docker daemon are gone before the session starts.
+
+        The loader's restarts need sudo, so the revocation follows
+        harden-runner, precedes the session, proves itself, and no
+        later step asks for sudo again.
+        """
+        steps = self.steps("review")
+        revoke = self.step("review", "Revoke sudo and containers")
+        index = steps.index(revoke)
+        self.assertLess(steps.index(self.action("review", HARDEN_RUNNER)), index)
+        self.assertLess(index, self.position("review", "agent"))
+        for key in ("if", "continue-on-error"):
+            with self.subTest(key=key):
+                self.assertNotIn(key, revoke)
+        lines = script_lines(revoke["run"])
+        for command in (
+            "sudo -n systemctl stop docker.socket docker.service",
+            "sudo -n find /etc/sudoers.d -mindepth 1 -delete",
+            "if sudo -n true 2>/dev/null; then",
+            "if docker info >/dev/null 2>&1; then",
+        ):
+            with self.subTest(command=command):
+                self.assertIn(command, [squash(line) for line in lines])
+        for later in steps[index + 1 :]:
+            with self.subTest(step=later.get("name")):
+                self.assertNotRegex(str(later.get("run", "")), r"\bsudo\b")
 
     def test_every_allow_list_loader_passes_every_input(self) -> None:
         """Each loader passes the baseline, supplemental and extra endpoints.
@@ -311,7 +393,7 @@ class TopLevelContracts(ReusableWorkflowCase):
             "extra_endpoints": "${{ inputs.harden_runner_extra_endpoints }}",
         }
         loaders = 0
-        for job in self.jobs:
+        for job in TRUSTED_JOBS:
             for step in self.actions(job, BLOCK_ACTION):
                 loaders += 1
                 with self.subTest(job=job):
