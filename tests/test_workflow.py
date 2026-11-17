@@ -277,7 +277,6 @@ class TopLevelContracts(ReusableWorkflowCase):
                 with self.subTest(job=job, path=step["with"].get("path")):
                     self.assertIs(step["with"]["persist-credentials"], False)
 
-    @unittest.expectedFailure
     def test_harden_runner_leads_every_job(self) -> None:
         """Egress hardening is the first action in each job; trusted jobs honour the input."""
         for job in self.jobs:
@@ -293,7 +292,6 @@ class TopLevelContracts(ReusableWorkflowCase):
                         "${{ inputs.harden_runner_egress }}",
                     )
 
-    @unittest.expectedFailure
     def test_review_job_blocks_egress_to_the_bot_list(self) -> None:
         """The review job always blocks, with a literal, pinned bot list.
 
@@ -317,7 +315,6 @@ class TopLevelContracts(ReusableWorkflowCase):
             harden["with"]["allowed-endpoints"], "${{ env.CONNECTION_ALLOW_LIST }}"
         )
 
-    @unittest.expectedFailure
     def test_review_job_requires_a_ready_egress_agent(self) -> None:
         """The session waits on an agent that reports ready, never skipped.
 
@@ -343,7 +340,6 @@ class TopLevelContracts(ReusableWorkflowCase):
         self.assertIn("if [ \"$AGENT_STATUS\" != 'ready' ]; then", script)
         self.assertIn("exit 1", script)
 
-    @unittest.expectedFailure
     def test_review_job_revokes_sudo_and_containers(self) -> None:
         """Root and the Docker daemon are gone before the session starts.
 

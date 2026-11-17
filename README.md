@@ -53,7 +53,8 @@ select (trusted)       review (untrusted, matrix)      apply (trusted, matrix)
    a bounded packet per survivor: metadata, commits, CI, reviews and
    every file's diff.
 2. **Review** runs once per pull request on its own runner with the
-   model credential alone. The agent reads the packet and an unprivileged
+   model credential alone, egress blocked to the hosts a review
+   session needs, and no sudo or Docker. The agent reads the packet and an unprivileged
    checkout of the head commit and emits one verdict:
    `trivial`, `low-risk` or `needs-human`, with a summary and findings.
 3. **Apply** verifies the evidence, corroborates a `trivial` claim with
