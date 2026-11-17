@@ -321,30 +321,31 @@ records a count for every reason, zero included:
 
 <!-- markdownlint-disable MD013 -->
 
-| Reason               | Meaning                                                                                                                                                            |
-| -------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `repository`         | Excluded by `config/excluded-repos.txt` or `exclude_repos`, archived, or outside the organisation                                                                  |
-| `bot_author`         | Approve mode: author is a Bot or App (`is_bot`, typename `Bot`, login ending `[bot]`) or absent. Antagonistic mode: a bot the author list does not name, or absent |
-| `human_author`       | Antagonistic mode alone: the author is a human                                                                                                                     |
-| `untrusted_author`   | Approve mode alone: `authorAssociation`, read with the state, is not `OWNER` or `MEMBER`, or is missing; fork status plays no part                                 |
-| `closed`             | Not `OPEN` at read time                                                                                                                                            |
-| `draft`              | `isDraft`                                                                                                                                                          |
-| `conflicting`        | `mergeable == CONFLICTING`; `UNKNOWN` does not skip                                                                                                                |
-| `changes_requested`  | Some reviewer's latest review is `CHANGES_REQUESTED`                                                                                                               |
-| `already_approved`   | Some reviewer's latest review is `APPROVED` on the current head                                                                                                    |
-| `copilot_pending`    | Copilot is a requested reviewer whose review has not arrived                                                                                                       |
-| `copilot_feedback`   | Unresolved review threads opened by Copilot                                                                                                                        |
-| `round_cap`          | Antagonistic mode alone: this App has reviewed the pull request three times (§19.9)                                                                                |
-| `already_reviewed`   | Antagonistic mode alone: this App has a submitted review of the head (§19.2)                                                                                       |
-| `copilot_unreviewed` | Antagonistic mode alone: no submitted Copilot review of the head itself (§19.2)                                                                                    |
-| `copilot_findings`   | Antagonistic mode alone: Copilot's latest review of the head is not clean: yellow, findings in its body, no assessment, or unreadable (§19.2)                      |
-| `ci_pending`         | Status check rollup `PENDING` or `EXPECTED`, unless the wait is a stale listed status (below); approve mode alone                                                  |
-| `ci_failing`         | Rollup `FAILURE` or `ERROR`; approve mode alone                                                                                                                    |
-| `ci_none`            | No status check rollup at all; approve mode alone                                                                                                                  |
-| `already_assessed`   | The ledger holds this head (§6); `reassess` bypasses                                                                                                               |
-| `too_large`          | More than 200 files or more than 512 KiB of patch                                                                                                                  |
-| `moved`              | The head SHA, base ref or base SHA changed after the selection read the state                                                                                      |
-| `cap`                | Over `max_pull_requests`, oldest `updated_at` first                                                                                                                |
+| Reason                 | Meaning                                                                                                                                                            |
+| ---------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `repository`           | Excluded by `config/excluded-repos.txt` or `exclude_repos`, archived, or outside the organisation                                                                  |
+| `governing_repository` | Approve mode alone: the repository is on `config/governing-repos.txt`, compared without case, scanned or named (below)                                             |
+| `bot_author`           | Approve mode: author is a Bot or App (`is_bot`, typename `Bot`, login ending `[bot]`) or absent. Antagonistic mode: a bot the author list does not name, or absent |
+| `human_author`         | Antagonistic mode alone: the author is a human                                                                                                                     |
+| `untrusted_author`     | Approve mode alone: `authorAssociation`, read with the state, is not `OWNER` or `MEMBER`, or is missing; fork status plays no part                                 |
+| `closed`               | Not `OPEN` at read time                                                                                                                                            |
+| `draft`                | `isDraft`                                                                                                                                                          |
+| `conflicting`          | `mergeable == CONFLICTING`; `UNKNOWN` does not skip                                                                                                                |
+| `changes_requested`    | Some reviewer's latest review is `CHANGES_REQUESTED`                                                                                                               |
+| `already_approved`     | Some reviewer's latest review is `APPROVED` on the current head                                                                                                    |
+| `copilot_pending`      | Copilot is a requested reviewer whose review has not arrived                                                                                                       |
+| `copilot_feedback`     | Unresolved review threads opened by Copilot                                                                                                                        |
+| `round_cap`            | Antagonistic mode alone: this App has reviewed the pull request three times (§19.9)                                                                                |
+| `already_reviewed`     | Antagonistic mode alone: this App has a submitted review of the head (§19.2)                                                                                       |
+| `copilot_unreviewed`   | Antagonistic mode alone: no submitted Copilot review of the head itself (§19.2)                                                                                    |
+| `copilot_findings`     | Antagonistic mode alone: Copilot's latest review of the head is not clean: yellow, findings in its body, no assessment, or unreadable (§19.2)                      |
+| `ci_pending`           | Status check rollup `PENDING` or `EXPECTED`, unless the wait is a stale listed status (below); approve mode alone                                                  |
+| `ci_failing`           | Rollup `FAILURE` or `ERROR`; approve mode alone                                                                                                                    |
+| `ci_none`              | No status check rollup at all; approve mode alone                                                                                                                  |
+| `already_assessed`     | The ledger holds this head (§6); `reassess` bypasses                                                                                                               |
+| `too_large`            | More than 200 files or more than 512 KiB of patch                                                                                                                  |
+| `moved`                | The head SHA, base ref or base SHA changed after the selection read the state                                                                                      |
+| `cap`                  | Over `max_pull_requests`, oldest `updated_at` first                                                                                                                |
 
 <!-- markdownlint-enable MD013 -->
 
@@ -368,8 +369,8 @@ summary names them, and the report lists them (§18.7). Code Monkey
 applies the same rule to its own CI gate
 (`lfreleng-actions/github-code-monkey-bot#168`).
 
-The `repository` and author rules run on the search result
-before any further read. One GraphQL query per survivor then
+The `repository`, `governing_repository` and author rules run on
+the search result before any further read. One GraphQL query per survivor then
 supplies the state the remaining rules inspect; the diff and commit
 read, which costs the most, runs for survivors alone. It reads the
 three-dot comparison of the state's base SHA and head SHA, not the
@@ -392,11 +393,27 @@ limit of 256.
 
 Named pull requests bypass the exclusion list and the search,
 nothing else. Every other rule applies to them, so an operator
-cannot push a draft, a red build or an outside author's change
-through by naming it. A named pull request that the token cannot
-read is an operator error; the
+cannot push a draft, a red build, an outside author's change or a
+change to a governing repository through by naming it. A named
+pull request that the token cannot read is an operator error; the
 same failure during a scan is an operational error. Both fail the
 run.
+
+`config/governing-repos.txt` lists the repositories that govern this
+bot, one name per line with `#` comments: this repository,
+`bots-template` its shared modules come from, the other bots, and the
+organisation's `.github`. An approval counts toward the required
+review (§2), so the approve mode never reviews a pull request there:
+the reviewer must not approve a change to what governs it.
+`select_pulls.py` reads the list from the assets it runs from
+(`config/` beside `scripts/`), so no caller can leave it out; its
+`--governing-repos-file` argument exists for the tests, and no
+workflow input reaches it. In the approve mode a list that is
+missing or unreadable fails the selection. The antagonistic mode
+neither reads nor applies it: that mode never approves, and it must
+go on reviewing the listed bots' pull requests in these
+repositories. The exclusion list cannot stand in, since it stops
+both modes' scans and a named pull request bypasses it.
 
 For each survivor `selection.json` records the head SHA the review
 job will check out, the base ref and base SHA its diff runs from,
@@ -1264,6 +1281,7 @@ config/antagonistic-bot.json             antagonistic App slug
 config/antagonistic-authors.txt          bots the antagonistic mode reviews
 config/handback-authors.txt              bots it hands back to (§19.9)
 config/excluded-repos.txt                repositories the scan skips
+config/governing-repos.txt               repositories approve never reviews (§5)
 config/stale-statuses.txt                statuses that may go stale (§5)
 tools/copilot-cli/                       pinned CLI lockfile
 scripts/bot_github.py                    gh wrapper, REST and GraphQL
@@ -1396,6 +1414,17 @@ Decided:
   status is not the test: members open pull requests from personal
   forks. The antagonistic mode keeps its own author rule, which
   already admits listed bots alone.
+- **Never approve what governs the approver.** The approve mode
+  skips every pull request in a repository on
+  `config/governing-repos.txt` (§5), scanned or named: this bot's
+  own code, the template its trusted modules come from, the other
+  bots and the organisation's policy repository. The list ships with
+  the assets and has no caller override. The scheduled dry runs of
+  6 to 20 October 2026 returned `would-approve` on such pull
+  requests; live, each would have counted toward the required
+  review. Repositories that reach the bot through a pinned `uses:`
+  reference stay off the list: a change there arrives through a pin
+  bump in a listed repository.
 - **Deterministic corroboration of `trivial`.** The agent's tier is
   a claim. The classifier reads the same patches the agent read
   and must agree before an approval goes out under that tier.
@@ -1456,11 +1485,15 @@ against the trusted `selection.json`.
   "explicit_pull_requests": ["lfreleng-actions/repo#157"],
   "explicit_repositories": ["repo"],
   "exclusions": ["project-reporting-artifacts"],
+  "governing_repositories": [".github", "bots-template",
+                             "github-code-monkey-bot",
+                             "github-code-review-bot",
+                             "github-issues-triage-bot"],
   "stale_status_contexts": ["pre-commit.ci - pr"],
   "stale_status_minutes": 8,
   "candidates_seen": 13,
-  "skip_counts": {"draft": 1, "bot_author": 2, "untrusted_author": 1,
-                  "cap": 0},
+  "skip_counts": {"governing_repository": 1, "draft": 1,
+                  "bot_author": 2, "untrusted_author": 1, "cap": 0},
   "skipped": [
     {"repository": "lfreleng-actions/repo", "number": 5,
      "url": "https://github.com/lfreleng-actions/repo/pull/5",
@@ -1521,8 +1554,11 @@ the level the select job checked and `max_ai_credits` the cap as an
 integer; each is `null` when its input is empty. `approve_tiers` holds a
 sorted list, always empty in the antagonistic mode. `bot_authors`
 holds the folded logins that mode reviews, and is empty in the
-approve mode. `skip_counts` carries every reason from §5,
-`untrusted_author` included, in table order. `skipped` has
+approve mode. `governing_repositories` holds the folded, sorted
+names of `config/governing-repos.txt` the approve mode applied, and
+is empty in the antagonistic mode (§5). `skip_counts` carries every
+reason from §5, `governing_repository` and `untrusted_author`
+included, in table order. `skipped` has
 one row per skipped pull request; `title` may be `null` when the
 skip happened before a read. Entries sort by repository and number.
 `base_sha` is the base branch's tip at the state read, not the pull

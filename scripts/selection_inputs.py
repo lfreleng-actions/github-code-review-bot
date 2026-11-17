@@ -33,6 +33,11 @@ REASONING_EFFORTS = ("none", "minimal", "low", "medium", "high", "xhigh", "max")
 BOT_LOGIN_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9-]*")
 # A commit status context name: printable, without the comment marker.
 STATUS_CONTEXT_RE = re.compile(r"[^\x00-\x1f\x7f#]{1,255}")
+# Read from the assets the select job runs from, beside ``scripts/``,
+# so no caller can leave the list out.
+GOVERNING_REPOS_FILE = (
+    Path(__file__).resolve().parents[1] / "config/governing-repos.txt"
+)
 
 
 def parse_repositories(text: str) -> list[str]:
@@ -200,6 +205,33 @@ def load_exclusions(file: Path | None, override: str) -> list[str]:
         return []
     if not file.is_file():
         raise SelectionError(f"exclusion file {file} is not a regular file")
+    return read_repository_list(file)
+
+
+def load_governing_repos(file: Path | None, mode: str) -> list[str]:
+    """Read the repositories the approve mode never reviews, folded and sorted.
+
+    ``None`` reads the bundled list; a path replaces it for tests. The
+    antagonistic mode approves nothing and reads none. In the approve
+    mode the list has no empty default: a file that is missing or
+    unreadable fails the selection rather than approving what governs
+    this bot.
+    """
+    if mode != "approve":
+        return []
+    file = file or GOVERNING_REPOS_FILE
+    if not file.is_file():
+        raise SelectionError(f"governing repository file {file} is not a regular file")
+    try:
+        return sorted(set(read_repository_list(file)))
+    except (OSError, UnicodeDecodeError) as exc:
+        raise SelectionError(
+            f"governing repository file {file} cannot be read: {exc}"
+        ) from exc
+
+
+def read_repository_list(file: Path) -> list[str]:
+    """Parse one repository name per line, ``#`` starting a comment."""
     names: list[str] = []
     for line in file.read_text(encoding="utf-8").splitlines():
         stripped = line.split("#", 1)[0].strip()

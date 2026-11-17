@@ -22,6 +22,7 @@ from selection_inputs import bot_identity
 
 SKIP_REASONS = (
     "repository",
+    "governing_repository",
     "bot_author",
     "human_author",
     "untrusted_author",
@@ -89,16 +90,30 @@ class Rules:
 
     ``history`` reads a pull request's full review history; the
     antagonistic rules call it last, so a pull request an earlier rule
-    skips costs no paginated read.
+    skips costs no paginated read. ``governing`` holds the folded
+    names of the repositories the approve mode never reviews.
     """
 
     mode: str
+    governing: frozenset[str] = frozenset()
     bot_authors: list[str] = field(default_factory=list[str])
     prior: dict[str, Any] = field(default_factory=ledger.empty_ledger)
     dry_run: bool = False
     reassess: bool = False
     bot_login: str | None = None
     history: Callable[[str, int], list[dict[str, Any]]] | None = None
+
+
+def governing_skip(repo_name: str, rules: Rules) -> str | None:
+    """The governing rule: the approve mode skips the repositories that govern it.
+
+    An approval counts toward the required review, so it must never
+    land on this bot's own code, its template or the policy it obeys.
+    The antagonistic mode approves nothing and keeps reviewing there.
+    """
+    if rules.mode == "approve" and repo_name.lower() in rules.governing:
+        return "governing_repository"
+    return None
 
 
 def author_skip(
@@ -239,6 +254,9 @@ def first_skip(state: dict[str, Any], rules: Rules) -> str | None:
     """The first skip rule the pull request's state trips, in table order."""
     if state["repository_archived"] or state["head_repository"] is None:
         return "repository"
+    governing = governing_skip(str(state["repository"]).partition("/")[2], rules)
+    if governing is not None:
+        return governing
     author = author_skip(
         state["author"], mode=rules.mode, bot_authors=rules.bot_authors
     )

@@ -1,0 +1,14 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Linux Foundation
+#
+# Repositories whose changes govern this bot: its own code, the
+# template its shared modules come from, the bots it reviews for, and
+# the organisation's policy repository. The approve mode never reviews
+# a pull request here, scanned or named; the antagonistic mode ignores
+# this list. One name per line, '#' starts a comment. select_pulls.py
+# reads it from the assets it runs from; no caller input overrides it.
+.github
+bots-template
+github-code-monkey-bot
+github-code-review-bot
+github-issues-triage-bot

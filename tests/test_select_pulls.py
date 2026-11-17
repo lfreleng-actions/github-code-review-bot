@@ -1146,6 +1146,7 @@ class AuthorAssociationTest(SelectionCase):
     def test_a_missing_association_is_untrusted(self) -> None:
         """A state without an association never passes the author rule."""
         state: dict[str, Any] = {
+            "repository": "org/alpha",
             "repository_archived": False,
             "head_repository": "org/alpha",
             "author": {"login": "alice", "is_bot": False},
@@ -1214,6 +1215,70 @@ class NamedPullRequestsTest(SelectionCase):
             self.run_main("--pull-requests", "alpha#404")
         self.assertEqual(caught.exception.code, 1)
         self.assertIn("named pull request org/alpha#404", self.stderr.getvalue())
+
+
+GOVERNING = [
+    ".github",
+    "bots-template",
+    "github-code-monkey-bot",
+    "github-code-review-bot",
+    "github-issues-triage-bot",
+]
+
+
+class GoverningRepositoriesTest(SelectionCase):
+    """The approve mode never reviews the repositories that govern it."""
+
+    def setUp(self) -> None:
+        """Write a governing list naming alpha in another case."""
+        super().setUp()
+        holder = tempfile.TemporaryDirectory()
+        self.addCleanup(holder.cleanup)
+        self.governing = Path(holder.name) / "governing.txt"
+        self.governing.write_text("# heading\nALPHA  # trailing\n", encoding="utf-8")
+
+    def test_scanned_pull_request_skips_before_any_read(self) -> None:
+        """A listed repository's search hit skips, whatever its case, unread."""
+        self.gh.add("alpha", 1)
+        selection, out, _ = self.run_main("--governing-repos-file", str(self.governing))
+        self.assert_only_skip(selection, "governing_repository")
+        self.assertEqual(selection["governing_repositories"], ["alpha"])
+        self.assertFalse(any(args[:2] == ["api", "graphql"] for args in self.gh.calls))
+        summary = (out / "selection-summary.md").read_text(encoding="utf-8")
+        self.assertIn("| governing_repository | 1 |", summary)
+
+    def test_named_pull_request_skips(self) -> None:
+        """Naming a pull request does not lift the rule."""
+        self.gh.pulls[("org/alpha", 1)] = pull_node("alpha", 1)
+        selection, _, _ = self.run_main(
+            "--pull-requests", "alpha#1", "--governing-repos-file", str(self.governing)
+        )
+        self.assert_only_skip(selection, "governing_repository")
+
+    def test_unlisted_repository_is_unaffected(self) -> None:
+        """Only the listed repository skips."""
+        self.gh.add("alpha", 1)
+        self.gh.add("beta", 2)
+        selection, _, _ = self.run_main("--governing-repos-file", str(self.governing))
+        self.assertEqual([e["key"] for e in selection["pull_requests"]], ["beta-2"])
+        self.assertEqual(selection["skip_counts"]["governing_repository"], 1)
+
+    def test_bundled_list_applies_by_default(self) -> None:
+        """With no override the list beside the scripts applies."""
+        self.gh.add("github-code-review-bot", 1)
+        selection, _, _ = self.run_main()
+        self.assertEqual(selection["governing_repositories"], GOVERNING)
+        self.assertEqual(selection["skip_counts"]["governing_repository"], 1)
+        self.assertEqual(rules.SKIP_REASONS[:2], ("repository", "governing_repository"))
+
+    def test_missing_list_fails_the_selection(self) -> None:
+        """An approve selection without its governing list does not run."""
+        with self.assertRaises(SystemExit) as caught:
+            self.run_main(
+                "--governing-repos-file", str(self.governing.parent / "absent")
+            )
+        self.assertEqual(caught.exception.code, 1)
+        self.assertIn("governing repository file", self.stderr.getvalue())
 
 
 class OutputsTest(SelectionCase):
@@ -1563,6 +1628,20 @@ class AntagonisticSelectionTest(SelectionCase):
         self.gh.add("alpha", 1)
         selection = self.run_antagonistic("--pull-requests", "alpha#1")
         self.assert_only_skip(selection, "human_author")
+
+    def test_governing_repositories_are_still_reviewed(self) -> None:
+        """The governing list is no part of this mode, even when absent."""
+        self.add_bot("github-code-review-bot", 1)
+        for extra in ((), ("--governing-repos-file", "/nonexistent/governing.txt")):
+            with self.subTest(extra=extra):
+                self.gh.calls.clear()
+                selection = self.run_antagonistic(*extra)
+                self.assertEqual(
+                    [e["key"] for e in selection["pull_requests"]],
+                    ["github-code-review-bot-1"],
+                )
+                self.assertEqual(selection["governing_repositories"], [])
+                self.assertEqual(selection["skip_counts"]["governing_repository"], 0)
 
     def test_ci_never_gates_but_copilot_review_does(self) -> None:
         """Red or absent CI is reviewed; a pending Copilot review waits."""
