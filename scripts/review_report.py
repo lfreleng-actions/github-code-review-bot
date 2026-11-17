@@ -310,10 +310,13 @@ def render_markdown(
     }
     counts = cast("dict[str, int]", report["counts"])
     mode = str(report["mode"])
+    effort = one_line(selection.get("reasoning_effort") or "default")
+    cap = one_line(selection.get("max_ai_credits") or "none")
     lines = [
         "# Code review run",
         "",
-        f"Mode: {mode}; dry run: {'yes' if report['dry_run'] else 'no'}",
+        f"Mode: {mode}; dry run: {'yes' if report['dry_run'] else 'no'}; "
+        f"reasoning effort: {effort}; AI credit cap: {cap}",
         "",
         f"Model: {one_line(selection.get('model') or '?')}",
         "",

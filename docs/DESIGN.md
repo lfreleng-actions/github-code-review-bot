@@ -478,6 +478,8 @@ copilot --prompt="$prompt" --model="$MODEL"
   --log-dir=artefacts/copilot-logs
   --usage-output-file artefacts/usage.json
   --share=artefacts/session-summary.md
+  [--reasoning-effort="$REASONING_EFFORT"]
+  [--max-ai-credits="$MAX_AI_CREDITS"]
 ```
 
 The step refuses to start unless the token carries the
@@ -486,6 +488,21 @@ it cannot see extra grants on a fine-grained PAT, which the
 provisioning procedure in the setup guide keeps out. The step's
 `timeout-minutes` is `max_runtime_minutes`; the job's is that plus
 fifteen for toolchain setup and upload.
+
+Each of the last two flags appears when its input, `reasoning_effort`
+or `max_ai_credits`, holds a value; empty, the default, passes
+neither and the session runs at the model's own effort with no
+credit cap. Both reach the step through `env:` entries, never an
+expression in the script, and the select job has checked both
+(§9.1). No run has yet shown which levels each model accepts, what a
+session costs at each, how a credit relates to `nano_aiu` in
+`usage.json`, or how the CLI ends a session at the cap. A session
+that ends at the cap without a usable verdict fares like a timeout:
+apply writes a typed `needs-human` result (§13) and makes no write.
+Neither applier requires the agent step to succeed before it accepts
+a verdict, so one the session wrote before the cap passes through
+the same offline checks and live gates as any other, and may still
+lead to a write.
 
 ### 7.3 What the prompt asks for
 
@@ -810,6 +827,8 @@ code working: a typed `needs-human` result and exit 0.
 | `mode`                                 | `approve`                                 | `approve` or `antagonistic` (§19); picks the App config, prompt, applier and ledger                                 |
 | `dry_run`                              | `true`                                    | Run the agent and the checks; write nothing                                                                         |
 | `model`                                | `claude-opus-5.5`                         | Copilot CLI model identifier, `^[a-z0-9.-]+$`                                                                       |
+| `reasoning_effort`                     | `''`                                      | `none`, `minimal`, `low`, `medium`, `high`, `xhigh` or `max` per session (§7.2); empty keeps the model's default    |
+| `max_ai_credits`                       | `''`                                      | AI credits a session may spend, a positive integer (§7.2); empty sets no cap                                        |
 | `approve_tiers`                        | `trivial,low-risk`                        | Tiers the run may approve: `trivial,low-risk`, `trivial` or `none`; the antagonistic mode requires `none`           |
 | `pull_requests`                        | `''`                                      | Pull requests to review instead of scanning (§9.4)                                                                  |
 | `repositories`                         | `''`                                      | Repository names to scan; commas and/or spaces                                                                      |
@@ -860,7 +879,8 @@ canonical `owner/repo#N` form, never the raw inputs.
 
 Two cron entries, both UTC: `0 */3 * * 1-5` and `0 8,20 * * 0,6`.
 The `workflow_dispatch` form offers `dry_run` (default `true`), a
-model choice, `approve_tiers`, `pull_requests`, `repositories`,
+model choice, `reasoning_effort` and `max_ai_credits` (both empty by
+default), `approve_tiers`, `pull_requests`, `repositories`,
 `max_pull_requests`, `stale_status_minutes`, `max_concurrent_agents`
 and `reassess`.
 
@@ -869,7 +889,8 @@ accepts: Claude Opus 5.5 to `claude-opus-5.5`, Claude Fable 5.2 to
 `claude-fable-5.2`, Claude Sonnet 5.5 to `claude-sonnet-5.5`, GPT-6
 Astra to `gpt-6-astra`. The caller passes `mode: approve` and
 `org: github.repository_owner`, so a fork's scheduled runs stay
-inside the fork; pins the assets to `github.sha`; runs trusted jobs
+inside the fork; forwards `reasoning_effort` and `max_ai_credits`,
+which a schedule passes empty; pins the assets to `github.sha`; runs trusted jobs
 in block mode with the organisation allow-list; and hands
 `vars.BOT_APP_CLIENT_ID`, `secrets.BOT_APP_PRIVATE_KEY`
 and `secrets.COPILOT_CLI_TOKEN` to the reusable workflow. The
@@ -909,8 +930,9 @@ keep the copies identical to the originals.
 
 The full agent session runs from `workflow_dispatch` alone: a
 maintainer dispatches `testing.yaml` against a chosen ref with a
-`mode`, optional `pull_requests`, `repositories` and
-`max_pull_requests` (default 2), two concurrent agents,
+`mode`, optional `reasoning_effort`, `max_ai_credits`,
+`pull_requests`, `repositories` and `max_pull_requests` (default 2),
+two concurrent agents,
 `dry_run: true` and the `COPILOT_CLI_TOKEN` secret. No App
 credential reaches this path, so it can report but never write.
 
@@ -1027,8 +1049,11 @@ whose reason names a missing session.
 The default model is `claude-opus-5.5`. The dispatch form offers
 Claude Opus 5.5, Claude Fable 5.2, Claude Sonnet 5.5 and GPT-6
 Astra (§9.2). The antagonistic caller defaults to GPT-6 Astra
-(§19.7). The selection records the model, the review body and the
-report's opening lines name it from the selection, and `usage.json`
+(§19.7). No caller sets a reasoning effort or an AI credit cap by
+default (§7.2). The selection records the model, the reasoning
+effort and the credit cap; the review body names the model, the
+report's opening lines name all three from the selection, and
+`usage.json`
 supplies premium request cost, API seconds and, for each model the
 session called, its requests, premium requests, input, cache-read,
 cache-write, output and reasoning tokens and nano AIU. The report
@@ -1158,7 +1183,8 @@ whatever the result's provenance.
 
 | Failure                                                  | Effect                                     | Mitigation                                                                                                         |
 | -------------------------------------------------------- | ------------------------------------------ | ------------------------------------------------------------------------------------------------------------------ |
-| Session times out or the CLI fails                       | Summary missing or without a verdict block | Apply writes a typed `needs-human` result with the reason; `reassess` retries the head                             |
+| Session times out, hits its credit cap or the CLI fails  | Summary missing or without a verdict block | Apply writes a typed `needs-human` result with the reason; `reassess` retries the head                             |
+| Session hits its credit cap after writing a verdict      | Verdict from an unsuccessful agent step    | The step's outcome does not gate it; the same offline checks and live gates as any verdict decide the write        |
 | Session artifact missing or refused by the bounded fetch | Exit 3 or 4 from the fetch                 | `--failure` text becomes the reason; typed `needs-human`, no job failure                                           |
 | Session download gets no reply or a transient `5xx`      | `gh` exits 1 in the fetch                  | Retried within the fetch deadline; if it persists, the `failed` fallback and a retry next run                      |
 | Verdict names another repository, number or head         | Target mismatch                            | Offline check refuses; `needs-human` with the reason                                                               |
@@ -1173,7 +1199,7 @@ whatever the result's provenance.
 | Model PAT expired                                        | Every session fails at start               | Prefix guard cannot detect; rotation owner (§10.2); report shows uniform failures                                  |
 | Search hits the 1,000 ceiling                            | Selection fails before filtering           | Restrict `repositories` rather than review a subset                                                                |
 | Two live runs overlap                                    | Possible second approval                   | Caller and reusable concurrency groups; `already_approved` gate on re-read                                         |
-| Runaway spend                                            | Long sessions in parallel                  | `max_runtime_minutes` times `max_concurrent_agents` bounds wall-clock; usage in the report                         |
+| Runaway spend                                            | Long sessions in parallel                  | `max_runtime_minutes` times `max_concurrent_agents` bounds wall-clock; `max_ai_credits` caps each session's spend  |
 | Prompt injection in a pull request                       | Agent misled                               | No credential to misuse; corroboration, vetoes and live gates; steering attempts reported as `injection_attempts`  |
 | Antagonistic comment off the diff                        | GitHub would refuse the whole review       | Offline anchor check lists it in the review body with its reason; a 422 regardless posts every finding in the body |
 | Antagonistic App key wired into the approving caller     | Token from the wrong App                   | Identity check against the mode's config fails the run before any read (§4.4)                                      |
@@ -1383,6 +1409,8 @@ against the trusted `selection.json`.
   "generated_at": "2026-10-05T10:00:00Z",
   "dry_run": true,
   "model": "claude-opus-5.5",
+  "reasoning_effort": null,
+  "max_ai_credits": null,
   "approve_tiers": ["low-risk", "trivial"],
   "bot_authors": [],
   "bot_login": "lf-releng-code-review-bot[bot]",
@@ -1446,7 +1474,9 @@ against the trusted `selection.json`.
 }
 ```
 
-`bot_login` is `null` without an App slug. `approve_tiers` holds a
+`bot_login` is `null` without an App slug. `reasoning_effort` holds
+the level the select job checked and `max_ai_credits` the cap as an
+integer; each is `null` when its input is empty. `approve_tiers` holds a
 sorted list, always empty in the antagonistic mode. `bot_authors`
 holds the folded logins that mode reviews, and is empty in the
 approve mode. `skip_counts` carries every reason from §5,
@@ -1717,8 +1747,10 @@ non-negative numbers, integers for the counts. A result without
 no accepted figure neither adds a figure nor counts a session. A
 figure that would carry a total past a finite number adds nothing,
 which keeps `report.json` strict JSON. `report.md` carries a
-heading with the mode, a line naming the model the selection
-recorded, a one-line count summary, a line naming any unverified result,
+heading, a line naming the mode, the dry run, and the reasoning effort
+(`default` when unset) and AI credit cap (`none` when unset) the
+selection recorded, a line naming the model it recorded, a one-line
+count summary, a line naming any unverified result,
 the gather's notes on artifacts it left out, a table of
 results (pull request link, title, author, tier or comment count,
 verdict, review link or first reason), a table of skipped pull
@@ -2076,8 +2108,9 @@ missed.
 a `schedule` every hour. Its form offers `dry_run` (default
 `true`), a model choice defaulting to GPT-6 Astra, so the second
 read comes from a different model family from the Claude default
-that writes Code Monkey's changes,
-`pull_requests`, `repositories`, `max_pull_requests` (default 10),
+that writes Code Monkey's changes, `reasoning_effort` and
+`max_ai_credits` (both empty by default, §7.2), `pull_requests`,
+`repositories`, `max_pull_requests` (default 10),
 `max_concurrent_agents` (default 5), `reassess` and `handback`
 (default on, §19.9). It passes
 `mode: antagonistic` and `approve_tiers: none` as literals, and the
@@ -2093,7 +2126,8 @@ resolved the last thread by hand, Copilot's review arrived after
 Code Monkey stopped waiting, or a maintainer pushed a fix to the bot
 branch. Nobody would dispatch for such a head. A schedule has no
 inputs, so a scheduled run is live, scans (`pull_requests` and
-`repositories` empty), keeps the form's `max_pull_requests` and
+`repositories` empty), passes `reasoning_effort` and `max_ai_credits`
+empty, keeps the form's `max_pull_requests` and
 `reassess` defaults, and hands back as the form's default does. A
 slot skips its jobs unless `ANTAGONISTIC_SCAN_ENABLED` is `true`
 (§19.8): the `options` job carries the gate and the review job needs

@@ -501,7 +501,6 @@ class ReportShapeTest(unittest.TestCase):
         self.assertEqual(rendered.count("None."), 2)
         self.assertIn("Mode: approve; dry run: no", rendered)
 
-    @unittest.expectedFailure
     def test_mode_line_names_the_session_tuning(self) -> None:
         """The effort and the credit cap the selection recorded follow the mode."""
         selection = make_selection(skipped=[], pull_requests=[])

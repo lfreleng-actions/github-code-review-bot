@@ -79,7 +79,8 @@ requests back to it for revision, under a three-round cap. See
 
 `code-review-cron.yaml` runs every three hours on weekdays and twice
 a day at weekends, and stays in dry-run until the rollout in the
-design document clears it. A manual dispatch chooses the model, the
+design document clears it. A manual dispatch chooses the model, an
+optional reasoning effort and AI credit cap for each session, the
 approvable tiers, a cap, and either repositories to scan or specific
 pull requests to review:
 

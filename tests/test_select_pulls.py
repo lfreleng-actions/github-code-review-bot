@@ -447,7 +447,6 @@ class ParseMaxPullRequestsTest(unittest.TestCase):
 class SessionTuningInputsTest(unittest.TestCase):
     """The reasoning effort and the AI credit cap each session runs with."""
 
-    @unittest.expectedFailure
     def test_reasoning_effort(self) -> None:
         """Empty keeps the model's default; each CLI level parses as spelt."""
         self.assertIsNone(select.parse_reasoning_effort(""))
@@ -458,7 +457,6 @@ class SessionTuningInputsTest(unittest.TestCase):
             with self.subTest(bad=bad), self.assertRaises(reads.SelectionError):
                 select.parse_reasoning_effort(bad)
 
-    @unittest.expectedFailure
     def test_max_ai_credits(self) -> None:
         """Empty sets no cap; a positive integer parses; anything else fails."""
         self.assertIsNone(select.parse_max_ai_credits(""))
@@ -1154,7 +1152,6 @@ class NamedPullRequestsTest(SelectionCase):
 class OutputsTest(SelectionCase):
     """The written files carry the documented shapes."""
 
-    @unittest.expectedFailure
     def test_selection_records_the_session_tuning(self) -> None:
         """The checked effort and credit cap sit beside the model."""
         selection, _, _ = self.run_main(
@@ -1164,7 +1161,6 @@ class OutputsTest(SelectionCase):
         self.assertEqual(selection["reasoning_effort"], "xhigh")
         self.assertEqual(selection["max_ai_credits"], 40)
 
-    @unittest.expectedFailure
     def test_bad_session_tuning_fails_the_run(self) -> None:
         """An unknown level or a cap that is not a positive integer stops it."""
         for flag, bad in (("--reasoning-effort", "huge"), ("--max-ai-credits", "0")):
@@ -1190,6 +1186,8 @@ class OutputsTest(SelectionCase):
         )
         self.assertTrue(selection["dry_run"])
         self.assertEqual(selection["model"], "claude-opus-5.5")
+        self.assertIsNone(selection["reasoning_effort"])
+        self.assertIsNone(selection["max_ai_credits"])
         self.assertEqual(selection["approve_tiers"], ["low-risk", "trivial"])
         self.assertEqual(selection["stale_status_contexts"], [])
         self.assertEqual(selection["stale_status_minutes"], 0)

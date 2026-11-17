@@ -711,7 +711,6 @@ TUNING_INPUTS = ("reasoning_effort", "max_ai_credits")
 class SessionTuningContracts(ReusableWorkflowCase):
     """The reasoning effort and credit cap: checked, recorded, then passed."""
 
-    @unittest.expectedFailure
     def test_both_are_checked_before_any_mint(self) -> None:
         """The select job reads each from an env entry before a token mints."""
         step = self.step("select", "Check inputs")
@@ -724,7 +723,6 @@ class SessionTuningContracts(ReusableWorkflowCase):
             self.position("select", "Mint read-only App token"),
         )
 
-    @unittest.expectedFailure
     def test_the_selection_records_both(self) -> None:
         """The selection script receives both from env entries."""
         step = self.step("select", "Select pull requests")
@@ -736,7 +734,6 @@ class SessionTuningContracts(ReusableWorkflowCase):
         self.assertIn('--reasoning-effort "$REASONING_EFFORT"', run)
         self.assertIn('--max-ai-credits "$MAX_AI_CREDITS"', run)
 
-    @unittest.expectedFailure
     def test_the_agent_reads_both_from_env_alone(self) -> None:
         """No expression in the agent's script names either input."""
         step = self.step("review", "Run review agent (Copilot)")
@@ -817,7 +814,14 @@ class SessionTuningRuns(ReusableWorkflowCase):
         self.assertEqual(code, 0, self.output)
         return arguments.read_text(encoding="utf-8").splitlines()
 
-    @unittest.expectedFailure
+    def test_the_check_accepts_empty_and_every_level(self) -> None:
+        """Empty passes, as does each level and any positive integer."""
+        self.assertEqual(self.check("", ""), 0, self.output)
+        for level in REASONING_EFFORTS:
+            with self.subTest(level=level):
+                self.assertEqual(self.check(level, "1"), 0, self.output)
+        self.assertEqual(self.check("", "250"), 0, self.output)
+
     def test_the_check_refuses_anything_else(self) -> None:
         """An unknown level or a cap that is not a positive integer fails."""
         for effort in ("High", "extreme", "default", "high low"):
@@ -829,7 +833,15 @@ class SessionTuningRuns(ReusableWorkflowCase):
                 self.assertNotEqual(self.check("", credits), 0)
                 self.assertIn("max_ai_credits must be", self.output)
 
-    @unittest.expectedFailure
+    def test_empty_inputs_pass_neither_flag(self) -> None:
+        """Empty leaves the CLI at its own defaults."""
+        arguments = self.agent_arguments("", "")
+        self.assertIn("--model=claude-opus-5.5", arguments)
+        self.assertIn("--share=artefacts/session-summary.md", arguments)
+        self.assertFalse(
+            [a for a in arguments if a.startswith(("--reasoning", "--max-ai"))]
+        )
+
     def test_each_set_input_passes_its_flag_alone(self) -> None:
         """Each flag appears when its input is set and not otherwise."""
         arguments = self.agent_arguments("xhigh", "")
@@ -846,7 +858,6 @@ class SessionTuningRuns(ReusableWorkflowCase):
 class SessionTuningCallers(unittest.TestCase):
     """Each dispatch form offers both, empty by default, and forwards them."""
 
-    @unittest.expectedFailure
     def test_each_caller_offers_and_forwards_both(self) -> None:
         """A schedule has no inputs, so its forwarded values are empty."""
         for path, job in (
@@ -1186,6 +1197,8 @@ class InputContracts(ReusableWorkflowCase):
                 "mode",
                 "dry_run",
                 "model",
+                "reasoning_effort",
+                "max_ai_credits",
                 "approve_tiers",
                 "pull_requests",
                 "repositories",
@@ -1218,6 +1231,8 @@ class InputContracts(ReusableWorkflowCase):
         self.assertEqual(inputs["mode"]["default"], "approve")
         self.assertTrue(inputs["dry_run"]["default"])
         self.assertEqual(inputs["model"]["default"], "claude-opus-5.5")
+        self.assertEqual(inputs["reasoning_effort"]["default"], "")
+        self.assertEqual(inputs["max_ai_credits"]["default"], "")
         self.assertEqual(inputs["approve_tiers"]["default"], "trivial,low-risk")
         self.assertEqual(inputs["max_pull_requests"]["default"], "20")
         self.assertEqual(inputs["stale_status_minutes"]["default"], "8")
@@ -1261,6 +1276,8 @@ class CronContracts(WorkflowCase):
             {
                 "dry_run",
                 "model",
+                "reasoning_effort",
+                "max_ai_credits",
                 "approve_tiers",
                 "pull_requests",
                 "repositories",
@@ -1509,6 +1526,8 @@ class AntagonisticCallerContracts(WorkflowCase):
             {
                 "dry_run",
                 "model",
+                "reasoning_effort",
+                "max_ai_credits",
                 "pull_requests",
                 "repositories",
                 "max_pull_requests",
