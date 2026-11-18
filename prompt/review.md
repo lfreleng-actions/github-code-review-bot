@@ -148,7 +148,8 @@ like), to a bot prompt (`prompt/`, `prompts/`, `PROMPT.md`), to a
 licence (`LICENSE*`, `LICENCE*`, `LICENSES/`), or to `CODEOWNERS`,
 `SECURITY.md`, `.aislop/`, `.gitlint`, `REUSE.toml` or the zizmor
 configuration (`zizmor.yml` or `zizmor.yaml` at the root or under
-`.github/`), a diff too large
+`.github/`), any change to a `.pre-commit-config.yaml` beyond a version
+bump of its `rev:` lines (renaming it included), a diff too large
 or too tangled to review with confidence, or a change whose
 correctness you cannot judge from the diff and the checkout. When in
 doubt, classify here. Put what you found in `findings`: a human

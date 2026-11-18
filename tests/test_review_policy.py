@@ -576,7 +576,6 @@ class ClassifyTrivialTests(unittest.TestCase):
                 with self.subTest(value=value, path=path):
                     self.assertEqual(policy.classify_trivial([file]), (True, []))
 
-    @unittest.expectedFailure
     def test_pre_commit_loose_rev_is_not_trivial(self) -> None:
         """A rev loosened to a branch or HEAD is not a pin."""
         for value in LOOSE_REVS:
@@ -584,7 +583,6 @@ class ClassifyTrivialTests(unittest.TestCase):
             with self.subTest(value=value):
                 self.assertEqual(policy.classify_trivial([file]), (False, [PRE_COMMIT]))
 
-    @unittest.expectedFailure
     def test_pre_commit_long_loose_rev_is_rejected_quickly(self) -> None:
         """A long near-tag rev is loose, found without quadratic backtracking."""
         value = "v1" + ".1" * 10000 + "/branch"
@@ -647,7 +645,6 @@ class VetoTests(unittest.TestCase):
         file = changed(WORKFLOW, "+  contents: write", "+  contents: write")
         self.assertEqual(len(policy.find_vetoes([file])), 1)
 
-    @unittest.expectedFailure
     def test_pre_commit_loose_rev_is_vetoed(self) -> None:
         """A rev loosened to a branch or HEAD is vetoed."""
         for value in LOOSE_REVS:
@@ -655,7 +652,6 @@ class VetoTests(unittest.TestCase):
             with self.subTest(value=value):
                 self.assertEqual(policy.find_vetoes([file]), [LOOSE_REV_VETO])
 
-    @unittest.expectedFailure
     def test_pre_commit_hook_changes_are_vetoed(self) -> None:
         """A change to the hooks themselves is vetoed, once per file."""
         for name, lines in HOOK_CHANGES.items():
@@ -675,7 +671,6 @@ class VetoTests(unittest.TestCase):
             with self.subTest(value=value):
                 self.assertEqual(policy.find_vetoes([file]), [])
 
-    @unittest.expectedFailure
     def test_pre_commit_dropped_rev_is_vetoed(self) -> None:
         """A rev removed with no pin in its place is no bump."""
         for name, lines in DROPPED_REVS.items():
@@ -690,7 +685,6 @@ class VetoTests(unittest.TestCase):
         self.assertEqual(policy.classify_trivial([file]), (True, []))
         self.assertEqual(policy.find_vetoes([file]), [])
 
-    @unittest.expectedFailure
     def test_pre_commit_rename_is_vetoed(self) -> None:
         """Moving the config aside, or a file into its place, is vetoed."""
         for previous, path in PRE_COMMIT_MOVES:
@@ -962,7 +956,6 @@ class CheckTests(unittest.TestCase):
         self.assertEqual(got["reasons"], got["vetoes"])
         self.assertIn("contents: write", got["reasons"][0])
 
-    @unittest.expectedFailure
     def test_dropped_pre_commit_rev_demotes_low_risk(self) -> None:
         """Dropping or moving a hook's rev never approves as trivial or low-risk."""
         for name, lines in DROPPED_REVS.items():
@@ -975,7 +968,6 @@ class CheckTests(unittest.TestCase):
                     self.assertFalse(got["approvable"])
                     self.assertIn(HOOKS_VETO, got["reasons"])
 
-    @unittest.expectedFailure
     def test_removed_pre_commit_hook_demotes_low_risk(self) -> None:
         """Removing a secret scanner's hook never approves as low-risk."""
         got = policy.check(
@@ -987,7 +979,6 @@ class CheckTests(unittest.TestCase):
         self.assertFalse(got["approvable"])
         self.assertEqual(got["reasons"], [HOOKS_VETO])
 
-    @unittest.expectedFailure
     def test_renamed_pre_commit_config_never_approves(self) -> None:
         """A rename past the doc fast path still needs a human."""
         for previous, path in PRE_COMMIT_MOVES:
