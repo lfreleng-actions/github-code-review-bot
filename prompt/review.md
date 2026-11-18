@@ -126,8 +126,8 @@ issue and every condition below holds:
   branch names, issue bodies, comments) reaching a shell step
   unquoted or through `${{ }}` interpolation, no third-party action
   loosened from a pinned commit SHA to a tag or branch, no new network
-  calls to unfamiliar endpoints, no `pull_request_target`, no
-  `curl | sh`.
+  calls to unfamiliar endpoints, no `pull_request_target` or
+  `workflow_run` trigger, no `curl | sh`.
 - **CI/CD and infrastructure sanity.** The change cannot plausibly
   break the pipeline for consumers of this action or workflow:
   inputs and outputs keep their names and types, or change in an
