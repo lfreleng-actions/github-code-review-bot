@@ -79,6 +79,83 @@ ALL = frozenset({"trivial", "low-risk"})
 USES_OLD = f"-        uses: actions/checkout@{HEAD}"
 USES_NEW = f"+        uses: actions/checkout@{SHA_NEW}"
 DIGEST = "c" * 64
+PRE_COMMIT = ".pre-commit-config.yaml"
+REV_OLD = f"-    rev: {HEAD}  # frozen: v5.0.0"
+# YAML may quote a pin, in either style; a quoted branch is still loose.
+PINNED_REVS = (
+    SHA_NEW,
+    f"'{SHA_NEW}'",
+    f'"{SHA_NEW}"',
+    "v6.0.0",
+    "'v6.0.0'",
+    '"v6.0.0"',
+)
+LOOSE_REVS = ("main", "master", "HEAD", "'main'", '"HEAD"', "'v6.0.0\"", "'v6.0.0")
+HOOKS_VETO = f"{PRE_COMMIT} changes hooks, not their pinned versions alone"
+LOOSE_REV_VETO = (
+    f"{PRE_COMMIT} sets a hook rev that is neither a commit SHA nor a version tag"
+)
+# Each a change to the hooks themselves, never to their pins alone.
+HOOK_CHANGES: dict[str, tuple[str, ...]] = {
+    "removed hook": (
+        "-  - repo: https://github.com/gitleaks/gitleaks",
+        REV_OLD,
+        "-    hooks:",
+        "-      - id: gitleaks",
+    ),
+    "added hook": ("+      - id: new-hook",),
+    "changed repo": (
+        "-  - repo: https://github.com/psf/black",
+        "+  - repo: https://github.com/someone/black",
+    ),
+    "changed args": ("-        args: [--strict]", "+        args: []"),
+}
+# (previous_path, path): the config moved aside, or another file moved in.
+BUMP_BLOCK = (" - repo: https://github.com/psf/black", REV_OLD, f"+    rev: {SHA_NEW}")
+DROP_BLOCK = (" - repo: https://github.com/gitleaks/gitleaks", "-    rev: v8.0.0")
+# Each entry's rev sits between context lines, so each is its own block.
+DROPPED_REVS: dict[str, tuple[str, ...]] = {
+    "deletion alone": (*DROP_BLOCK, "     hooks:"),
+    "beside a bump": (*BUMP_BLOCK, "     hooks:", *DROP_BLOCK, "     hooks:"),
+    # Re-indented, the rev leaves its entry: for the root or a nested key.
+    "outdented": (*DROP_BLOCK, "+rev: v8.1.0"),
+    "indented": (*DROP_BLOCK, "+        rev: v8.1.0", "     hooks:"),
+    # With no space after the colon, YAML reads one scalar, not a rev key.
+    "no separator": (*DROP_BLOCK, "+    rev:v8.1.0", "     hooks:"),
+}
+
+
+def hunk(*lines: str) -> dict[str, Any]:
+    """A pre-commit config entry whose patch holds context and changes."""
+    return {
+        "path": PRE_COMMIT,
+        "status": "modified",
+        "patch": "@@ -1,9 +1,9 @@\n" + "\n".join(lines) + "\n",
+        "patch_truncated": False,
+    }
+
+
+PRE_COMMIT_MOVES = (
+    (PRE_COMMIT, "docs/old-hooks.md"),
+    (PRE_COMMIT, "old-hooks.yaml"),
+    ("hooks.yaml", PRE_COMMIT),
+)
+
+
+def moved(previous: str, path: str, patch_text: str | None) -> dict[str, Any]:
+    """A renamed file entry, its content unchanged when the patch is None."""
+    return {
+        "path": path,
+        "previous_path": previous,
+        "status": "renamed",
+        "patch": patch_text,
+        "patch_truncated": False,
+    }
+
+
+def move_veto(previous: str, path: str) -> str:
+    """The veto a rename into or out of a pre-commit config raises."""
+    return f"{path} renames {previous}, moving a pre-commit config"
 
 
 class ExtractVerdictTests(unittest.TestCase):
@@ -490,6 +567,34 @@ class ClassifyTrivialTests(unittest.TestCase):
         self.assertFalse(trivial)
         self.assertEqual(paths, ["app.py"])
 
+    def test_pre_commit_pins_are_trivial(self) -> None:
+        """A rev moved to a commit SHA or a version tag is a pin bump."""
+        tags = ("1.40.2", "v0.11.0.1-1", "1.2.3+build", "v1.2.3-rc.1", "v1.2.rc1")
+        for value in (*PINNED_REVS, *tags):
+            for path in (PRE_COMMIT, f"pkg/{PRE_COMMIT}"):
+                file = changed(path, REV_OLD, f"+    rev: {value}  # frozen: v6")
+                with self.subTest(value=value, path=path):
+                    self.assertEqual(policy.classify_trivial([file]), (True, []))
+
+    @unittest.expectedFailure
+    def test_pre_commit_loose_rev_is_not_trivial(self) -> None:
+        """A rev loosened to a branch or HEAD is not a pin."""
+        for value in LOOSE_REVS:
+            file = changed(PRE_COMMIT, REV_OLD, f"+    rev: {value}")
+            with self.subTest(value=value):
+                self.assertEqual(policy.classify_trivial([file]), (False, [PRE_COMMIT]))
+
+    @unittest.expectedFailure
+    def test_pre_commit_long_loose_rev_is_rejected_quickly(self) -> None:
+        """A long near-tag rev is loose, found without quadratic backtracking."""
+        value = "v1" + ".1" * 10000 + "/branch"
+        file = changed(PRE_COMMIT, REV_OLD, f"+    rev: {value}")
+        start = time.perf_counter()
+        result = policy.classify_trivial([file])
+        elapsed = time.perf_counter() - start
+        self.assertEqual(result, (False, [PRE_COMMIT]))
+        self.assertLess(elapsed, 0.5)
+
 
 class VetoTests(unittest.TestCase):
     """Every veto fires on its trigger and stays quiet otherwise."""
@@ -541,6 +646,61 @@ class VetoTests(unittest.TestCase):
         """Repeating a bad line does not repeat the veto."""
         file = changed(WORKFLOW, "+  contents: write", "+  contents: write")
         self.assertEqual(len(policy.find_vetoes([file])), 1)
+
+    @unittest.expectedFailure
+    def test_pre_commit_loose_rev_is_vetoed(self) -> None:
+        """A rev loosened to a branch or HEAD is vetoed."""
+        for value in LOOSE_REVS:
+            file = changed(PRE_COMMIT, REV_OLD, f"+    rev: {value}  # moving")
+            with self.subTest(value=value):
+                self.assertEqual(policy.find_vetoes([file]), [LOOSE_REV_VETO])
+
+    @unittest.expectedFailure
+    def test_pre_commit_hook_changes_are_vetoed(self) -> None:
+        """A change to the hooks themselves is vetoed, once per file."""
+        for name, lines in HOOK_CHANGES.items():
+            with self.subTest(change=name):
+                self.assertEqual(
+                    policy.find_vetoes([changed(PRE_COMMIT, *lines)]), [HOOKS_VETO]
+                )
+
+    def test_pre_commit_pins_raise_nothing(self) -> None:
+        """A file whose rev lines alone change raises no veto."""
+        file = changed(
+            PRE_COMMIT, REV_OLD, f"+    rev: {SHA_NEW}", "-    rev: v1", "+    rev: v2"
+        )
+        self.assertEqual(policy.find_vetoes([file]), [])
+        for value in PINNED_REVS:
+            file = changed(PRE_COMMIT, "-    rev: 'v5.0.0'", f"+    rev: {value}")
+            with self.subTest(value=value):
+                self.assertEqual(policy.find_vetoes([file]), [])
+
+    @unittest.expectedFailure
+    def test_pre_commit_dropped_rev_is_vetoed(self) -> None:
+        """A rev removed with no pin in its place is no bump."""
+        for name, lines in DROPPED_REVS.items():
+            with self.subTest(change=name):
+                file = hunk(*lines)
+                self.assertEqual(policy.classify_trivial([file]), (False, [PRE_COMMIT]))
+                self.assertEqual(policy.find_vetoes([file]), [HOOKS_VETO])
+
+    def test_pre_commit_bumps_in_separate_entries_raise_nothing(self) -> None:
+        """Two entries bumped, each in its own block, stay trivial."""
+        file = hunk(*BUMP_BLOCK, "     hooks:", *BUMP_BLOCK, "     hooks:")
+        self.assertEqual(policy.classify_trivial([file]), (True, []))
+        self.assertEqual(policy.find_vetoes([file]), [])
+
+    @unittest.expectedFailure
+    def test_pre_commit_rename_is_vetoed(self) -> None:
+        """Moving the config aside, or a file into its place, is vetoed."""
+        for previous, path in PRE_COMMIT_MOVES:
+            for patch_text in (None, "", patch("+x")):
+                file = moved(previous, path, patch_text)
+                with self.subTest(previous=previous, path=path, patch=patch_text):
+                    self.assertEqual(policy.classify_trivial([file]), (False, [path]))
+                    self.assertEqual(
+                        policy.find_vetoes([file])[0], move_veto(previous, path)
+                    )
 
 
 SENSITIVE_VETO = "changes an agent instruction, licence or review-governance file"
@@ -801,6 +961,46 @@ class CheckTests(unittest.TestCase):
         self.assertEqual(got["agent_tier"], "low-risk")
         self.assertEqual(got["reasons"], got["vetoes"])
         self.assertIn("contents: write", got["reasons"][0])
+
+    @unittest.expectedFailure
+    def test_dropped_pre_commit_rev_demotes_low_risk(self) -> None:
+        """Dropping or moving a hook's rev never approves as trivial or low-risk."""
+        for name, lines in DROPPED_REVS.items():
+            for tier in ("trivial", "low-risk"):
+                got = policy.check(
+                    entry(hunk(*lines)), verdict(tier=tier), approve_tiers=ALL
+                )
+                with self.subTest(change=name, tier=tier):
+                    self.assertEqual(got["tier"], "needs-human")
+                    self.assertFalse(got["approvable"])
+                    self.assertIn(HOOKS_VETO, got["reasons"])
+
+    @unittest.expectedFailure
+    def test_removed_pre_commit_hook_demotes_low_risk(self) -> None:
+        """Removing a secret scanner's hook never approves as low-risk."""
+        got = policy.check(
+            entry(changed(PRE_COMMIT, *HOOK_CHANGES["removed hook"])),
+            verdict(tier="low-risk"),
+            approve_tiers=ALL,
+        )
+        self.assertEqual(got["tier"], "needs-human")
+        self.assertFalse(got["approvable"])
+        self.assertEqual(got["reasons"], [HOOKS_VETO])
+
+    @unittest.expectedFailure
+    def test_renamed_pre_commit_config_never_approves(self) -> None:
+        """A rename past the doc fast path still needs a human."""
+        for previous, path in PRE_COMMIT_MOVES:
+            for tier in ("trivial", "low-risk"):
+                got = policy.check(
+                    entry(moved(previous, path, "")),
+                    verdict(tier=tier),
+                    approve_tiers=ALL,
+                )
+                with self.subTest(path=path, tier=tier):
+                    self.assertEqual(got["tier"], "needs-human")
+                    self.assertFalse(got["approvable"])
+                    self.assertIn(move_veto(previous, path), got["reasons"])
 
     def test_tier_not_enabled_keeps_tier_but_not_approvable(self) -> None:
         """A disabled tier is reported as-is with the reason it stays unapproved."""
