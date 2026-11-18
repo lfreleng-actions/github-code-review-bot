@@ -141,7 +141,7 @@ agent-written changes.
   names, issue bodies, comments, agent output) reaching a shell
   unquoted or through `${{ }}` interpolation, an action loosened from
   a pinned commit SHA, new network endpoints, `pull_request_target`,
-  `curl | sh`, a credential reaching a job that does not need it.
+  `workflow_run`, `curl | sh`, a credential reaching a job that does not need it.
 - **CI/CD and compatibility.** Inputs, outputs, flags or file formats
   renamed or removed without a migration; a trigger change that
   would stop CI without anyone noticing; invalid syntax; a default

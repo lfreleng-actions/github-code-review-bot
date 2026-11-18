@@ -61,7 +61,7 @@ select (trusted)       review (untrusted, matrix)      apply (trusted, matrix)
    a deterministic classifier, holds back any verdict that reports a
    finding or an injection attempt, applies hard vetoes (new write
    permissions, unpinned actions, new secrets, `pull_request_target`,
-   removed action inputs, `curl | sh`), re-reads the live pull request
+   `workflow_run`, removed action inputs, `curl | sh`), re-reads the live pull request
    and, on the live path alone, mints a `pull-requests: write` token for
    that one repository and posts an APPROVE review marked as automated.
 4. **Report** gathers every result through a bounded fetch into a run

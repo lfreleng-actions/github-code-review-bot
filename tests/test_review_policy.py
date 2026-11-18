@@ -599,6 +599,8 @@ class VetoTests(unittest.TestCase):
 
     CASES: tuple[tuple[str, str, str], ...] = (
         (WORKFLOW, "+  pull_request_target:", "pull_request_target"),
+        (WORKFLOW, "+  workflow_run:", "adds a workflow_run trigger"),
+        (WORKFLOW, "+on: [push, workflow_run]", "adds a workflow_run trigger"),
         (WORKFLOW, "+      - uses: actions/setup-node@v4", "not a commit SHA"),
         ("x/action.yml", "+      uses: actions/setup-node", "not a commit SHA"),
         (WORKFLOW, "+  contents: write", "grants contents: write"),
@@ -637,6 +639,8 @@ class VetoTests(unittest.TestCase):
             changed("action.yml", "+  new-input:", "-    default: x"),
             changed("README.md", "+curl https://x | sh", patch_truncated=True),
             changed("app.py", "-curl https://x | sh"),
+            changed(WORKFLOW, "-  workflow_run:", "-on: [push, workflow_run]"),
+            changed(WORKFLOW, "+  push:", "+  pull_request:"),
         ]
         self.assertEqual(policy.find_vetoes(files), [])
 
@@ -955,6 +959,16 @@ class CheckTests(unittest.TestCase):
         self.assertEqual(got["agent_tier"], "low-risk")
         self.assertEqual(got["reasons"], got["vetoes"])
         self.assertIn("contents: write", got["reasons"][0])
+
+    def test_workflow_run_trigger_demotes_low_risk(self) -> None:
+        """A new workflow_run trigger never approves as low-risk."""
+        got = policy.check(
+            entry(changed(WORKFLOW, "+  workflow_run:")),
+            verdict(tier="low-risk"),
+            approve_tiers=ALL,
+        )
+        self.assertEqual(got["tier"], "needs-human")
+        self.assertEqual(got["reasons"], [f"{WORKFLOW} adds a workflow_run trigger"])
 
     def test_dropped_pre_commit_rev_demotes_low_risk(self) -> None:
         """Dropping or moving a hook's rev never approves as trivial or low-risk."""

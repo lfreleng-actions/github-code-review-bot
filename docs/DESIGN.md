@@ -560,7 +560,8 @@ lead to a write.
   security (no new or widened permissions, no secrets newly read or
   echoed, no untrusted input reaching a shell unquoted or through
   `${{ }}`, no action loosened from a SHA, no new network calls, no
-  `pull_request_target`, no `curl | sh`); CI/CD sanity (inputs and
+  `pull_request_target` or `workflow_run` trigger, no
+  `curl | sh`); CI/CD sanity (inputs and
   outputs keep names and types or change additively, no required
   step removed, no trigger change that would stop CI without notice,
   valid syntax); and zero unresolved concerns, so no findings.
@@ -764,7 +765,9 @@ first two from `review_vetoes.py`:
    changed lines of every non-documentation file:
    - a truncated or missing patch: "patch for `<path>` is
      unreadable";
-   - a workflow adding a `pull_request_target` trigger;
+   - a workflow adding a `pull_request_target` or `workflow_run`
+     trigger, either of which runs in the base repository's context
+     with its secrets: "`<path>` adds a `<trigger>` trigger";
    - a workflow adding `permissions: write-all` or `<key>: write`
      for any known permission key;
    - a workflow removing an empty `permissions: {}` block, which
@@ -1505,11 +1508,12 @@ Decided:
   instruction, bot prompt, licence or review-governance file
   (`AGENTS.md`, `.github/copilot-instructions.md`, `prompt/`,
   `LICENSE`, `CODEOWNERS`, `.gitlint`, `REUSE.toml` and the rest of
-  §8.2's list), a new `pull_request_target` trigger, a write
-  permission, an unpinned action, a secret reference, a removed
-  action input, a download piped into a shell, a pre-commit hook
-  added, removed or re-sourced, its `rev:` dropped or loosened from a
-  commit SHA or version tag, or its configuration renamed. The list
+  §8.2's list), a new `pull_request_target` or `workflow_run`
+  trigger, a write permission, an unpinned action, a secret
+  reference, a removed action input, a download piped into a shell,
+  a pre-commit hook added, removed or re-sourced, its `rev:` dropped
+  or loosened from a commit SHA or version tag, or its configuration
+  renamed. The list
   is short on purpose; it names the changes whose cost of a wrong
   approval is highest. Instruction files rank first: a wrong approval
   there changes what every later agent session obeys.
@@ -2064,7 +2068,10 @@ and never approve.
 `prompt/antagonistic.md` asks the agent to read the change as a
 sceptical senior reviewer reads a stranger's code, under six heads:
 correctness, the description against the diff, tests, security,
-CI/CD and compatibility, and maintainability. It asks for honesty
+CI/CD and compatibility, and maintainability. The security head
+names the same triggers the vetoes do (§8.2): a new
+`pull_request_target` or `workflow_run` runs in the base
+repository's context with its secrets. It asks for honesty
 over volume: every finding must point at something real, and an
 empty list is the right answer for a sound change. It defines an
 injection attempt in the same words as `prompt/review.md` (§7.3), and

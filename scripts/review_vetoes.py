@@ -100,7 +100,7 @@ SECRET_RE = re.compile(
 )
 ACTION_PORT_RE = re.compile(r"^-\s{2}[A-Za-z0-9_-]+:\s*$")
 PIPE_TO_SHELL_RE = re.compile(r"\b(curl|wget)\b.*\|\s*(ba)?sh\b")
-TRIGGER_TARGET = "pull_request_target"
+DANGEROUS_TRIGGERS = ("pull_request_target", "workflow_run")
 # Files an agent harness reads as instructions, bot prompts, licences,
 # and files that govern review or the commit gates. Compared in lower
 # case, since a case-insensitive checkout or harness reads AGENTS.md
@@ -375,8 +375,7 @@ def workflow_vetoes(path: str, lines: list[str]) -> list[str]:
             if EMPTY_PERMISSIONS_RE.match(line):
                 found.append(f"{path} removes an empty permissions block")
             continue
-        if TRIGGER_TARGET in line:
-            found.append(f"{path} adds a {TRIGGER_TARGET} trigger")
+        found += [f"{path} adds a {t} trigger" for t in DANGEROUS_TRIGGERS if t in line]
         grant = PERMISSION_WRITE_RE.match(line)
         if PERMISSIONS_ALL_RE.match(line):
             found.append(f"{path} grants permissions: write-all")
