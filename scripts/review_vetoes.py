@@ -51,7 +51,18 @@ GO_MOD_LINE_RE = re.compile(r"^[+-]\s+\S+\s+v\d\S*(\s*//.*)?$")
 CARGO_LINE_RE = re.compile(
     r'^[+-]\s*[A-Za-z0-9_-]+\s*=\s*("[^"]*"|\{.*version\s*=.*\})\s*$'
 )
-REV_LINE_RE = re.compile(r"^[+-]\s*rev:\s*\S+(\s+#.*)?$")
+PRE_COMMIT_CONFIG = ".pre-commit-config.yaml"
+REV_LINE_RE = re.compile(r"^[+-]\s*rev:\s+\S+(\s+#.*)?$")
+# A commit SHA or a version tag (v0.11.0.1-1, 1.2.3+build), maybe quoted.
+# A "-" or "." suffix absorbs the dotted numbers and only "+" follows them,
+# so no two repetitions overlap and matching stays linear.
+PINNED_REV_RE = re.compile(
+    r"^\+\s*rev:\s+(?P<quote>['\"]?)"
+    r"(?:[0-9a-f]{40}|v?\d+(?:[-.][A-Za-z0-9.-]+|(?:\.\d+)*\+[A-Za-z0-9.-]+)?)"
+    r"(?P=quote)(\s+#.*)?$"
+)
+PRE_COMMIT_HOOKS_VETO = "changes hooks, not their pinned versions alone"
+PRE_COMMIT_REV_VETO = "sets a hook rev that is neither a commit SHA nor a version tag"
 FROM_LINE_RE = re.compile(r"^[+-]\s*FROM\s", re.IGNORECASE)
 PINNED_FROM_RE = re.compile(
     r"^\+\s*FROM\s+(--platform=\S+\s+)?\S+@sha256:[0-9a-f]{64}(\s+AS\s+\S+)?\s*$",
@@ -266,13 +277,54 @@ def every_line(pattern: re.Pattern[str]) -> Callable[[list[str]], bool]:
     return lambda lines: all(pattern.match(line) for line in lines)
 
 
+def pre_commit_vetoes(path: str, patch: str) -> list[str]:
+    """Vetoes for a pre-commit config: loose revs and hook changes.
+
+    An added ``rev:`` must pin a commit SHA or version tag, and each block
+    of changed lines, one repository entry, must pair each removed ``rev:``
+    with an added one at its indentation. Any other change alters the hooks.
+    """
+    found: list[str] = []
+    revs: dict[str, list[str]] = {"-": [], "+": []}
+    for line in [*patch.splitlines(), ""]:
+        veto = None
+        if line[:1] not in revs:
+            if not line.startswith("\\"):
+                veto = PRE_COMMIT_HOOKS_VETO if revs["-"] != revs["+"] else None
+                revs = {"-": [], "+": []}
+        elif not REV_LINE_RE.match(line):
+            veto = PRE_COMMIT_HOOKS_VETO
+        else:
+            revs[line[0]].append(line[1 : line.index("rev:")])
+            if line[0] == "+" and not PINNED_REV_RE.match(line):
+                veto = PRE_COMMIT_REV_VETO
+        if veto and f"{path} {veto}" not in found:
+            found.append(f"{path} {veto}")
+    return found
+
+
+def pre_commit_move(file: dict[str, Any]) -> str | None:
+    """The veto for a rename into or out of a pre-commit config, or None.
+
+    Moving the file aside removes every hook it ran, and moving another
+    file into its place installs a new set, whatever the patch shows.
+    """
+    path = str(file.get("path") or "")
+    previous = file.get("previous_path")
+    if not isinstance(previous, str) or previous == path:
+        return None
+    names = {posixpath.basename(previous), posixpath.basename(path)}
+    if PRE_COMMIT_CONFIG not in names:
+        return None
+    return f"{path} renames {previous}, moving a pre-commit config"
+
+
 # Manifests whose only trivial change is a version pin, by basename.
 PIN_RULES: dict[str, Callable[[list[str]], bool]] = {
     "pyproject.toml": every_line(PYPROJECT_LINE_RE),
     "package.json": every_line(PACKAGE_JSON_LINE_RE),
     "go.mod": every_line(GO_MOD_LINE_RE),
     "Cargo.toml": every_line(CARGO_LINE_RE),
-    ".pre-commit-config.yaml": every_line(REV_LINE_RE),
 }
 
 
@@ -292,7 +344,7 @@ def line_rule(path: str) -> Callable[[list[str]], bool] | None:
 def file_is_trivial(file: dict[str, Any]) -> bool:
     """Whether one changed file is a documentation, lock or pin-only change."""
     path = str(file.get("path") or "")
-    if sensitive_path(file) is not None:
+    if sensitive_path(file) is not None or pre_commit_move(file) is not None:
         return False
     if is_doc(path):
         return True
@@ -301,6 +353,8 @@ def file_is_trivial(file: dict[str, Any]) -> bool:
         return False
     if is_lockfile(path):
         return True
+    if posixpath.basename(path) == PRE_COMMIT_CONFIG:
+        return not pre_commit_vetoes(path, patch)
     rule = line_rule(path)
     return rule is not None and rule(changed_lines(patch))
 
@@ -355,7 +409,10 @@ def file_vetoes(file: dict[str, Any]) -> list[str]:
     sensitive = sensitive_path(file)
     if sensitive is not None:
         found.append(f"{sensitive} {SENSITIVE_VETO}")
-    elif is_doc(path):
+    moved = pre_commit_move(file)
+    if moved is not None:
+        found.append(moved)
+    if not found and is_doc(path):
         return []
     if file.get("patch_truncated") or not isinstance(patch, str):
         return [*found, f"patch for {path} is unreadable"]
@@ -364,6 +421,8 @@ def file_vetoes(file: dict[str, Any]) -> list[str]:
         found.extend(workflow_vetoes(path, lines))
     if is_workflow_or_action(path):
         found.extend(step_vetoes(path, lines))
+    if posixpath.basename(path) == PRE_COMMIT_CONFIG:
+        found.extend(pre_commit_vetoes(path, patch))
     if ACTION_RE.search(path) and any(ACTION_PORT_RE.match(line) for line in lines):
         found.append(f"{path}: input or output removed or renamed")
     if any(line[0] == "+" and PIPE_TO_SHELL_RE.search(line) for line in lines):

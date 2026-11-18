@@ -710,7 +710,15 @@ first two from `review_vetoes.py`:
    `*.lock`), or a manifest whose every changed line is a pin:
    `requirements*.txt` and `.in`, `pyproject.toml`, `package.json`,
    `go.mod`, `Cargo.toml`, `rev:` lines in
-   `.pre-commit-config.yaml`, `uses:` lines in workflows and
+   `.pre-commit-config.yaml` (a space after the colon, which YAML
+   needs to read `rev` as a key) where every added `rev:` is a 40-hex
+   SHA or a version tag (an optional `v`, dot-separated numbers,
+   then an optional suffix of letters, digits, dots and hyphens after
+   a `-`, `+` or `.`, such as `v6.0.0` or `v0.11.0.1-1`; either may
+   sit in matching single or double quotes and carry a trailing
+   comment) and every block of changed lines between context lines
+   pairs each removed `rev:` with an added one at the same
+   indentation, `uses:` lines in workflows and
    `action.y?ml` where the removed and added action paths pair up
    and every added ref is a 40-hex SHA, and `FROM` lines in a
    `Dockerfile*` whose added form pins `@sha256:`. Plain `.txt`
@@ -747,8 +755,13 @@ first two from `review_vetoes.py`:
    These files decide what every later agent session in the
    repository obeys, this bot's included, who reviews and how,
    which commits and files pass the hooks, or the terms the code
-   ships under, and are never documentation either. Then, over the changed
-   lines of every non-documentation file:
+   ships under, and are never documentation either. A rename into or
+   out of a `.pre-commit-config.yaml`, at any depth, meets the same
+   veto, before the documentation check and whatever the patch shows:
+   moving the file aside drops every hook it ran, and moving another
+   file into its place installs a new set: "`<path>` renames
+   `<previous_path>`, moving a pre-commit config". Then, over the
+   changed lines of every non-documentation file:
    - a truncated or missing patch: "patch for `<path>` is
      unreadable";
    - a workflow adding a `pull_request_target` trigger;
@@ -761,6 +774,16 @@ first two from `review_vetoes.py`:
    - a workflow or action adding a `uses:` whose ref is not a
      40-hex SHA (local `./`, `$/` and `docker://` references exempt);
    - an action removing or renaming an input or output;
+   - a `.pre-commit-config.yaml`, at any depth, adding a `rev:` that
+     is not a pin by rule 1: "`<path>` sets a hook rev that is neither
+     a commit SHA nor a version tag";
+   - a `.pre-commit-config.yaml` changing any line other than a
+     `rev:` line, which adds, removes or re-sources a hook that gates
+     every commit, or a block of changed lines that removes a `rev:`
+     with no replacement at its indentation beside it, or adds one
+     with none removed:
+     "`<path>` changes hooks, not their pinned versions alone",
+     stated once per file;
    - any file adding a `curl` or `wget` piped into a shell.
 3. **The agent's own reports.** A `trivial` or `low-risk` verdict
    whose `findings` list is not empty drops to `needs-human` with
@@ -1484,10 +1507,12 @@ Decided:
   `LICENSE`, `CODEOWNERS`, `.gitlint`, `REUSE.toml` and the rest of
   §8.2's list), a new `pull_request_target` trigger, a write
   permission, an unpinned action, a secret reference, a removed
-  action input, a download piped into a shell. The list is short
-  on purpose; it names the changes whose cost of a wrong approval
-  is highest. Instruction files rank first: a wrong approval there
-  changes what every later agent session obeys.
+  action input, a download piped into a shell, a pre-commit hook
+  added, removed or re-sourced, its `rev:` dropped or loosened from a
+  commit SHA or version tag, or its configuration renamed. The list
+  is short on purpose; it names the changes whose cost of a wrong
+  approval is highest. Instruction files rank first: a wrong approval
+  there changes what every later agent session obeys.
 - **Low-risk enabled from the start.** The maintainer chose
   `trivial,low-risk` as the default rather than a staged widening,
   on the ground that the dry-run period exercises both tiers and
