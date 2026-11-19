@@ -897,7 +897,12 @@ body. In the posted
 body, `review_policy.contain_links` leaves the summary no live link
 outside the organisation: link and image syntax and link definitions
 stop working, and a bare URL stays a link when it points under
-`https://github.com/<org>/` and becomes text otherwise. A URL
+`https://github.com/<org>/` and becomes text otherwise. The
+organisation name has to end its path segment: a slash, or
+trailing punctuation and `)` that GitHub trims, and nothing else may
+follow it, so `https://github.com/<org>)x/` becomes text. A quote
+counts as neither, since GFM leaves it on the link, so
+`https://github.com/<org>'` becomes text too. A URL
 holding a dot segment (`..` or `.`, literal or percent-encoded,
 after a slash or a backslash) anywhere up to the next ASCII space or
 `<`, the extent GitHub links, becomes text as well, since a browser

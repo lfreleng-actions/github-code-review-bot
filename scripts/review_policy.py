@@ -123,6 +123,13 @@ URL_RUN_RE = re.compile(r"[^\s<]+", re.ASCII)
 DOT_SEGMENT_RE = re.compile(
     r"[/\\](?:\.|%2e){1,2}+(?![A-Za-z0-9])", re.IGNORECASE | re.ASCII
 )
+# The organisation name has to end its path segment: after it comes a
+# slash, or nothing but what GitHub trims from the end of a link, trailing
+# punctuation and an unmatched ``)``, to the end of the run. Anything
+# else carries the segment on, and ``https://github.com/<org>)x/``
+# names another path. GFM's trailing punctuation leaves quotes out, so
+# a quote carries the segment on too.
+ORG_TAIL = r"[)?!.,:*_~]*+\Z"
 
 
 class Rejected(Exception):
@@ -163,7 +170,7 @@ def contain_links(text: str, org: str) -> str:
     contained = WWW_RE.sub(r"\1" + ZWSP + ".", contained)
     inside = (
         re.compile(
-            rf"//github\.com/{re.escape(org)}(?:[/)\]>\"']|$)",
+            rf"//github\.com/{re.escape(org)}(?:/|{ORG_TAIL})",
             re.IGNORECASE | re.ASCII,
         )
         if org

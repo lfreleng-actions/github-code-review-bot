@@ -109,6 +109,14 @@ SEEDS: list[bytes] = [
     '\ufeff\u2028```json \r\n{"tier": "trivial"}\r\n```\r\n'.encode(),
     b"\xff\xfe```json\n\x00\n```",
     b"`" * 4096,
+    # Found by fuzzing: a first segment that only starts with the
+    # organisation name stayed a live link.
+    verdict_text(
+        summary=f"https://github.com/{ORG})other/repo "
+        f'https://github.com/{ORG}"/Reviewed',
+    ).encode(),
+    # Reported in review: GFM trims no quote, so this links to /<org>'.
+    verdict_text(summary=f"https://github.com/{ORG}'?").encode(),
 ]
 
 
