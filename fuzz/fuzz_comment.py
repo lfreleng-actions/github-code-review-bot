@@ -92,6 +92,8 @@ SEEDS: list[bytes] = [
     # Found by fuzzing: an indented first line is no fence, even after
     # the strip that leaves it at column 0.
     b"\xff\x00```\n```\n```\n``\n```\n\x00```\nx\n```\n",
+    # Reported in review: GFM autolinks ftp:// as well as http(s)://.
+    b"\xffsee ftp://evil.example/x\n",
 ]
 
 

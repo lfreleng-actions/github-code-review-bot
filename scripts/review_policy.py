@@ -105,14 +105,15 @@ FENCE_OPENING_RE = re.compile("^(?=```|~~~)")
 # whole document.
 INLINE_LINK_RE = re.compile(r"\]\(")
 DEFINITION_RE = re.compile(r"\]:")
-# Bare ``www.`` and ``http(s)://`` text that GitHub autolinks. Neither
+# Bare ``www.``, ``http(s)://`` and ``ftp://`` text that GitHub autolinks
+# (GFM's extended autolinks). None
 # needs a word boundary to link: GitHub links one after ``_``, a digit
 # or punctuation, all of which ``\b`` can miss, so both are matched
 # wherever they appear. Case folds over ASCII alone (``re.ASCII``):
 # Unicode folding would let a lookalike host, ``g\u0131thub.com`` with
 # a dotless i, pass as GitHub.
 WWW_RE = re.compile(r"(www)\.", re.IGNORECASE | re.ASCII)
-SCHEME_RE = re.compile(r"(https?):(?=//)", re.IGNORECASE | re.ASCII)
+SCHEME_RE = re.compile(r"(https?|ftp):(?=//)", re.IGNORECASE | re.ASCII)
 # A URL GitHub autolinks runs to ASCII whitespace or ``<``, a
 # no-break space included, so every URL in such a run ends with it.
 URL_RUN_RE = re.compile(r"[^\s<]+", re.ASCII)

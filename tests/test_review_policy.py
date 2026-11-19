@@ -511,6 +511,8 @@ class DisarmTests(unittest.TestCase):
             "http://github.com/org/repo": f"http:{ZWSP}//github.com/org/repo",
             "HTTP://GITHUB.COM/ORG/x": f"HTTP:{ZWSP}//GITHUB.COM/ORG/x",
             "HTTPS://github.com/org/x": "HTTPS://github.com/org/x",
+            "ftp://evil.example/x": f"ftp:{ZWSP}//evil.example/x",
+            "FTP://github.com/org/x": f"FTP:{ZWSP}//github.com/org/x",
         }
         for raw, expected in cases.items():
             with self.subTest(raw=raw):

@@ -117,6 +117,8 @@ SEEDS: list[bytes] = [
     ).encode(),
     # Reported in review: GFM trims no quote, so this links to /<org>'.
     verdict_text(summary=f"https://github.com/{ORG}'?").encode(),
+    # Reported in review: GFM autolinks ftp:// as well as http(s)://.
+    verdict_text(summary="ftp://evil.example/x").encode(),
     # Reported in review: a JSON escape for a lone surrogate in a note
     # reached the job summary, which no UTF-8 stream can write.
     verdict_text(tier="needs-human", findings=[{"area": "ci", "note": "<n>"}])

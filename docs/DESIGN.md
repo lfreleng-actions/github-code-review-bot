@@ -915,7 +915,9 @@ letter or digit follows it: `(https://github.com/<org>/%2e%2e)` links
 to the `..`.
 GitHub links a URL after an underscore, a digit or punctuation, so
 the scheme and `www.` match wherever they appear, not at word
-boundaries alone.
+boundaries alone. GFM autolinks `ftp://` as well as `http://` and
+`https://`, so an `ftp://` URL becomes text like any URL outside
+the organisation.
 The reviewer name is the App login from the selection, or
 "the code review bot" in a secretless run; the model name comes
 from the selection, not from the session.
