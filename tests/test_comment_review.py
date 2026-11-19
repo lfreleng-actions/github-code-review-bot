@@ -372,6 +372,22 @@ class CommentCommandTests(Tree):
         self.assertEqual(comment_review.body.code_span("a``b"), "``` a``b ```")
         self.assertEqual(comment_review.body.code_span("plain.py"), "` plain.py `")
 
+    def test_a_cut_through_an_organisation_url_leaves_no_link(self) -> None:
+        """Reported in review: a cut that ends a URL inside the organisation
+        name, ``https://github.com/lfr…``, links outside it, so the cut
+        body is contained again and still fits.
+        """
+        text = "http://x " * 3 + "https://github.com/lfreleng-actions/"
+        cut = comment_review.body.fitted(text, "lfreleng-actions", 64)
+        self.assertLessEqual(len(cut), 64)
+        self.assertTrue(cut.endswith("https:\u200b//github.com/lfr\u2026"))
+        many = "https://github.com/lfreleng-actions/" * 20
+        for limit in range(64, 200, 7):
+            with self.subTest(limit=limit):
+                cut = comment_review.body.fitted(many, "lfreleng-actions", limit)
+                self.assertLessEqual(len(cut), limit)
+                self.assertNotRegex(cut, r"https://(?!github\.com/lfreleng-actions/)")
+
     def test_the_largest_review_fits_what_github_accepts(self) -> None:
         """Twenty-five findings at their worst, each body grown by half by
         containment, with the longest label a path and a line can make,

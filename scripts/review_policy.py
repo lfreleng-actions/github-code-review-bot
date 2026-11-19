@@ -62,6 +62,9 @@ REPO_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9._-]+$")
 # character in it.
 FENCE_RE = re.compile(r"^[ \t]*+(`{3,}+|~{3,}+)([^\r\n]*+)\r?$", re.MULTILINE)
 CONTROL_RE = re.compile(r"[\x00-\x1f\x7f-\x9f\u2028\u2029]")
+# A JSON ``\ud800`` escape decodes to a lone surrogate, which no UTF-8
+# stream can write: the job summary would fail on it.
+SURROGATE_RE = re.compile("[\ud800-\udfff]")
 NO_VERDICT = "no verdict"
 HUMAN_REQUESTED = "agent judged the change needs a human review"
 INJECTION_REPORTED = "the agent reported an injection attempt"
@@ -102,14 +105,15 @@ FENCE_OPENING_RE = re.compile("^(?=```|~~~)")
 # whole document.
 INLINE_LINK_RE = re.compile(r"\]\(")
 DEFINITION_RE = re.compile(r"\]:")
-# Bare ``www.`` and ``http(s)://`` text that GitHub autolinks. Neither
+# Bare ``www.``, ``http(s)://`` and ``ftp://`` text that GitHub autolinks
+# (GFM's extended autolinks). None
 # needs a word boundary to link: GitHub links one after ``_``, a digit
 # or punctuation, all of which ``\b`` can miss, so both are matched
 # wherever they appear. Case folds over ASCII alone (``re.ASCII``):
 # Unicode folding would let a lookalike host, ``g\u0131thub.com`` with
 # a dotless i, pass as GitHub.
 WWW_RE = re.compile(r"(www)\.", re.IGNORECASE | re.ASCII)
-SCHEME_RE = re.compile(r"(https?):(?=//)", re.IGNORECASE | re.ASCII)
+SCHEME_RE = re.compile(r"(https?|ftp):(?=//)", re.IGNORECASE | re.ASCII)
 # A URL GitHub autolinks runs to ASCII whitespace or ``<``, a
 # no-break space included, so every URL in such a run ends with it.
 URL_RUN_RE = re.compile(r"[^\s<]+", re.ASCII)
@@ -123,6 +127,13 @@ URL_RUN_RE = re.compile(r"[^\s<]+", re.ASCII)
 DOT_SEGMENT_RE = re.compile(
     r"[/\\](?:\.|%2e){1,2}+(?![A-Za-z0-9])", re.IGNORECASE | re.ASCII
 )
+# The organisation name has to end its path segment: after it comes a
+# slash, or nothing but what GitHub trims from the end of a link, trailing
+# punctuation and an unmatched ``)``, to the end of the run. Anything
+# else carries the segment on, and ``https://github.com/<org>)x/``
+# names another path. GFM's trailing punctuation leaves quotes out, so
+# a quote carries the segment on too.
+ORG_TAIL = r"[)?!.,:*_~]*+\Z"
 
 
 class Rejected(Exception):
@@ -163,7 +174,7 @@ def contain_links(text: str, org: str) -> str:
     contained = WWW_RE.sub(r"\1" + ZWSP + ".", contained)
     inside = (
         re.compile(
-            rf"//github\.com/{re.escape(org)}(?:[/)\]>\"']|$)",
+            rf"//github\.com/{re.escape(org)}(?:/|{ORG_TAIL})",
             re.IGNORECASE | re.ASCII,
         )
         if org
@@ -198,15 +209,16 @@ def contain_run(run: str, inside: re.Pattern[str] | None) -> str:
 def sanitise(text: object, limit: int) -> str:
     """Fold untrusted text into one bounded line safe for logs and Markdown.
 
-    Control characters become spaces, workflow-command markers are
-    broken, raw HTML stays text, a code fence cannot open, and
-    mentions and references are defused so the agent can never
-    mention, assign or cross-reference anything through a summary.
+    Control characters become spaces, a lone surrogate becomes U+FFFD,
+    workflow-command markers are broken, raw HTML stays text, a code
+    fence cannot open, and mentions and references are defused so the
+    agent can never mention, assign or cross-reference anything
+    through a summary.
     """
     raw = text if isinstance(text, str) else ""
     if isinstance(text, int | float) and not isinstance(text, bool):
         raw = str(text)
-    folded = CONTROL_RE.sub(" ", raw)
+    folded = CONTROL_RE.sub(" ", SURROGATE_RE.sub("\ufffd", raw))
     escaped = folded.replace("::", ": :").replace("##[", "# #[")
     collapsed = FENCE_OPENING_RE.sub(
         ZWSP, " ".join(disarm_html(defuse(escaped)).split())

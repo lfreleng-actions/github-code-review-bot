@@ -253,6 +253,19 @@ class TextTests(unittest.TestCase):
         self.assertEqual(policy.sanitise({"a": 1}, 10), "")
         self.assertEqual(policy.sanitise(42, 10), "42")
 
+    def test_sanitise_replaces_lone_surrogates(self) -> None:
+        """Reported in review, reproduced by the fuzz harness: a JSON
+        ``\\ud800`` escape in a finding note reached the job summary,
+        which no UTF-8 stream can write.
+        """
+        self.assertEqual(policy.sanitise("a\ud800b\udfff", 100), "a\ufffdb\ufffd")
+        text = message(
+            verdict(tier="needs-human", findings=[{"area": "ci", "note": "\ud800"}])
+        )
+        got = policy.extract_verdict(text)
+        self.assertEqual(got["findings"][0]["note"], "\ufffd")
+        json.dumps(got, ensure_ascii=False).encode("utf-8")
+
 
 class DefuseTests(unittest.TestCase):
     """``defuse`` stops every form GitHub links as a mention or a reference.
@@ -403,6 +416,27 @@ class DisarmTests(unittest.TestCase):
             with self.subTest(text=text):
                 self.assertEqual(policy.contain_links(text, "org"), text)
 
+    def test_organisation_name_ends_its_segment(self) -> None:
+        """Found by fuzzing: a URL whose first segment only starts with the
+        organisation name, ``<org>)x`` or ``<org>"/x``, links outside it.
+        GFM trims no quote from a link's end, so ``<org>'?`` does too.
+        """
+        for raw in (
+            "https://github.com/org)other/repo",
+            'https://github.com/org"/x',
+            "https://github.com/org]",
+            "https://github.com/org>x",
+            "https://github.com/org'?",
+            'https://github.com/org".',
+        ):
+            with self.subTest(raw=raw):
+                self.assertEqual(
+                    policy.contain_links(raw, "org"), raw.replace(":", ":" + ZWSP)
+                )
+        for text in ("(https://github.com/org).", "https://github.com/org?!"):
+            with self.subTest(text=text):
+                self.assertEqual(policy.contain_links(text, "org"), text)
+
     def test_containment_twice_changes_nothing(self) -> None:
         """Text contained on its way through two renderers reads the same."""
         text = "<b> [x](https://e.com) [r]: www.e.com https://github.com/org/r"
@@ -477,6 +511,8 @@ class DisarmTests(unittest.TestCase):
             "http://github.com/org/repo": f"http:{ZWSP}//github.com/org/repo",
             "HTTP://GITHUB.COM/ORG/x": f"HTTP:{ZWSP}//GITHUB.COM/ORG/x",
             "HTTPS://github.com/org/x": "HTTPS://github.com/org/x",
+            "ftp://evil.example/x": f"ftp:{ZWSP}//evil.example/x",
+            "FTP://github.com/org/x": f"FTP:{ZWSP}//github.com/org/x",
         }
         for raw, expected in cases.items():
             with self.subTest(raw=raw):

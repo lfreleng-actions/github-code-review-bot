@@ -875,7 +875,9 @@ approvable tier, each starting "🤖 Auto-approved by agent:". The
 `trivial` line names a dependency, documentation or formatting
 change; the `low-risk` line says a review of the workflow or code
 change for security and CI/CD impact found low risk. The
-sanitiser folds control characters, escapes `::` and
+sanitiser folds control characters, replaces a lone surrogate (a
+JSON `\ud800` escape, which no UTF-8 stream can write) with U+FFFD,
+escapes `::` and
 `##[`, collapses whitespace, truncates to 600 characters, and
 defuses mentions and references (`review_policy.defuse`): a
 zero-width space follows every `@`, a `#` or `GH-` before digits,
@@ -897,7 +899,12 @@ body. In the posted
 body, `review_policy.contain_links` leaves the summary no live link
 outside the organisation: link and image syntax and link definitions
 stop working, and a bare URL stays a link when it points under
-`https://github.com/<org>/` and becomes text otherwise. A URL
+`https://github.com/<org>/` and becomes text otherwise. The
+organisation name has to end its path segment: a slash, or
+trailing punctuation and `)` that GitHub trims, and nothing else may
+follow it, so `https://github.com/<org>)x/` becomes text. A quote
+counts as neither, since GFM leaves it on the link, so
+`https://github.com/<org>'` becomes text too. A URL
 holding a dot segment (`..` or `.`, literal or percent-encoded,
 after a slash or a backslash) anywhere up to the next ASCII space or
 `<`, the extent GitHub links, becomes text as well, since a browser
@@ -908,7 +915,9 @@ letter or digit follows it: `(https://github.com/<org>/%2e%2e)` links
 to the `..`.
 GitHub links a URL after an underscore, a digit or punctuation, so
 the scheme and `www.` match wherever they appear, not at word
-boundaries alone.
+boundaries alone. GFM autolinks `ftp://` as well as `http://` and
+`https://`, so an `ftp://` URL becomes text like any URL outside
+the organisation.
 The reviewer name is the App login from the selection, or
 "the code review bot" in a secretless run; the model name comes
 from the selection, not from the session.
@@ -2174,7 +2183,10 @@ organisation known,
 `review_policy.contain_links` turns every link outside it into text
 (§8.3), fenced code aside. Containment lengthens a body by a
 zero-width space per disarmed link, so the apply job cuts each one
-again after it, the same way: an inline comment back to 2000 characters, and a
+again after it, the same way, and contains the cut body again, since
+a cut through a URL can leave `https://github.com/<o…`, which links
+outside the organisation; it cuts again while that pushes the body
+past its limit: an inline comment back to 2000 characters, and a
 finding folded into the review body to an equal share of GitHub's
 65,536-character limit on a review body, its label of path and line
 included and bounded, with room left for the opening, the summary,

@@ -147,3 +147,21 @@ uv run python -B -m unittest discover -s tests -v
 prek run --all-files
 zizmor --persona auditor .github/workflows/
 ```
+
+### Fuzzing
+
+Two [Atheris](https://github.com/google/atheris) harnesses under
+`fuzz/` feed untrusted agent text to the code that judges it.
+`fuzz_verdict.py` covers verdict extraction and the sanitisers in
+`review_policy.py`. `fuzz_comment.py` covers the comment Markdown pass
+in `comment_markdown.py` and the containment `comment_body.py` adds
+before posting. Each harness names the documented contract it checks.
+`tests/test_fuzz_harnesses.py` replays every seed in the normal suite,
+without Atheris. To fuzz by hand, install Atheris outside this
+project and run a harness from the repository root:
+
+```bash
+pip install atheris
+python fuzz/fuzz_verdict.py -max_total_time=60   # fuzz from its seeds
+python fuzz/fuzz_comment.py crash-<hash>         # replay one input
+```
