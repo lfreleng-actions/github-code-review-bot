@@ -122,9 +122,16 @@ def fitted(text: str, org: str, limit: int = markdown.MAX_COMMENT_CHARS) -> str:
 
     Each disarmed link or definition gains a zero-width space, so a body
     the check cut to the limit can come back longer; the cut here keeps
-    every fence closed, and its mark completes no link.
+    every fence closed, and its mark completes no link. A cut through a
+    URL can leave what remains outside the organisation,
+    ``https://github.com/<o…``, so the cut body is contained again,
+    and cut again while that lengthens it past the limit. Each round
+    keeps a shorter start of the body, so the loop ends.
     """
-    return markdown.fit(contained(text, org), limit)
+    body = contained(text, org)
+    while len(body) > limit:
+        body = contained(markdown.fit(body, limit), org)
+    return body
 
 
 def folded_finding(comment: dict[str, Any], org: str) -> str:

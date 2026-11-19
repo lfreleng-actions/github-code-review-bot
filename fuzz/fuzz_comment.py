@@ -94,6 +94,8 @@ SEEDS: list[bytes] = [
     b"\xff\x00```\n```\n```\n``\n```\n\x00```\nx\n```\n",
     # Reported in review: GFM autolinks ftp:// as well as http(s)://.
     b"\xffsee ftp://evil.example/x\n",
+    # Reported in review: the cut left https://github.com/lfr\u2026 live.
+    b"\x00" + b"http://x " * 3 + b"https://github.com/lfreleng-actions/",
 ]
 
 

@@ -2183,7 +2183,10 @@ organisation known,
 `review_policy.contain_links` turns every link outside it into text
 (§8.3), fenced code aside. Containment lengthens a body by a
 zero-width space per disarmed link, so the apply job cuts each one
-again after it, the same way: an inline comment back to 2000 characters, and a
+again after it, the same way, and contains the cut body again, since
+a cut through a URL can leave `https://github.com/<o…`, which links
+outside the organisation; it cuts again while that pushes the body
+past its limit: an inline comment back to 2000 characters, and a
 finding folded into the review body to an equal share of GitHub's
 65,536-character limit on a review body, its label of path and line
 included and bounded, with room left for the opening, the summary,
