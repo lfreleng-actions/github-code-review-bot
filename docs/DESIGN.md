@@ -875,7 +875,9 @@ approvable tier, each starting "🤖 Auto-approved by agent:". The
 `trivial` line names a dependency, documentation or formatting
 change; the `low-risk` line says a review of the workflow or code
 change for security and CI/CD impact found low risk. The
-sanitiser folds control characters, escapes `::` and
+sanitiser folds control characters, replaces a lone surrogate (a
+JSON `\ud800` escape, which no UTF-8 stream can write) with U+FFFD,
+escapes `::` and
 `##[`, collapses whitespace, truncates to 600 characters, and
 defuses mentions and references (`review_policy.defuse`): a
 zero-width space follows every `@`, a `#` or `GH-` before digits,

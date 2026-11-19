@@ -62,6 +62,9 @@ REPO_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9._-]+$")
 # character in it.
 FENCE_RE = re.compile(r"^[ \t]*+(`{3,}+|~{3,}+)([^\r\n]*+)\r?$", re.MULTILINE)
 CONTROL_RE = re.compile(r"[\x00-\x1f\x7f-\x9f\u2028\u2029]")
+# A JSON ``\ud800`` escape decodes to a lone surrogate, which no UTF-8
+# stream can write: the job summary would fail on it.
+SURROGATE_RE = re.compile("[\ud800-\udfff]")
 NO_VERDICT = "no verdict"
 HUMAN_REQUESTED = "agent judged the change needs a human review"
 INJECTION_REPORTED = "the agent reported an injection attempt"
@@ -205,15 +208,16 @@ def contain_run(run: str, inside: re.Pattern[str] | None) -> str:
 def sanitise(text: object, limit: int) -> str:
     """Fold untrusted text into one bounded line safe for logs and Markdown.
 
-    Control characters become spaces, workflow-command markers are
-    broken, raw HTML stays text, a code fence cannot open, and
-    mentions and references are defused so the agent can never
-    mention, assign or cross-reference anything through a summary.
+    Control characters become spaces, a lone surrogate becomes U+FFFD,
+    workflow-command markers are broken, raw HTML stays text, a code
+    fence cannot open, and mentions and references are defused so the
+    agent can never mention, assign or cross-reference anything
+    through a summary.
     """
     raw = text if isinstance(text, str) else ""
     if isinstance(text, int | float) and not isinstance(text, bool):
         raw = str(text)
-    folded = CONTROL_RE.sub(" ", raw)
+    folded = CONTROL_RE.sub(" ", SURROGATE_RE.sub("\ufffd", raw))
     escaped = folded.replace("::", ": :").replace("##[", "# #[")
     collapsed = FENCE_OPENING_RE.sub(
         ZWSP, " ".join(disarm_html(defuse(escaped)).split())
