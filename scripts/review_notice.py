@@ -183,16 +183,17 @@ def from_names(
 
     The names are sorted and paged before any read, so a page holds
     the same ones each time it is listed. Each on the page is read
-    once. Only an open pull request by a listed bot is owed
-    ``selection_failed``, at the head just read; nothing vouches for
-    any other, so it is left out with a warning.
+    once, for its state, author and head alone: the listing job's
+    token holds no check or status grant. Only an open pull request by
+    a listed bot is owed ``selection_failed``, at the head just read;
+    nothing vouches for any other, so it is left out with a warning.
     """
     names = sorted(parse_pull_requests(text, org))
     found: list[dict[str, Any]] = []
     for name, number in page_of(names, page):
         ref = f"{org}/{name}#{number}"
         try:
-            state = pull_reads.pull_state(f"{org}/{name}", number)
+            state = pull_reads.pull_author_state(f"{org}/{name}", number)
         except github.GitHubError as exc:
             warn(f"{ref} left out; it could not be read: {github.safe_message(exc)}")
             continue

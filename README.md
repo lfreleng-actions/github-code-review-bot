@@ -26,7 +26,9 @@ organisation, in two modes:
   never approves: a maintainer still reviews and approves every pull
   request. A Code Monkey pull request with findings goes back to
   Code Monkey for a revision round, for three antagonistic rounds at
-  most; after that a maintainer takes over.
+  most; after that a maintainer takes over. When a live run leaves
+  a named or selected pull request without a review, it posts one
+  notice comment saying why.
 
 ## 📚 Documentation
 
@@ -73,7 +75,9 @@ requests instead of humans', the agent emits findings anchored to
 diff lines rather than a tier, and Apply checks each anchor against
 the diff and posts one `COMMENT` review under a second App that
 never approves. A separate job then hands Code Monkey's reviewed pull
-requests back to it for revision, under a three-round cap. See
+requests back to it for revision, under a three-round cap. In a live
+run, two more jobs list the pull requests the run left without a
+review and post one notice comment on each, under the same App. See
 [`docs/DESIGN.md` §19](docs/DESIGN.md).
 
 ## Schedule and dispatch

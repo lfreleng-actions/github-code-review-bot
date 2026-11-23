@@ -785,6 +785,57 @@ class PullIdentityTest(ReadsCase):
                     self.identity_of(node, **kwargs)
 
 
+class PullAuthorStateTest(ReadsCase):
+    """``pull_author_state`` reads the state, author and head, and nothing else."""
+
+    def author_state_of(
+        self, node: dict[str, Any] | None, **kwargs: Any
+    ) -> dict[str, Any]:
+        """Run ``pull_author_state`` against one canned reply."""
+        with patch.object(github, "run_gh", return_value=reply(node, **kwargs)) as gh:
+            state = reads.pull_author_state("org/alpha", 7)
+        gh.assert_called_once()
+        self.assertIs(gh.call_args.kwargs.get("read"), True)
+        return state
+
+    def test_query_names_no_check_status_or_review(self) -> None:
+        """A token with no checks or statuses grant can answer it."""
+        for field in ("statusCheckRollup", "CheckRun", "StatusContext", "reviews"):
+            with self.subTest(field=field):
+                self.assertNotIn(field, reads.AUTHOR_STATE_QUERY)
+
+    def test_extracts_pull_state_keys(self) -> None:
+        """The fields come back under ``pull_state``'s keys."""
+        self.assertEqual(
+            self.author_state_of(pull_node(author=actor("bot[bot]", "Bot"))),
+            {
+                "repository": "org/alpha",
+                "number": 7,
+                "state": "OPEN",
+                "author": {"login": "bot[bot]", "is_bot": True},
+                "head_sha": HEAD,
+            },
+        )
+        deleted = self.author_state_of(pull_node(author=None))
+        self.assertEqual(deleted["author"], {"login": None, "is_bot": True})
+
+    def test_absent_or_invalid_fields_raise(self) -> None:
+        """A missing target or a malformed field is an error, not a state."""
+        cases: list[tuple[dict[str, Any] | None, dict[str, Any]]] = [
+            (pull_node(), {"repository": None}),
+            (pull_node(), {"repository": "org/other"}),
+            (None, {}),
+            (pull_node(number=8), {}),
+            (pull_node(state="GONE"), {}),
+            (pull_node(headRefOid="short"), {}),
+            (pull_node(author={"__typename": "User"}), {}),
+        ]
+        for node, kwargs in cases:
+            with self.subTest(node=node, kwargs=kwargs):
+                with self.assertRaises(github.GitHubError):
+                    self.author_state_of(node, **kwargs)
+
+
 def rest_file(
     path: str, patch_text: str | None = "@@ -1 +1 @@\n-a\n+b", **over: Any
 ) -> dict[str, Any]:

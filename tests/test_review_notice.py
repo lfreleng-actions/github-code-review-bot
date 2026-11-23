@@ -39,6 +39,9 @@ TITLE = "Fix: Title words <!-- antagonistic-notice -->"
 BODY = "Body words that must stay out"
 # The one endpoint a notice may write to, spelt independently of the module.
 WRITE_RE = re.compile(r"repos/[^/]+/[^/]+/issues/[0-9]+/comments")
+# What the listing job's token cannot read: it holds no checks or statuses grant.
+UNGRANTED_RE = re.compile(r"statusCheckRollup|CheckRun|StatusContext")
+AUTHOR_STATE = notice.pull_reads.pull_author_state
 
 
 def live(number: int = 7, **overrides: Any) -> dict[str, Any]:
@@ -142,6 +145,9 @@ class GitHubDouble:
             patch.object(notice.github, "api_list", side_effect=self.api_list),
             patch.object(notice.github, "api_write", side_effect=self.api_write),
             patch.object(notice.pull_reads, "pull_state", side_effect=self.pull_state),
+            patch.object(
+                notice.pull_reads, "pull_author_state", side_effect=self.pull_state
+            ),
         ):
             yield
 
@@ -446,6 +452,35 @@ class ListFromNamesTest(Case):
         self.assertEqual(code, 0)
         self.assertEqual([item["number"] for item in listed(out, pages=2)], [total])
         self.assertEqual(self.gh.read, [total])
+
+    def test_the_read_asks_for_nothing_the_job_token_cannot_see(self) -> None:
+        """A query naming checks or statuses fails on the listing job's token."""
+        queries: list[str] = []
+
+        def graphql(query: str, variables: dict[str, Any], **_: Any) -> Any:
+            queries.append(query)
+            if UNGRANTED_RE.search(query):
+                raise notice.github.GitHubError(
+                    "Resource not accessible by integration"
+                )
+            pull = {
+                "number": variables["number"],
+                "state": "OPEN",
+                "headRefOid": OTHER,
+                "author": {"__typename": "Bot", "login": MONKEY},
+            }
+            return {"repository": {"nameWithOwner": REPO, "pullRequest": pull}}
+
+        with (
+            patch.object(notice.pull_reads, "pull_author_state", AUTHOR_STATE),
+            patch.object(notice.github, "graphql", side_effect=graphql),
+        ):
+            code, include = self.names("repo#1")
+        self.assertEqual(code, 0)
+        self.assertEqual(
+            [(item["number"], item["head_sha"]) for item in include], [(1, OTHER)]
+        )
+        self.assertEqual(len(queries), 1)
 
     def test_a_negative_page_is_a_usage_error(self) -> None:
         """Pages count from zero."""
