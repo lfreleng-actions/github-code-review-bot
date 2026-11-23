@@ -1251,8 +1251,8 @@ run consumed after the session artifact expires.
   dispatches, a per-run group for dry dispatches. A group holds one
   pending run and a newcomer replaces it, so this is not a FIFO
   queue.
-- Antagonistic caller: every hour at minute 41, clear of Code
-  Monkey's minute 17. Scheduled runs share
+- Antagonistic caller: every fourth hour at minute 41, clear of
+  Code Monkey's minute 17. Scheduled runs share
   `code-review-antagonistic-scan` with `queue: max`, so two slots
   never run together and a waiting slot is never replaced; each
   dispatch keeps a per-run group, so no slot cancels a dispatched
@@ -2400,22 +2400,26 @@ caller. With `handback` on it names
 `<owner>/github-code-monkey-bot` as `handback_repository` and hands
 the `CODE_MONKEY_DISPATCH_TOKEN` secret to the hand-back job.
 
-The schedule, at minute 41 of every hour, catches a bot pull request
-that turned clean outside a Code Monkey publishing run: a maintainer
-resolved the last thread by hand, Copilot's review arrived after
-Code Monkey stopped waiting, or a maintainer pushed a fix to the bot
-branch. Nobody would dispatch for such a head. A schedule has no
-inputs, so a scheduled run is live, scans (`pull_requests` and
-`repositories` empty), passes `reasoning_effort` and `max_ai_credits`
-empty, keeps the form's `max_pull_requests` and
-`reassess` defaults, and hands back as the form's default does. A
-slot skips its jobs unless `ANTAGONISTIC_SCAN_ENABLED` is `true`
-(§19.8): the `options` job carries the gate and the review job needs
-it, so a slot with the variable unset skips both. The §19.2 rules
-need no change for the schedule: they admit a head once Copilot
-has reviewed it clean with no open thread, skip a head this App has
-read, and stop at the round cap, so a scan reviews the heads Code
-Monkey would have nominated and nothing else.
+The schedule, at minute 41 of every fourth hour (`41 */4 * * *`,
+UTC), catches a bot pull request that turned clean outside a Code
+Monkey publishing run: a maintainer resolved the last thread by
+hand, Copilot's review arrived after Code Monkey stopped waiting, or
+a maintainer pushed a fix to the bot branch. Nobody would dispatch
+for such a head. A schedule has no inputs, so a scheduled run is
+live, scans (`pull_requests` and `repositories` empty), passes
+`reasoning_effort` and `max_ai_credits` empty, keeps the form's
+`max_pull_requests` and `reassess` defaults, and hands back as the
+form's default does. A slot skips its jobs unless
+`ANTAGONISTIC_SCAN_ENABLED` is `true` (§19.8): the `options` job
+carries the gate and the review job needs it, so a slot with the
+variable unset skips both. Code Monkey asks for this review itself
+at the end of a round, and the scan exists for a head that turned
+clean some other way, which happens less often than every hour:
+every four hours is enough. The §19.2 rules admit a head once
+Copilot has reviewed it clean and none of Copilot, a maintainer and
+this App holds an open thread (`reviewer_feedback`), skip a head
+this App has read, and stop at the round cap, so a scan reviews the
+heads Code Monkey would have nominated and nothing else.
 
 Each dispatch locks within its own run, in the caller and in the
 reusable workflow. Code Monkey dispatches a batch per run, and a
@@ -2694,9 +2698,10 @@ notice and posts each one; two jobs at the end of
   silent, and a test fails when a rule added later is neither.
   Notifying: `moved`, `cap`, `already_assessed`, `draft`,
   `conflicting`, `changes_requested`, `already_approved`,
-  `copilot_pending`, `copilot_feedback`, `copilot_unreviewed`,
-  `copilot_findings`, `round_cap` and `too_large`, with the notice's
-  own `no_review` and `selection_failed`. Silent: `repository`,
+  `copilot_pending`, `copilot_feedback`, `reviewer_feedback`,
+  `copilot_unreviewed`, `copilot_findings`, `round_cap` and
+  `too_large`, with the notice's own `no_review` and
+  `selection_failed`. Silent: `repository`,
   `bot_author`, `human_author`, `closed` and `already_reviewed`, and
   the reasons the approve mode alone records. The sentences for
   `no_review`, `selection_failed`, `moved`, `cap` and

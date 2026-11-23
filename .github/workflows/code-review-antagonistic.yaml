@@ -14,10 +14,10 @@
 # Code Monkey dispatches this workflow for its own pull requests once
 # their Copilot review is clean; a maintainer may dispatch it by hand,
 # naming pull requests or scanning for the listed bots' open ones.
-# An hourly scan, live, catches a pull request that turned clean
-# outside a Code Monkey run; the selection rules admit only the heads
-# a dispatch would have named (docs/DESIGN.md section 19.2). The scan
-# runs once the ANTAGONISTIC_SCAN_ENABLED variable is 'true'.
+# A scan every four hours, live, catches a pull request that turned
+# clean outside a Code Monkey run; the selection rules admit only the
+# heads a dispatch would have named (docs/DESIGN.md section 19.2). The
+# scan runs once the ANTAGONISTIC_SCAN_ENABLED variable is 'true'.
 #
 # The run holds the antagonistic App's credentials and never the
 # approving App's (docs/DESIGN.md section 10). The pre-flight identity
@@ -29,8 +29,8 @@ name: 'Code Review Bot (antagonistic) 😈'
 # yamllint disable-line rule:truthy
 on:
   schedule:
-    # Hourly at :41, clear of Code Monkey's :17 (UTC)
-    - cron: '41 * * * *'
+    # Every fourth hour at :41, clear of Code Monkey's :17 (UTC)
+    - cron: '41 */4 * * *'
   workflow_dispatch:
     inputs:
       dry_run:
