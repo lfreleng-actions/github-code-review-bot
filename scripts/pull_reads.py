@@ -87,6 +87,18 @@ query($owner: String!, $name: String!, $number: Int!) {
 # The fields that name the comparison a pull request's diff shows.
 IDENTITY_KEYS = ("head_sha", "base_ref", "base_sha")
 
+# A pull request's own fields alone: no check run, status, review or
+# thread, so a token with no grant beyond pull requests can answer it.
+AUTHOR_STATE_QUERY = """
+query($owner: String!, $name: String!, $number: Int!) {
+  repository(owner: $owner, name: $name) {
+    nameWithOwner
+    pullRequest(number: $number) {
+      number state headRefOid author { __typename login } }
+  }
+}
+"""
+
 
 class SelectionError(Exception):
     """Operational failure of the selection, not a skip."""
@@ -275,6 +287,43 @@ def pull_identity(repository: str, number: int) -> dict[str, str]:
         "head_sha": github.require_sha(pr, "headRefOid", context),
         "base_ref": github.require_str(pr, "baseRefName", context),
         "base_sha": base_tip(pr, context),
+    }
+
+
+def pull_author_state(repository: str, number: int) -> dict[str, Any]:
+    """Read the state, author and head alone, under ``pull_state``'s keys.
+
+    For a reader whose token may lack the check and status grants
+    ``pull_state``'s query needs, such as a workflow job's own token on
+    its own repository.
+    """
+    owner, _, name = repository.partition("/")
+    context = f"{repository}#{number}"
+    variables = {"owner": owner, "name": name, "number": number}
+    repo_node = github.graphql(AUTHOR_STATE_QUERY, variables, read=True).get(
+        "repository"
+    )
+    if repo_node is None:
+        raise github.GitHubError(f"{context}: repository not found")
+    repo_data = require_object(repo_node, context)
+    full = github.require_str(repo_data, "nameWithOwner", context)
+    if not github.REPO_RE.fullmatch(full) or full.lower() != repository.lower():
+        raise github.GitHubError(f"{context}: repository reply does not match")
+    pull = repo_data.get("pullRequest")
+    if pull is None:
+        raise github.GitHubError(f"{context}: no such pull request")
+    pr = require_object(pull, context)
+    if github.require_int(pr, "number", context) != number:
+        raise github.GitHubError(f"{context}: pull request reply does not match")
+    state = github.require_str(pr, "state", context)
+    if state not in PULL_STATES:
+        raise github.GitHubError(f"{context}: unexpected state {state!r}")
+    return {
+        "repository": full,
+        "number": number,
+        "state": state,
+        "author": author_of(pr.get("author"), context),
+        "head_sha": github.require_sha(pr, "headRefOid", context),
     }
 
 

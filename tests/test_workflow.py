@@ -2504,7 +2504,11 @@ class NoticeContracts(ReusableWorkflowCase):
         self.assertEqual(job["name"], "List missing reviews")
         self.assertEqual(job["needs"], ["select", "review", "apply"])
         self.assertEqual(squash(str(job["if"])), NOTICES_IF)
-        self.assertEqual(job["permissions"], {"actions": "read", "contents": "read"})
+        # Its GraphQL reads of each candidate need pull-requests: read.
+        self.assertEqual(
+            job["permissions"],
+            {"actions": "read", "contents": "read", "pull-requests": "read"},
+        )
         self.assertEqual(job["timeout-minutes"], 10)
         self.assertEqual(
             job["outputs"],

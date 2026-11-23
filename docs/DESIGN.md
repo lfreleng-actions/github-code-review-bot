@@ -2606,15 +2606,17 @@ notice and posts each one; two jobs at the end of
   the last pre-flight step, and so also after a failed or skipped
   review or apply job. A run that fails at or before its gate posts
   nothing: nothing yet shows the boundary held. The job holds no App
-  key and mints nothing; it reads with the job-native token. When
-  the select job succeeded it fetches the evidence by artifact ID,
-  verifies its digests and lists from `selection.json`; when select
-  failed past the gate it lists from the run's `pull_requests`
-  input. It lists page 0 alone and fails on a second page: since the
-  select job refuses a run that names more than 256 pull requests,
-  page 0 holds every notice (§18.2). `notify` runs once per
-  entry of that list. It checks every matrix value by shape and the
-  repository's owner against `inputs.org`, mints the apply job's
+  key and mints nothing; it reads with the job-native token, under
+  `actions`, `contents` and `pull-requests` read, which the callers
+  already grant. When the select job succeeded it fetches the
+  evidence by artifact ID, verifies its digests and lists from
+  `selection.json`; when select failed past the gate it lists from
+  the run's `pull_requests` input. It lists page 0 alone and fails
+  on a second page: since the select job refuses a run that names
+  more than 256 pull requests, page 0 holds every notice (§18.2).
+  `notify` runs once per entry of that list. It checks every matrix
+  value by shape and the repository's owner against `inputs.org`,
+  mints the apply job's
   write grants for that one repository, checks the minted slug
   against the mode's App config, and runs `post` in the one step
   that holds the token. It shares the apply job's lock per pull
@@ -2627,8 +2629,8 @@ notice and posts each one; two jobs at the end of
   needs. The notice is an issue comment; no rule here reads issue
   comments, so it counts as no round and reviews nothing. This is
   the mode's second write, by the maintainers' decision.
-- **`list`.** Runs in a trusted job whose token reads public
-  repositories and writes nothing, and prints `count=`, `pages=`
+- **`list`.** Runs in a trusted job whose token reads pull requests
+  and writes nothing, and prints `count=`, `pages=`
   and `matrix=` (§18.2) on stdout and everything else on stderr. The
   matrix holds one page of at most 256 entries, chosen with `--page`
   from the candidates the input names, sorted and paged before any
@@ -2646,10 +2648,14 @@ notice and posts each one; two jobs at the end of
   With `--pull-requests`, it takes the run's own input, for a run
   whose select job failed after its pre-flight gate: it parses the
   text against `--org` as selection does and reads each pull request
-  once. One that is open and by a listed bot owes `selection_failed`
-  at the head that read returned; the script leaves out any other,
-  and any it cannot read, with a warning, since nothing vouches for
-  it.
+  once, for its state, author and head alone: the job's token holds
+  `pull-requests: read` but no checks or statuses grant, so a read
+  naming check runs or status contexts fails on a pull request in
+  the workflow repository and would drop it. One that is open and
+  by a listed bot owes `selection_failed` at the head that read
+  returned; the script
+  leaves out any other, and any it cannot read, with a warning,
+  since nothing vouches for it.
 - **Reasons.** `scripts/notice_text.py` holds one sentence per
   reason and classifies every skip reason of §5 as notifying or
   silent, and a test fails when a rule added later is neither.

@@ -1728,6 +1728,7 @@ jobs:
     permissions:
       actions: read  # Fetch the selection evidence by artifact ID
       contents: read  # Checkout the notice lister
+      pull-requests: read  # Read each candidate's state and reviews
     outputs:
       count: "${{ steps.list.outputs.count }}"
       matrix: "${{ steps.list.outputs.matrix }}"
