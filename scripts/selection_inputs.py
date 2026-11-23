@@ -40,13 +40,22 @@ GOVERNING_REPOS_FILE = (
 )
 
 
+def is_repository_name(name: str) -> bool:
+    """Whether ``name`` is a repository name GitHub can hold.
+
+    A name may start with a dot, as ``.github`` does; ``.`` and ``..``
+    are path segments and never a repository.
+    """
+    return REPO_NAME_RE.fullmatch(name) is not None and name not in (".", "..")
+
+
 def parse_repositories(text: str) -> list[str]:
     """Split a repository list on commas and whitespace, in given order."""
     names: list[str] = []
     for token in re.split(r"[,\s]+", text.strip()):
         if not token:
             continue
-        if not REPO_NAME_RE.fullmatch(token) or token in (".", ".."):
+        if not is_repository_name(token):
             raise SelectionError(f"invalid repository name {token!r}")
         lowered = token.lower()
         if lowered not in names:
