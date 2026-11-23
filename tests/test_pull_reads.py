@@ -324,6 +324,7 @@ class PullStateTest(ReadsCase):
                 "reviews": [],
                 "review_requests": [],
                 "unresolved_copilot_threads": 0,
+                "unresolved_thread_authors": [],
                 "changes_requested": False,
                 "approved_by": [],
                 "commits_count": 2,
@@ -494,8 +495,11 @@ class PullStateTest(ReadsCase):
         state = self.state_of(node)
         self.assertEqual(state["review_requests"], ["alice", "Copilot", "releng"])
         self.assertEqual(state["unresolved_copilot_threads"], 2)
+        self.assertEqual(
+            state["unresolved_thread_authors"],
+            [{"type": "Bot", "login": "alice", "association": "NONE"}],
+        )
 
-    @unittest.expectedFailure
     def test_thread_authors_name_each_open_non_copilot_opener(self) -> None:
         """An owner's, a member's and an App's open threads keep their type,
         login and association; resolved, Copilot's and deleted ones drop out.
@@ -523,7 +527,6 @@ class PullStateTest(ReadsCase):
             ],
         )
 
-    @unittest.expectedFailure
     def test_the_query_reads_the_opening_comments_association(self) -> None:
         """The first 100 threads, and the association beside each opener."""
         query = " ".join(reads.PULL_QUERY.split())
@@ -602,6 +605,16 @@ class PullStateTest(ReadsCase):
             pull_node(
                 reviewThreads={
                     "nodes": [{"isResolved": "yes", "comments": {"nodes": []}}]
+                }
+            ),
+            pull_node(
+                reviewThreads={
+                    "nodes": [
+                        {
+                            "isResolved": False,
+                            "comments": {"nodes": [{"author": actor("mel")}]},
+                        }
+                    ]
                 }
             ),
         ]

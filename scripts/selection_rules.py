@@ -33,6 +33,7 @@ SKIP_REASONS = (
     "already_approved",
     "copilot_pending",
     "copilot_feedback",
+    "reviewer_feedback",
     "round_cap",
     "already_reviewed",
     "copilot_unreviewed",
@@ -50,6 +51,8 @@ SKIP_REASONS = (
 # for the human read an outside author's change needs. A collaborator,
 # a contributor or a missing association is untrusted; fork status is
 # no part of it, since members open pull requests from their own forks.
+# The antagonistic mode's thread rule counts a person's thread by the
+# same two associations.
 TRUSTED_ASSOCIATIONS = frozenset({"OWNER", "MEMBER"})
 # The CI rule: the rollup states that keep the approve mode waiting.
 CI_SKIPS = {"pending": "ci_pending", "failure": "ci_failing", "none": "ci_none"}
@@ -145,6 +148,27 @@ def author_skip(
 def trusted_association(association: object) -> bool:
     """Whether a pull request's ``author_association`` is OWNER or MEMBER."""
     return isinstance(association, str) and association in TRUSTED_ASSOCIATIONS
+
+
+def reviewer_thread(opener: dict[str, Any], bot_login: str | None) -> bool:
+    """Whether an unresolved thread's opener holds the antagonistic review.
+
+    A maintainer counts: a ``User`` whose association on the opening
+    comment is OWNER or MEMBER. So does this App: a ``Bot`` whose login
+    folds to ``bot_login``. Anyone can open a thread on a public
+    repository, so nobody else's holds it, and the account type keeps
+    a human named like the App from standing in for it.
+    """
+    login = opener.get("login")
+    if not isinstance(login, str):
+        return False
+    if opener.get("type") == "User":
+        return trusted_association(opener.get("association"))
+    return (
+        opener.get("type") == "Bot"
+        and bot_login is not None
+        and bot_identity(login) == bot_identity(bot_login)
+    )
 
 
 def submitted_bot_reviews(reviews: list[dict[str, Any]], head_sha: str) -> list[str]:
@@ -285,6 +309,11 @@ def first_skip(state: dict[str, Any], rules: Rules) -> str | None:
         return "copilot_pending"
     if state["unresolved_copilot_threads"]:
         return "copilot_feedback"
+    if rules.mode == "antagonistic" and any(
+        reviewer_thread(opener, rules.bot_login)
+        for opener in state["unresolved_thread_authors"]
+    ):
+        return "reviewer_feedback"
     by_mode = mode_skip(state, rules)
     if by_mode is not None:
         return by_mode

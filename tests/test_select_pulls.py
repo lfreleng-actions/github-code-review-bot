@@ -1849,7 +1849,6 @@ class AntagonisticSelectionTest(SelectionCase):
         self.add_bot("alpha", 1, reviewThreads={"nodes": list(threads)})
         return self.run_antagonistic("--bot-slug", "lf-releng-antagonistic-review-bot")
 
-    @unittest.expectedFailure
     def test_a_maintainers_or_this_apps_open_thread_holds_the_review(self) -> None:
         """An owner's, a member's or this App's unresolved thread skips."""
         for name, opener in {
@@ -1918,7 +1917,6 @@ class AntagonisticSelectionTest(SelectionCase):
         selection = self.run_antagonistic()
         self.assertEqual([e["key"] for e in selection["pull_requests"]], ["alpha-1"])
 
-    @unittest.expectedFailure
     def test_a_named_pull_request_with_an_open_thread_is_skipped(self) -> None:
         """Naming the pull request does not lift the rule."""
         self.add_bot(
@@ -1929,7 +1927,6 @@ class AntagonisticSelectionTest(SelectionCase):
         selection = self.run_antagonistic("--pull-requests", "alpha#1")
         self.assert_only_skip(selection, "reviewer_feedback")
 
-    @unittest.expectedFailure
     def test_approve_mode_never_gives_the_reviewer_reason(self) -> None:
         """The approve mode keeps its rules: a maintainer's thread holds nothing."""
         self.gh.add(

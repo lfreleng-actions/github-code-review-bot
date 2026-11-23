@@ -198,7 +198,6 @@ class ClassificationTest(unittest.TestCase):
         self.assertEqual(text.NOTIFYING | text.SILENT, frozenset(rules.SKIP_REASONS))
         self.assertFalse(text.NOTIFYING & text.SILENT)
 
-    @unittest.expectedFailure
     def test_an_open_reviewer_thread_notifies_without_asking_again(self) -> None:
         """``reviewer_feedback`` is a rule skip: a sentence, no ask-again."""
         self.assertIn("reviewer_feedback", text.NOTIFYING)

@@ -355,6 +355,7 @@ records a count for every reason, zero included:
 | `already_approved`     | Some reviewer's latest review is `APPROVED` on the current head                                                                                                    |
 | `copilot_pending`      | Copilot is a requested reviewer whose review has not arrived                                                                                                       |
 | `copilot_feedback`     | Unresolved review threads opened by Copilot                                                                                                                        |
+| `reviewer_feedback`    | Antagonistic mode alone: unresolved review threads opened by a maintainer or by this App (§19.2)                                                                   |
 | `round_cap`            | Antagonistic mode alone: this App has reviewed the pull request three times (§19.9)                                                                                |
 | `already_reviewed`     | Antagonistic mode alone: this App has a submitted review of the head (§19.2)                                                                                       |
 | `copilot_unreviewed`   | Antagonistic mode alone: no submitted Copilot review of the head itself (§19.2)                                                                                    |
@@ -1683,8 +1684,8 @@ holds the folded logins that mode reviews, and is empty in the
 approve mode. `governing_repositories` holds the folded, sorted
 names of `config/governing-repos.txt` the approve mode applied, and
 is empty in the antagonistic mode (§5). `skip_counts` carries every
-reason from §5, `governing_repository` and `untrusted_author`
-included, in table order. `skipped` has
+reason from §5, `governing_repository`, `untrusted_author` and
+`reviewer_feedback` included, in table order. `skipped` has
 one row per skipped pull request; `title` may be `null` when the
 skip happened before a read. `head_sha` is the head the state read
 returned, for every skip decided after that read (a rule of §5,
@@ -2046,8 +2047,26 @@ They exist because an approval relies on green CI; a comment does
 not, and a bot pull request from a fork whose workflows await a
 maintainer's approval may show pending or partial CI for days.
 
-Four rules apply to this mode alone, after the Copilot rules. All
-read the pull request's full review history, a paginated read the
+`reviewer_feedback` applies to this mode alone, directly after
+`copilot_feedback`: an unresolved review thread opened by a
+maintainer or by this App holds the pull request. A thread counts
+while it stays open and its opening comment's author is a person,
+typed `User`, whose `authorAssociation` on that comment is `OWNER`
+or `MEMBER`, or this run's App, typed `Bot`, whose login folds to
+`bot_login`. Anyone can open a thread on a public
+repository, so nobody else's counts: a passer-by's would hold the
+review for ever, and a human named like the App, another bot or a
+deleted account stands in for nobody. Copilot's threads keep
+`copilot_feedback`, which comes first. The state query
+(`pull_reads.pull_state`) reads the opening comment of the first 100
+threads, its author and its `authorAssociation`, as it does for
+Copilot's. Code Monkey nominates no head on which such a thread is
+open (its `scripts/thread_reads.py`), and a review of one would cost
+one of the pull request's rounds and tend to raise again what the
+thread already holds.
+
+Four more rules apply to this mode alone, after the thread rules.
+All read the pull request's full review history, a paginated read the
 selection makes for this mode's candidates alone, after the cheaper
 rules: the state query's last 100 reviews could miss an old review.
 None counts a review unless GitHub marks its author as a bot: logins
@@ -2078,14 +2097,15 @@ the App or like Copilot must stand in for neither.
   a newer review of the head that is not clean overrides an older
   clean one.
 
-With `copilot_pending` and `copilot_feedback`, the mode reads a head
-once Copilot has reviewed that head clean and nobody has left its
-threads open, and not before. The rule holds at every entry point: a
+With `copilot_pending`, `copilot_feedback` and `reviewer_feedback`,
+the mode reads a head once Copilot has reviewed that head clean and
+none of Copilot, a maintainer and this App holds an open thread, and
+not before. The rule holds at every entry point: a
 scheduled scan, a maintainer's dispatch, and Code Monkey's dispatch
 after its own classifier found the review clean (§19.7). A caller
 saying the review was clean does not make it so, and the check runs
 before any agent session starts. The approve mode does not read the
-body.
+body, and does not apply `reviewer_feedback`.
 
 The selection keeps the body of Copilot's reviews from the history
 read (`pull_changes.pull_reviews`), and drops one past the
@@ -2365,7 +2385,7 @@ missed.
 ### 19.7 The caller
 
 `code-review-antagonistic.yaml` runs on `workflow_dispatch` and on
-a `schedule` every hour. Its form offers `dry_run` (default
+a `schedule` every four hours. Its form offers `dry_run` (default
 `true`), a model choice defaulting to GPT-6 Astra, so the second
 read comes from a different model family from the Claude default
 that writes Code Monkey's changes, `reasoning_effort` and
