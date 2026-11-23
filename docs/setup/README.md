@@ -149,13 +149,13 @@ post. Create it after Code Monkey's revision rounds read the
 antagonistic App's threads: until then a hand-back starts a round
 that cannot see the findings.
 
-The antagonistic caller also scans live every hour, with `handback`
-on, once `ANTAGONISTIC_SCAN_ENABLED` reads `true`. Leave the variable
-unset until the App, its two names and this token are in place and
-the rollout's dispatches ([`DESIGN.md` §19.8](../DESIGN.md)) have
-passed, or each slot fails the way a live dispatch without them
-does. Dispatches run whatever its value, so the workflow stays
-enabled throughout.
+The antagonistic caller also scans live every four hours, with
+`handback` on, once `ANTAGONISTIC_SCAN_ENABLED` reads `true`. Leave
+the variable unset until the App, its two names and this token are
+in place and the rollout's dispatches
+([`DESIGN.md` §19.8](../DESIGN.md)) have passed, or each slot fails
+the way a live dispatch without them does. Dispatches run whatever
+its value, so the workflow stays enabled throughout.
 
 ## The model credential
 

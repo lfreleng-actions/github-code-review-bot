@@ -70,7 +70,8 @@ query($owner: String!, $name: String!, $number: Int!) {
         ... on User { login } ... on Bot { login } ... on Team { slug }
         ... on Mannequin { login } } } }
       reviewThreads(first: 100) { nodes { isResolved
-        comments(first: 1) { nodes { author { __typename login } } } } }
+        comments(first: 1) { nodes { authorAssociation
+          author { __typename login } } } } }
     }
   }
 }
@@ -240,18 +241,37 @@ def review_requests_of(connection: Any, context: str) -> list[str]:
     return requested
 
 
-def copilot_threads_of(connection: Any, context: str) -> int:
-    """Count the unresolved review threads Copilot opened."""
-    count = 0
+def threads_of(connection: Any, context: str) -> tuple[int, list[dict[str, Any]]]:
+    """Count the unresolved threads Copilot opened, and name who opened the rest.
+
+    Each other opener keeps its account type, login and the association
+    its opening comment carries, so the skip rules can tell a maintainer
+    or this App from a passer-by or a human named like the App. A thread
+    whose opener's account is deleted counts for nobody.
+    """
+    copilot = 0
+    others: list[dict[str, Any]] = []
     for node in nodes_of(connection, context):
         if require_bool(node, "isResolved", context):
             continue
         comments = nodes_of(node.get("comments"), context)
-        if comments and is_copilot(
-            author_of(comments[0].get("author"), context)["login"]
-        ):
-            count += 1
-    return count
+        if not comments or comments[0].get("author") is None:
+            continue
+        author = require_object(comments[0].get("author"), context)
+        login = github.require_str(author, "login", context)
+        if is_copilot(login):
+            copilot += 1
+            continue
+        others.append(
+            {
+                "type": github.require_str(author, "__typename", context),
+                "login": login,
+                "association": github.require_str(
+                    comments[0], "authorAssociation", context
+                ),
+            }
+        )
+    return copilot, others
 
 
 def base_tip(pr: dict[str, Any], context: str) -> str:
@@ -370,6 +390,7 @@ def pull_state(
     reviews, changes_requested, approved_by = reviews_of(
         pr.get("reviews"), head_sha, context
     )
+    copilot_threads, thread_authors = threads_of(pr.get("reviewThreads"), context)
     return {
         "repository": full,
         "repo_name": full.partition("/")[2],
@@ -402,9 +423,8 @@ def pull_state(
         "stale_statuses": stale_statuses,
         "reviews": reviews,
         "review_requests": review_requests_of(pr.get("reviewRequests"), context),
-        "unresolved_copilot_threads": copilot_threads_of(
-            pr.get("reviewThreads"), context
-        ),
+        "unresolved_copilot_threads": copilot_threads,
+        "unresolved_thread_authors": thread_authors,
         "changes_requested": changes_requested,
         "approved_by": approved_by,
         "commits_count": commits_count,

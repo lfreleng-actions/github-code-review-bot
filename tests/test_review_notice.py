@@ -198,6 +198,18 @@ class ClassificationTest(unittest.TestCase):
         self.assertEqual(text.NOTIFYING | text.SILENT, frozenset(rules.SKIP_REASONS))
         self.assertFalse(text.NOTIFYING & text.SILENT)
 
+    def test_an_open_reviewer_thread_notifies_without_asking_again(self) -> None:
+        """``reviewer_feedback`` is a rule skip: a sentence, no ask-again."""
+        self.assertIn("reviewer_feedback", text.NOTIFYING)
+        self.assertEqual(
+            text.SENTENCES["reviewer_feedback"],
+            (
+                "A maintainer's or this bot's review threads on this pull"
+                " request are unresolved.",
+                False,
+            ),
+        )
+
 
 class ListFromSelectionTest(Case):
     """``list --selection``: the selected heads left unreviewed, and named skips."""

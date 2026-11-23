@@ -1670,10 +1670,10 @@ class AntagonisticCallerContracts(WorkflowCase):
             "${{ inputs.model || 'GPT-6 Astra' }}",
         )
 
-    def test_schedule_scans_hourly_off_code_monkeys_minute(self) -> None:
-        """One cron, every hour at :41, clear of Code Monkey's :17."""
+    def test_schedule_scans_four_hourly_off_code_monkeys_minute(self) -> None:
+        """One cron, every fourth hour at :41, clear of Code Monkey's :17."""
         crons = [entry["cron"] for entry in self.triggers["schedule"]]
-        self.assertEqual(crons, ["41 * * * *"])
+        self.assertEqual(crons, ["41 */4 * * *"])
 
     def test_a_schedule_waits_for_the_scan_variable(self) -> None:
         """A slot runs once ``ANTAGONISTIC_SCAN_ENABLED`` is ``true``.

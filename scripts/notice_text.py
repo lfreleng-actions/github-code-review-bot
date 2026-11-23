@@ -61,6 +61,11 @@ SENTENCES: dict[str, tuple[str, bool]] = {
         "Copilot review threads on this pull request are unresolved.",
         False,
     ),
+    "reviewer_feedback": (
+        "A maintainer's or this bot's review threads on this pull request are"
+        " unresolved.",
+        False,
+    ),
     "copilot_unreviewed": ("Copilot has not reviewed this head.", False),
     "copilot_findings": ("Copilot's latest review of this head is not clean.", False),
     "round_cap": (
