@@ -39,8 +39,9 @@ from typing import Any, cast
 
 import bot_github as github
 from bot_evidence import MAX_EVIDENCE_BYTES, read_regular
-from selection_inputs import bot_identity
+from selection_inputs import bot_identity, is_repository_name
 
+# An owner name: unlike a repository name, it cannot start with a dot.
 NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 MARKER_RE = re.compile(
     r"<!-- antagonistic-handback round=[1-9][0-9]* head=(?P<head>[0-9a-f]{40})"
@@ -80,8 +81,35 @@ def load_object(path: Path, context: str) -> dict[str, Any]:
     return cast("dict[str, Any]", parsed)
 
 
+def dropped(repository: object, number: object, reason: str) -> None:
+    """Warn that a result claiming a posted hand-back is not handed back.
+
+    The result comes from an artifact, so its text is escaped before it
+    reaches a log that workflow commands are parsed from.
+    """
+    ref = ascii(f"{repository}#{number}")[1:-1]
+    ref = ref.replace("::", ": :").replace("##[", "# #[")
+    print(f"::warning::handback: {ref} not handed back; {reason}", file=sys.stderr)
+
+
+def claim_error(repository: object, number: object, org: str) -> str | None:
+    """Why a claimed hand-back names no pull request in ``org``, or None."""
+    if not isinstance(repository, str) or type(number) is not int or number <= 0:
+        return "its repository or number is malformed"
+    owner, _, name = repository.partition("/")
+    if owner.lower() != org.lower():
+        return "its repository is outside the organisation"
+    if not is_repository_name(name):
+        return "its repository name is invalid"
+    return None
+
+
 def candidates(report: dict[str, Any], org: str) -> list[tuple[str, int]]:
-    """``(repository, number)`` of each result that claims a posted hand-back."""
+    """``(repository, number)`` of each result that claims a posted hand-back.
+
+    A claim that names no pull request in ``org`` is dropped with a
+    warning.
+    """
     found: list[tuple[str, int]] = []
     for item in cast("list[Any]", report.get("results") or []):
         if not isinstance(item, dict):
@@ -90,11 +118,11 @@ def candidates(report: dict[str, Any], org: str) -> list[tuple[str, int]]:
         if result.get("verdict") != "commented" or result.get("handback") is not True:
             continue
         repository, number = result.get("repository"), result.get("number")
-        if not isinstance(repository, str) or type(number) is not int or number <= 0:
+        reason = claim_error(repository, number, org)
+        if reason is not None:
+            dropped(repository, number, reason)
             continue
-        owner, _, name = repository.partition("/")
-        if owner.lower() != org.lower() or not NAME_RE.fullmatch(name):
-            continue
+        repository, number = cast("str", repository), cast("int", number)
         if (repository, number) not in found:
             found.append((repository, number))
     return found
@@ -173,15 +201,25 @@ def handbacks(
     A candidate whose reviews cannot be read (a private repository the
     native token cannot see, a 5xx, a rate limit) is not confirmed: it
     is skipped with a warning, and the rest of the list still stands.
+    Every other candidate that is not confirmed is dropped with a
+    warning too, so a lost hand-back is never silent.
     """
+    nominated = candidates(report, org)
     bot_login = selection.get("bot_login")
     if not isinstance(bot_login, str) or not bot_login:
+        for repository, number in nominated:
+            dropped(repository, number, "the selection names no App")
         return []
     heads = selected_heads(selection)
     confirmed: list[Handback] = []
-    for repository, number in candidates(report, org):
+    for repository, number in nominated:
         selected = heads.get((repository, number))
         if selected is None:
+            dropped(
+                repository,
+                number,
+                "the selection holds no head for it by an author that takes hand-backs",
+            )
             continue
         head, author = selected
         ref = f"{repository}#{number}"
@@ -194,8 +232,15 @@ def handbacks(
                 file=sys.stderr,
             )
             continue
-        if found is not None:
-            confirmed.append(Handback(repository, number, head, author, found))
+        if found is None:
+            dropped(
+                repository,
+                number,
+                f"no review of {head[:12]} by this App ends with this run's"
+                " hand-back marker",
+            )
+            continue
+        confirmed.append(Handback(repository, number, head, author, found))
     return confirmed
 
 

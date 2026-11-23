@@ -266,7 +266,6 @@ class HandbacksTest(unittest.TestCase):
         self.assertEqual(refs, [])
         self.assertEqual(double.reads, [])
 
-    @unittest.expectedFailure
     def test_a_dotgithub_hand_back_is_confirmed(self) -> None:
         """GitHub allows a repository name to start with a dot, as ``.github``
         does, so its hand-back counts like any other.
@@ -290,7 +289,6 @@ class HandbacksTest(unittest.TestCase):
                 self.assertEqual(refs, [])
                 self.assertEqual(double.reads, [])
 
-    @unittest.expectedFailure
     def test_a_dropped_hand_back_warns(self) -> None:
         """Each result that claims a posted hand-back and is dropped names
         itself in a warning; a result that claims none stays quiet.
@@ -548,7 +546,6 @@ class MainTest(unittest.TestCase):
                     "pulls=\ncount=0\nrecords=[]\n",
                 )
 
-    @unittest.expectedFailure
     def test_a_dotgithub_hand_back_is_dispatched(self) -> None:
         """A ``.github`` hand-back reaches the dispatch list and its count."""
         out = self.run_list(

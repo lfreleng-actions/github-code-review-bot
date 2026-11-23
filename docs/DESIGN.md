@@ -2455,7 +2455,11 @@ when a maintainer takes over.
   run's review, which names the first run and not the second, so it
   dispatches nothing. A re-run of the report repeats its own run's
   hand-backs and no other run's. The confirmed review's id names the
-  hand-back from then on.
+  hand-back from then on. A result that claims a hand-back and fails
+  any of these checks, or names a repository outside the organisation
+  or a name GitHub cannot hold, drops out with a warning naming it, so
+  a lost hand-back is never silent. A repository name may start with a
+  dot, as `.github` does, but never be `.` or `..`.
 - **When a read fails.** The report job lists hand-backs in a live
   antagonistic run alone, after it has uploaded the run report and
   the ledger, so a failure there never costs the run its record. It
