@@ -554,7 +554,6 @@ class CommentOracleTest(unittest.TestCase):
         with self.assertRaises(Breach):
             comment_harness.verify_code_kept(source, "a & b " * 250, 2000)
 
-    @unittest.expectedFailure
     def test_verify_code_kept_checks_beside_escaped_ampersands(self) -> None:
         """Reported in review: ``&amp;`` stays as written, so it is no
         growth, and a drop beside it is caught. A reference that does
@@ -572,7 +571,6 @@ class CommentOracleTest(unittest.TestCase):
             comment_harness.verify_code_kept(source, ("&amp; " * 250).strip(), 2000)
         self.assertEqual(comment_harness.growth("&amp; &lt; &#64;"), 9)
 
-    @unittest.expectedFailure
     def test_verify_code_kept_strips_outer_whitespace(self) -> None:
         """Reported in review: ``comment_text`` strips the outer whitespace
         before it fits the body, so only what is left counts against the
@@ -612,6 +610,24 @@ class CommentOracleTest(unittest.TestCase):
         started = time.perf_counter()
         comment_harness.check(b"\xff" + b"~~~x\n" * 20_000)
         self.assertLess(time.perf_counter() - started, 2.0)
+
+    def test_verify_code_kept_skips_a_blank_suffix(self) -> None:
+        """Reported in review: unclosed openers before a long blank suffix,
+        or a long closing line, cost no quadratic scan. A closer line
+        ending in a space other than a blank or a tab stays no closer, as
+        ``comment_text`` reads it.
+        """
+        openers = "``````````lang\n" * 130
+        for source in (
+            openers + "~~~\nk\n~~~" + "\n" * 200_000,
+            openers + "``````````" + " " * 2_000_000 + "\u3000",
+        ):
+            started = time.perf_counter()
+            comment_harness.check(b"\xff" + source.encode())
+            self.assertLess(time.perf_counter() - started, 2.0)
+        for source in ("```\nx\n```\u3000", "```\nx\n```\u3000\n \n"):
+            with self.subTest(source=source):
+                comment_harness.check(b"\xff" + source.encode())
 
     def test_verify_contained_rejects_outside_links(self) -> None:
         """A live link outside the organisation in prose is caught."""
