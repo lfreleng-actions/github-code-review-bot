@@ -644,6 +644,43 @@ class SkipRulesTest(SelectionCase):
         self.assert_only_skip(selection, "bot_author")
         self.assertFalse(any(args[:2] == ["api", "graphql"] for args in self.gh.calls))
 
+    def test_a_skipped_row_records_the_head_the_state_read_returned(self) -> None:
+        """A skip after the state read names its head; one before it, none."""
+        self.gh.search.append(
+            search_pull("alpha", 1, author={"login": "dependabot[bot]", "is_bot": True})
+        )
+        self.gh.add("beta", 2, isDraft=True)
+        self.gh.add("gamma", 3)
+        self.gh.diffs[("org/gamma", BASE, HEAD)] = (
+            [rest_file("big.txt", "x" * (reads.MAX_DIFF_BYTES + 1))],
+            [rest_commit()],
+        )
+        self.gh.add("delta", 4)
+        self.gh.add("epsilon", 5)
+        self.gh.add("zeta", 6)
+        read_comparison = changes.pull_comparison
+
+        def moving(repository: str, base_sha: str, head_sha: str) -> Any:
+            """Read the comparison, then move delta's head."""
+            if repository == "org/delta":
+                self.gh.pulls[(repository, 4)].update(headRefOid=OTHER)
+            return read_comparison(repository, base_sha, head_sha)
+
+        with patch.object(changes, "pull_comparison", side_effect=moving):
+            selection, _, _ = self.run_main("--max-pull-requests", "1")
+        heads = {row["reason"]: row["head_sha"] for row in selection["skipped"]}
+        self.assertEqual(
+            heads,
+            {
+                "bot_author": None,
+                "draft": HEAD,
+                "too_large": HEAD,
+                "moved": HEAD,
+                "cap": HEAD,
+            },
+        )
+        self.assertEqual(len(selection["pull_requests"]), 1)
+
     def test_bot_author_from_read(self) -> None:
         """A named pull request is never searched, so the read catches its bot author."""
         for author in ({"__typename": "Bot", "login": "x"}, None):
@@ -1337,6 +1374,7 @@ class OutputsTest(SelectionCase):
                     "number": 3,
                     "url": "https://github.com/org/alpha/pull/3",
                     "title": "Fix: Thing 3",
+                    "head_sha": HEAD,
                     "reason": "draft",
                 }
             ],

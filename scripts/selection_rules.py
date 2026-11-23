@@ -71,7 +71,11 @@ class Skips:
         self.rows: list[dict[str, Any]] = []
 
     def add(self, candidate: dict[str, Any], reason: str) -> None:
-        """Record one skipped pull request."""
+        """Record one skipped pull request.
+
+        ``head_sha`` is the head the state read returned, or None for a
+        candidate skipped before that read.
+        """
         self.counts[reason] += 1
         self.rows.append(
             {
@@ -79,6 +83,7 @@ class Skips:
                 "number": candidate["number"],
                 "url": candidate["url"],
                 "title": candidate.get("title"),
+                "head_sha": candidate.get("head_sha"),
                 "reason": reason,
             }
         )

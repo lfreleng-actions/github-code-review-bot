@@ -167,7 +167,8 @@ def assess(
     survivors: list[dict[str, Any]] = []
     for candidate in candidates:
         state = read_state(candidate, named=named, stale=stale)
-        current = {**candidate, **{k: state[k] for k in ("repository", "url", "title")}}
+        read = ("repository", "url", "title", "head_sha")
+        current = {**candidate, **{k: state[k] for k in read}}
         reason = first_skip(state, rules)
         if reason is not None:
             skips.add(current, reason)

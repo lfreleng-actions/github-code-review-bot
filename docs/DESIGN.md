@@ -1395,6 +1395,8 @@ scripts/comment_review.py                check and comment (§19.5)
 scripts/comment_body.py                  review body and inline comments
 scripts/review_recovery.py               review read-back by marker (§8.3)
 scripts/handback.py                      hand-back list (§19.9)
+scripts/review_notice.py                 review notice list and post (§19.10)
+scripts/notice_text.py                   its reasons, sentences and marker
 scripts/result_fetch.py                  bounded result gather, provenance (§12)
 scripts/result_binding.py                results bound to the selection
 scripts/review_report.py                 report and new ledger
@@ -1420,8 +1422,8 @@ fix them there first.
 The suite holds one test file per script module that owns a
 contract (`agent_outcome`, `apply_review`, `artifact_fetch`,
 `bot_evidence`, `bot_github`, `comment_review`, `handback`, `ledger`,
-`preflight`, `pull_reads`, `review_comments`, `review_policy`,
-`review_report`, `review_verdict`, `select_pulls`)
+`preflight`, `pull_reads`, `review_comments`, `review_notice`,
+`review_policy`, `review_report`, `review_verdict`, `select_pulls`)
 plus `test_workflow.py`, which
 pins the workflow facts the scripts rely on: which job holds which
 credential, which step gates the write token, the artifact
@@ -1584,7 +1586,7 @@ against the trusted `selection.json`.
   "skipped": [
     {"repository": "lfreleng-actions/repo", "number": 5,
      "url": "https://github.com/lfreleng-actions/repo/pull/5",
-     "title": "...", "reason": "draft"}
+     "title": "...", "head_sha": "<40 hex>", "reason": "draft"}
   ],
   "pull_requests": [
     {
@@ -1647,7 +1649,10 @@ is empty in the antagonistic mode (§5). `skip_counts` carries every
 reason from §5, `governing_repository` and `untrusted_author`
 included, in table order. `skipped` has
 one row per skipped pull request; `title` may be `null` when the
-skip happened before a read. Entries sort by repository and number.
+skip happened before a read. `head_sha` is the head the state read
+returned, for every skip decided after that read (a rule of §5,
+`too_large`, `moved` and `cap`), and `null` for one decided before it;
+a review notice names that head (§19.10). Entries sort by repository and number.
 `base_sha` is the base branch's tip at the state read, not the pull
 request's `baseRefOid` (§5). `files` and `commits` come from REST
 `compare/{base_sha}...{head_sha}`, the comparison the entry records;
@@ -1678,6 +1683,33 @@ when `choose` caps the selection by bytes.
 The review and apply jobs fan out over `include`; `repo_name` scopes
 the write token and `head_repository` with `head_sha` drive the
 checkout.
+
+`review_notice.py list` prints a matrix of the same form for the
+review notices a run owes (§19.10), one entry per pull request,
+sorted by repository and number:
+
+```json
+{"include": [{"key": "repo-157",
+              "repository": "lfreleng-actions/repo",
+              "repo_name": "repo", "number": 157,
+              "head_sha": "<40 hex>", "reason": "no_review"}]}
+```
+
+The selection's rule forms `key`. `reason` is `no_review`,
+`selection_failed` or a notifying skip reason, and `head_sha` is the
+head the notice names: the selected entry's, the skipped row's, or
+the one a failed run's named pull request read live. GitHub refuses
+a matrix of more than 256 jobs, `MATRIX_LIMIT`, and a named run's
+skipped rows or a failed run's names have no cap of their own, so the
+script pages them. It sorts the candidates its input names, the
+selection's rows or the parsed names, splits them into pages of 256
+before any live read, and `--page N`, from 0, prints the matrix of
+page `N` alone. `count=` is that matrix's size and `pages=` the
+number of pages; a page past the last is empty. Every listing of a
+page starts from the same candidates, whatever a live read then
+drops, so listing every page from 0 to `pages - 1` reaches every
+pull request owed a notice, and a job that fans out over the pages
+can run one notice matrix per page.
 
 ### 18.3 `ledger.json` (report to the next run's select; trusted)
 
@@ -2519,3 +2551,99 @@ when a maintainer takes over.
   reads this App's threads too, a hand-back starts a round that
   cannot see the findings; keep `CODE_MONKEY_DISPATCH_TOKEN` unset
   until then.
+
+### 19.10 Review notices
+
+A run can take a request for an antagonistic review and never post
+one: selection skips a named pull request, a session fails or the
+apply job refuses its result, the base moves during the session, or
+selection itself fails. Nothing else then tells the pull request,
+and a Code Monkey round that nominated its head waits on a review
+that will never come. When a live run took a request to review a
+pull request and leaves its head without a review, the run posts one
+notice on that pull request, under the antagonistic App.
+`scripts/review_notice.py` decides which pull requests a run owes a
+notice and posts each one; a later change adds the jobs that run it.
+
+- **A comment, never a review.** A review would count as one of the
+  pull request's rounds (`rounds_by`) and mark the head reviewed
+  (`reviewed_by`), so the head could never get the review it still
+  needs. The notice is an issue comment; no rule here reads issue
+  comments, so it counts as no round and reviews nothing. This is
+  the mode's second write, by the maintainers' decision.
+- **`list`.** Runs in a trusted job whose token reads public
+  repositories and writes nothing, and prints `count=`, `pages=`
+  and `matrix=` (§18.2) on stdout and everything else on stderr. The
+  matrix holds one page of at most 256 entries, chosen with `--page`
+  from the candidates the input names, sorted and paged before any
+  live read, so every page together reaches every one. With
+  `--selection`, it reads the digest-verified selection of a run
+  whose select job succeeded: another mode's selection is an error,
+  and a dry run's lists nothing. Each selected entry owes
+  `no_review` unless GitHub holds this App's submitted review of its
+  `head_sha`, read from the full history; when the history read
+  fails, the script keeps the entry with a warning, since the
+  selection vouches for it and `post` reads again. When
+  `explicit_pull_requests` is not empty, each skipped row with a
+  notifying reason owes that reason at the row's `head_sha` (§18.1);
+  a scan's skipped rows owe nothing, since nobody asked for them.
+  With `--pull-requests`, it takes the run's own input, for a run
+  whose select job failed after its pre-flight gate: it parses the
+  text against `--org` as selection does and reads each pull request
+  once. One that is open and by a listed bot owes `selection_failed`
+  at the head that read returned; the script leaves out any other,
+  and any it cannot read, with a warning, since nothing vouches for
+  it.
+- **Reasons.** `scripts/notice_text.py` holds one sentence per
+  reason and classifies every skip reason of §5 as notifying or
+  silent, and a test fails when a rule added later is neither.
+  Notifying: `moved`, `cap`, `already_assessed`, `draft`,
+  `conflicting`, `changes_requested`, `already_approved`,
+  `copilot_pending`, `copilot_feedback`, `copilot_unreviewed`,
+  `copilot_findings`, `round_cap` and `too_large`, with the notice's
+  own `no_review` and `selection_failed`. Silent: `repository`,
+  `bot_author`, `human_author`, `closed` and `already_reviewed`, and
+  the reasons the approve mode alone records. The sentences for
+  `no_review`, `selection_failed`, `moved`, `cap` and
+  `already_assessed` end by saying how to ask again: dispatch
+  `code-review-antagonistic.yaml` in the workflow repository naming
+  the pull request, with `reassess` on. The numbers in `round_cap`
+  and `too_large` come from `MAX_ROUNDS`, `MAX_FILES` and
+  `MAX_DIFF_BYTES`.
+- **`post`.** Runs once per matrix entry with a token that can write
+  pull requests on that one repository. An unknown reason, a head
+  that is not a commit SHA, or a run URL other than
+  `https://github.com/<workflow repository>/actions/runs/<run id>`
+  is a usage error. It re-reads the pull request and posts when all
+  five conditions hold: the pull request is open, a listed bot
+  authored it, its head is still the entry's, this App has no
+  submitted review of that head in the full history, and this App
+  has posted no notice for the same head and reason. A comment
+  counts as such a notice when GitHub types its author `Bot`, its
+  login folds to this App's, and its body ends with the marker
+  naming that head and reason, so a human who copies the marker
+  suppresses nothing. The first condition that fails is the recorded
+  reason for posting nothing. Posting and not posting both exit 0
+  and print one line saying which and why, which `--summary` also
+  receives; a GitHub failure exits 1.
+- **The one write.** `review_notice.post` sends
+  `POST repos/{repository}/issues/{number}/comments` and refuses any
+  other endpoint before the call, as `comment_review.post` refuses
+  any event but `COMMENT`. After a transient failure it recovers as
+  a review does (`review_recovery.post_once`): it looks once for the
+  marker naming this head, reason and run, takes the notice as
+  posted when it finds one, and never sends again.
+- **The body.** Fixed text and values the script validated: the
+  head, the run URL, the workflow repository, the bot login and the
+  reason. It holds no text from the pull request, a session, a
+  verdict, a result file or a check. It ends with
+  `<!-- antagonistic-notice reason=REASON head=SHA run=RUN_ID -->`,
+  which matches neither this bot's review and hand-back markers nor
+  Code Monkey's round footer.
+- **What a notice must not do.** It never starts or feeds a Code
+  Monkey round: Code Monkey counts a comment as a maintainer's when
+  its `author_association` is `OWNER` or `MEMBER`, which an App's is
+  not, and reads its round footers from the issue, not the pull
+  request. `review_notice` and `notice_text` are in the comment path
+  `tests/test_workflow.py` scans, so the tripwire for `APPROVE`,
+  `REQUEST_CHANGES` and an import of `apply_review` covers them.
