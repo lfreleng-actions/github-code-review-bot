@@ -34,7 +34,8 @@ Each input is checked against what the code documents:
   pass changes nothing."
 - ``contain_links``, on the summary as ``apply_review`` posts it:
   "Leave no live link in untrusted text but those into the
-  organisation."
+  organisation." A link into the organisation stays as written, a
+  scheme inside it among the rest (DESIGN.md §8.3).
 
 Run by hand with ``python fuzz/fuzz_verdict.py``; see the README.
 """
@@ -55,6 +56,7 @@ sys.path[:0] = [str(HERE), str(HERE.parent / "scripts")]
 
 from github_markdown import (  # noqa: E402
     Breach,
+    altered_links,
     live_links,
     live_references,
     require,
@@ -119,6 +121,16 @@ SEEDS: list[bytes] = [
     verdict_text(summary=f"https://github.com/{ORG}'?").encode(),
     # Reported in review: GFM autolinks ftp:// as well as http(s)://.
     verdict_text(summary="ftp://evil.example/x").encode(),
+    # Reported in review: a code span or a letter keeps no later scheme.
+    verdict_text(
+        summary=f"`https://github.com/{ORG}/r`_https://evil.example "
+        f"xhttps://github.com/{ORG}/r_https://evil.example"
+    ).encode(),
+    # Reported in review: a scheme inside a kept organisation link is
+    # part of it, and stays as written.
+    verdict_text(
+        summary=f"See https://github.com/{ORG}/repo/search?q=ftp://server"
+    ).encode(),
     # Reported in review: a JSON escape for a lone surrogate in a note
     # reached the job summary, which no UTF-8 stream can write.
     verdict_text(tier="needs-human", findings=[{"area": "ci", "note": "<n>"}])
@@ -248,6 +260,18 @@ def verify_posted(summary: str, org: str = ORG) -> None:
     require(live_references(summary), "posted summary")
 
 
+def verify_links_kept(source: str, contained: str) -> None:
+    """Each link ``contain_links`` keeps reads as ``source`` wrote it."""
+    require(altered_links(source, contained, ORG), "contained text")
+
+
+def verify_contained(source: str) -> None:
+    """``contain_links`` leaves ``source`` no outside link, and its own as written."""
+    contained = policy.contain_links(source, ORG)
+    verify_posted(contained)
+    verify_links_kept(source, contained)
+
+
 def verify_defused(once: str, twice: str) -> None:
     """A second ``defuse`` pass changes nothing."""
     if once != twice:
@@ -295,15 +319,11 @@ def check(data: bytes) -> None:
             raise Breach("a refusal carries no reason")
     else:
         verify_verdict(text, verdict)
-        verify_posted(
-            policy.contain_links(
-                policy.sanitise(verdict["summary"], SUMMARY_CHARS), ORG
-            )
-        )
+        verify_contained(policy.sanitise(verdict["summary"], SUMMARY_CHARS))
     emitted(verdict, failure)
     sanitised = policy.sanitise(text, SUMMARY_CHARS)
     one_line(sanitised, SUMMARY_CHARS, "sanitised message")
-    verify_posted(policy.contain_links(sanitised, ORG))
+    verify_contained(sanitised)
     once = policy.defuse(text)
     verify_defused(once, policy.defuse(once))
 

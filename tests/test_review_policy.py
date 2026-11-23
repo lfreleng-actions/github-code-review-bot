@@ -518,7 +518,6 @@ class DisarmTests(unittest.TestCase):
             with self.subTest(raw=raw):
                 self.assertEqual(policy.contain_links(raw, "org"), expected)
 
-    @unittest.expectedFailure
     def test_a_scheme_inside_a_kept_link_stays(self) -> None:
         """GitHub links an organisation URL to the end of its run, so a
         scheme later in that run starts no link of its own: breaking it

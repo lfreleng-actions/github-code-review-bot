@@ -24,7 +24,8 @@ are held to what the code documents:
   enough not to be cut: its code at its own size, and the rest grown
   by the most each character and line outside it can gain.
 - ``comment_body.contained``: "Untrusted Markdown with no live link
-  outside the organisation, code aside."
+  outside the organisation, code aside." A link into the organisation
+  stays as written (``review_policy.contain_links``).
 
 Run by hand with ``python fuzz/fuzz_comment.py``; see the README.
 """
@@ -44,6 +45,7 @@ sys.path[:0] = [str(HERE), str(HERE.parent / "scripts")]
 
 from github_markdown import (  # noqa: E402
     Breach,
+    altered_links,
     blocks,
     live_links,
     live_references,
@@ -96,6 +98,12 @@ SEEDS: list[bytes] = [
     b"\xffsee ftp://evil.example/x\n",
     # Reported in review: the cut left https://github.com/lfr\u2026 live.
     b"\x00" + b"http://x " * 3 + b"https://github.com/lfreleng-actions/",
+    # Reported in review: a code span or a letter keeps no later scheme.
+    b"\xff`https://github.com/lfreleng-actions/r`_https://evil.example\n"
+    b"xhttps://github.com/lfreleng-actions/r_https://evil.example\n",
+    # Reported in review: a scheme inside a kept organisation link is
+    # part of it, and stays as written.
+    b"\xffsee https://github.com/lfreleng-actions/repo/search?q=ftp://server\n",
 ]
 
 
@@ -195,6 +203,11 @@ def verify_contained(result: str) -> None:
     require(live_links(prose, ORG), "posted body")
 
 
+def verify_links_kept(source: str, contained: str) -> None:
+    """Each link containment keeps reads as ``source`` wrote it."""
+    require(altered_links(source, contained, ORG), "contained body")
+
+
 def check(data: bytes) -> None:
     """Run one input through every contract this harness checks."""
     limit = limit_of(data)
@@ -206,6 +219,7 @@ def check(data: bytes) -> None:
     verify_safe(posted, limit, "posted body")
     verify_code_kept(source, posted, limit)
     verify_contained(posted)
+    verify_links_kept(checked, body.contained(checked, ORG))
 
 
 def main() -> None:

@@ -134,6 +134,7 @@ DOT_SEGMENT_RE = re.compile(
 # names another path. GFM's trailing punctuation leaves quotes out, so
 # a quote carries the segment on too.
 ORG_TAIL = r"[)?!.,:*_~]*+\Z"
+LINKED_RE = re.compile(r"(?<![A-Za-z])[^`]*+")
 
 
 class Rejected(Exception):
@@ -186,21 +187,22 @@ def contain_links(text: str, org: str) -> str:
 def contain_run(run: str, inside: re.Pattern[str] | None) -> str:
     """Disarm each URL in one run GitHub would link to its end, but those inside.
 
-    A URL's link runs to the end of the run, so a dot segment anywhere
-    after its scheme is in its path. Finding the last one first keeps
-    the pass linear, however many URLs the run holds.
+    A dot segment after a URL's scheme is in its path, as is a later scheme
+    up to a backtick (which may end a code span) if no ASCII letter precedes the URL.
     """
-    last_dot = max(
-        (found.start() for found in DOT_SEGMENT_RE.finditer(run)), default=-1
-    )
+    last_dot = max((dot.start() for dot in DOT_SEGMENT_RE.finditer(run)), default=-1)
+    linked_to = 0
 
     def disarm(found: re.Match[str]) -> str:
-        stays = (
+        nonlocal linked_to
+        stays = found.start() < linked_to or (
             inside is not None
             and found.group(1).lower() == "https"
             and inside.match(run, found.end()) is not None
             and last_dot < found.end()
         )
+        linked = LINKED_RE.match(run, max(found.start(), linked_to)) if stays else None
+        linked_to = linked.end() if linked else linked_to
         return found.group() if stays else found.group(1) + ":" + ZWSP
 
     return SCHEME_RE.sub(disarm, run)

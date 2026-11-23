@@ -12,6 +12,7 @@ GitHub behaviour ``docs/DESIGN.md`` records (§8.3 and §19).
 
 from __future__ import annotations
 
+import bisect
 import html.entities
 import re
 from collections.abc import Iterator
@@ -46,6 +47,13 @@ RAW_HTML = re.compile(r"<[A-Za-z/!?]")
 # GFM §6.9: GitHub autolinks ``www.``, ``http(s)://`` and ``ftp://`` text.
 WWW = re.compile(r"www\.", re.IGNORECASE | re.ASCII)
 SCHEME = re.compile(r"(?:https?|ftp)://", re.IGNORECASE | re.ASCII)
+# A scheme with any zero-width spaces between its characters, each of
+# which breaks it, kept whole; or any other zero-width space.
+SCHEME_MARK = re.compile(
+    f"((?:h{ZWSP}*t{ZWSP}*t{ZWSP}*p(?:{ZWSP}*s)?|f{ZWSP}*t{ZWSP}*p)"
+    f"{ZWSP}*:{ZWSP}*/{ZWSP}*/)|{ZWSP}",
+    re.IGNORECASE | re.ASCII,
+)
 # DESIGN.md §8.3: a link runs to the next ASCII whitespace or ``<``,
 # and GitHub trims trailing punctuation and an unmatched ``)``. GFM
 # §6.9 lists ``?!.,:*_~`` as the punctuation; cmark-gfm also trims
@@ -53,12 +61,31 @@ SCHEME = re.compile(r"(?:https?|ftp)://", re.IGNORECASE | re.ASCII)
 URL_END = re.compile(r"[\s<]", re.ASCII)
 TRAILING = "?!.,:*_~"
 QUOTES = "'\""
+# WHATWG URL, path state: a ``.`` or ``..`` segment, spelt with dots
+# or ``%2e``, resolves away. Read loosely, so ``/..x`` counts too.
+DOT_SEGMENT = re.compile(
+    r"[/\\](?:\.|%2e){1,2}(?![A-Za-z0-9])", re.IGNORECASE | re.ASCII
+)
+# What may follow ``https://github.com/<org>`` to the end of a run for
+# containment to keep the URL: GFM §6.9's trailing punctuation and a
+# ``)``, which GitHub trims.
+ROOT_TAIL = re.compile(r"[)?!.,:*_~]*")
 # CommonMark §5.1 to §5.3: block quote and list item markers.
 CONTAINER = re.compile(r"(?:[ \t]*(?:>|[*+-][ \t]|[0-9]{1,9}[.)][ \t]))*[ \t]*")
 
 
 class Breach(AssertionError):
     """An output breaks the contract its harness checks."""
+
+
+@dataclass(frozen=True)
+class Autolink:
+    """A URL from its scheme: where it starts, if inside, how far it links."""
+
+    start: int
+    url: str
+    inside: bool
+    reach: int
 
 
 @dataclass(frozen=True)
@@ -155,6 +182,34 @@ def linked_inside(linked: str, org: str) -> bool:
     return resolves_inside(path, org)
 
 
+def autolinks(markdown: str, org: str) -> Iterator[Autolink]:
+    """Each URL GitHub may autolink from its scheme, and whether it stays inside.
+
+    A URL runs to the next ASCII whitespace or ``<``. One inside the
+    organisation is on ``github.com``, a host GitHub always links, so a
+    scheme later in its run is part of that link and starts none of its
+    own (GFM §6.9), if the URL is surely a link. cmark-gfm reads a
+    scheme back over ASCII letters, so it links none after one
+    (``xhttps://``), and a backtick may close a code span the URL sits
+    in (CommonMark §6.1), so the link reaches no further than the first
+    backtick. The scan resumes where it ends. Any other URL is read from
+    each scheme it holds, as GitHub may link none of it.
+    """
+    at = 0
+    while (found := SCHEME.search(markdown, at)) is not None:
+        end = URL_END.search(markdown, found.start())
+        stop = len(markdown) if end is None else end.start()
+        url = markdown[found.start() : stop]
+        inside = url_inside(url, org)
+        before = markdown[found.start() - 1 : found.start()]
+        reach = 0
+        if inside and not (before.isascii() and before.isalpha()):
+            tick = url.find("`")
+            reach = len(url) if tick < 0 else tick
+        yield Autolink(found.start(), url, inside, reach)
+        at = found.start() + reach if reach else found.end()
+
+
 def live_links(markdown: str, org: str) -> list[str]:
     """Each live link outside ``https://github.com/<org>/`` GitHub would render.
 
@@ -166,12 +221,86 @@ def live_links(markdown: str, org: str) -> list[str]:
         if syntax in markdown:
             live.append(f"link syntax {syntax!r} at {markdown.index(syntax)}")
     live.extend(f"www. link at {found.start()}" for found in WWW.finditer(markdown))
-    for found in SCHEME.finditer(markdown):
-        end = URL_END.search(markdown, found.start())
-        url = markdown[found.start() : len(markdown) if end is None else end.start()]
-        if not url_inside(url, org):
-            live.append(f"link {url!r}")
+    live.extend(
+        f"link {link.url!r}" for link in autolinks(markdown, org) if not link.inside
+    )
     return live
+
+
+def scheme_marks(text: str) -> str:
+    """``text`` with each zero-width space gone but those inside a scheme."""
+    return SCHEME_MARK.sub(lambda found: found[1] or "", text)
+
+
+def kept_links(run: str, org: str) -> Iterator[tuple[int, int, str]]:
+    """Each link in ``run`` to keep as written: the backticks before it,
+    where it starts, and the text it surely links.
+
+    A link ends a stretch between backticks (``autolinks``), so the
+    count of backticks before it names the stretch it ends.
+    """
+    ticks = [at for at, char in enumerate(run) if char == "`"]
+    for link in autolinks(run, org):
+        if link.reach:
+            yield bisect.bisect(ticks, link.start), link.start, link.url[: link.reach]
+
+
+def always_kept(run: str, start: int, kept: str, org: str, last_dot: int) -> bool:
+    """Whether containment keeps the link ``kept``, at ``start`` in ``run``.
+
+    It keeps one naming ``https://github.com/<org>`` and then a ``/``,
+    or nothing to the end of the run but what GitHub trims, when no dot
+    segment in the run comes after its scheme starts (``last_dot`` is
+    where the last one does).
+    """
+    base = f"https://github.com/{org}"
+    if last_dot >= start or not ascii_equal(kept[: len(base)], base):
+        return False
+    tail = kept[len(base) :]
+    return tail.startswith("/") or (
+        start + len(kept) == len(run) and ROOT_TAIL.fullmatch(tail) is not None
+    )
+
+
+def altered_links(source: str, result: str, org: str) -> list[str]:
+    """Each organisation link a broken scheme changed from ``source`` to ``result``.
+
+    ``result`` is ``source`` with zero-width spaces added, none of them
+    ASCII whitespace, ``<`` or a backtick, so the two split into the
+    same runs, and each run into the same stretches between backticks.
+    A link inside the organisation is one to keep live and as written
+    as far as it surely reaches: a scheme within that starts no link
+    (``autolinks``), so breaking it, after its colon or between any two
+    of its characters, only changes where the link goes. Each such link
+    in ``result`` must read as ``source`` wrote it. So must each in
+    ``source`` that containment always keeps (``always_kept``), even
+    when a broken scheme leaves it no link in ``result``.
+    Other marks, after ``]`` or ``www``, are left out of the comparison.
+    """
+    sources = URL_END.split(source)
+    results = URL_END.split(result)
+    if len(sources) != len(results):
+        return ["the text around the links moved"]
+    altered: list[str] = []
+    for written, run in zip(sources, results, strict=True):
+        stretches = written.split("`")
+        contained = run.split("`")
+        if len(stretches) != len(contained):
+            altered.append("the backticks around the links moved")
+            continue
+        checks = [(stretches[index], kept) for index, _, kept in kept_links(run, org)]
+        last_dot = max(
+            (dot.start() for dot in DOT_SEGMENT.finditer(written)), default=-1
+        )
+        checks.extend(
+            (contained[index], kept)
+            for index, start, kept in kept_links(written, org)
+            if always_kept(written, start, kept, org, last_dot)
+        )
+        for other, kept in checks:
+            if not scheme_marks(other).endswith(scheme_marks(kept)):
+                altered.append(f"a scheme broken in the kept link {kept!r}")
+    return altered
 
 
 def indent_of(line: str) -> int:

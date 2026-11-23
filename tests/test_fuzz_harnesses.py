@@ -378,7 +378,6 @@ class VerdictOracleTest(unittest.TestCase):
         verdict_harness.verify_posted(f"https://github.com/{ORG}/repo/blob/x.py).")
         verdict_harness.verify_posted(f"(https://github.com/{ORG}).")
 
-    @unittest.expectedFailure
     def test_verify_contained_keeps_schemes_in_kept_links(self) -> None:
         """Reported in review: a scheme broken inside an organisation link
         changes where it goes. ``live_links`` reads such a scheme as part
