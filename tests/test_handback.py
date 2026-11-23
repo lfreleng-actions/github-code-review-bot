@@ -170,8 +170,13 @@ class HandbacksTest(unittest.TestCase):
     ) -> tuple[list[str], GitHubDouble]:
         """Run with the GitHub double; return the list and the reads it made."""
         double = GitHubDouble(reviews, failures)
-        with patch.object(handback.github, "api_list", side_effect=double):
+        err = io.StringIO()
+        with (
+            patch.object(handback.github, "api_list", side_effect=double),
+            contextlib.redirect_stderr(err),
+        ):
             confirmed = handback.handbacks(report, chosen, "org", RUN)
+        self.stderr = err.getvalue()
         return [found.ref for found in confirmed], double
 
     def test_a_marked_review_of_the_selected_head_confirms(self) -> None:
@@ -261,6 +266,75 @@ class HandbacksTest(unittest.TestCase):
         self.assertEqual(refs, [])
         self.assertEqual(double.reads, [])
 
+    @unittest.expectedFailure
+    def test_a_dotgithub_hand_back_is_confirmed(self) -> None:
+        """GitHub allows a repository name to start with a dot, as ``.github``
+        does, so its hand-back counts like any other.
+        """
+        refs, _ = self.run_handbacks(
+            {"results": [result(1, repository="org/.github")]},
+            selection(entry(1, repository="org/.github")),
+            {1: [review()]},
+        )
+        self.assertEqual(refs, ["org/.github#1"])
+
+    def test_dot_and_dot_dot_are_refused(self) -> None:
+        """``.`` and ``..`` are path segments, never repository names."""
+        for name in (".", ".."):
+            with self.subTest(name=name):
+                refs, double = self.run_handbacks(
+                    {"results": [result(1, repository=f"org/{name}")]},
+                    selection(entry(1, repository=f"org/{name}")),
+                    {1: [review()]},
+                )
+                self.assertEqual(refs, [])
+                self.assertEqual(double.reads, [])
+
+    @unittest.expectedFailure
+    def test_a_dropped_hand_back_warns(self) -> None:
+        """Each result that claims a posted hand-back and is dropped names
+        itself in a warning; a result that claims none stays quiet.
+        """
+        cases: list[tuple[str, dict[str, Any], dict[str, Any], str]] = [
+            (
+                "other owner",
+                result(1, repository="elsewhere/repo"),
+                selection(),
+                "elsewhere/repo#1",
+            ),
+            ("invalid name", result(1, repository="org/.."), selection(), "org/..#1"),
+            ("malformed number", result(0), selection(), "org/repo#0"),
+            ("not selected", result(1), selection(), "org/repo#1"),
+            ("no App", result(1), selection(entry(1), bot_login=None), "org/repo#1"),
+            ("no marker", result(1), selection(entry(1)), "org/repo#1"),
+        ]
+        for name, claimed, chosen, ref in cases:
+            with self.subTest(case=name):
+                self.run_handbacks({"results": [claimed]}, chosen, {1: []})
+                self.assertTrue(
+                    self.stderr.startswith(f"::warning::handback: {ref} "),
+                    self.stderr,
+                )
+        self.run_handbacks(
+            {"results": [result(1, repository="org/repo\n::error::x")]},
+            selection(),
+            {},
+        )
+        self.assertEqual(self.stderr.count("\n"), 1)
+        self.assertNotIn("::error::", self.stderr)
+        self.run_handbacks(
+            {
+                "results": [
+                    "text",
+                    result(1, verdict="would-comment"),
+                    result(2, handback=False),
+                ]
+            },
+            selection(),
+            {},
+        )
+        self.assertEqual(self.stderr, "")
+
     def test_the_whole_list_survives(self) -> None:
         """No cap: every confirmed hand-back is dispatched, in report order."""
         numbers = range(1, 81)
@@ -277,10 +351,7 @@ class HandbacksTest(unittest.TestCase):
         """
         numbers = (1, 2, 3)
         for status in (404, 502):
-            with (
-                self.subTest(status=status),
-                contextlib.redirect_stderr(io.StringIO()) as err,
-            ):
+            with self.subTest(status=status):
                 refs, double = self.run_handbacks(
                     {"results": [result(n) for n in numbers]},
                     selection(*(entry(n) for n in numbers)),
@@ -289,7 +360,7 @@ class HandbacksTest(unittest.TestCase):
                 )
             self.assertEqual(refs, ["org/repo#2", "org/repo#3"])
             self.assertEqual(len(double.reads), 3)
-            warning = err.getvalue()
+            warning = self.stderr
             self.assertTrue(warning.startswith("::warning::handback: org/repo#1"))
             self.assertNotIn("::read", warning)
 
@@ -476,6 +547,15 @@ class MainTest(unittest.TestCase):
                     ),
                     "pulls=\ncount=0\nrecords=[]\n",
                 )
+
+    @unittest.expectedFailure
+    def test_a_dotgithub_hand_back_is_dispatched(self) -> None:
+        """A ``.github`` hand-back reaches the dispatch list and its count."""
+        out = self.run_list(
+            {"results": [result(1, repository="org/.github")]},
+            selection(entry(1, repository="org/.github")),
+        )
+        self.assertEqual(out.splitlines()[:2], ["pulls=org/.github#1", "count=1"])
 
     def test_records_carry_every_confirmed_hand_back(self) -> None:
         """Skipped hand-backs are recorded and left out of the dispatch list."""
