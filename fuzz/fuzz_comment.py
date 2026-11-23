@@ -21,10 +21,12 @@ are held to what the code documents:
   (DESIGN.md §19); these blocks, and no others, come back as written,
   in order and once per occurrence, control characters folded, in both
   the check's result and the posted body, whenever the body is short
-  enough not to be cut: its code at its own size, and the rest grown
-  by the most each character and line outside it can gain.
+  enough not to be cut: its outer whitespace stripped, its code at its
+  own size, and the rest grown by the most each character and line
+  outside it can gain.
 - ``comment_body.contained``: "Untrusted Markdown with no live link
-  outside the organisation, code aside."
+  outside the organisation, code aside." A link into the organisation
+  stays as written (``review_policy.contain_links``).
 
 Run by hand with ``python fuzz/fuzz_comment.py``; see the README.
 """
@@ -44,6 +46,7 @@ sys.path[:0] = [str(HERE), str(HERE.parent / "scripts")]
 
 from github_markdown import (  # noqa: E402
     Breach,
+    altered_links,
     blocks,
     live_links,
     live_references,
@@ -60,7 +63,8 @@ MAX_FENCE_RUN = 10
 # Every control character but tab and newline folds to a space.
 CONTROL = re.compile(r"[\x00-\x08\x0b-\x1f\x7f-\x9f\u2028\u2029]")
 # Outside fenced code, the ``&`` that starts a character reference can
-# grow to ``&amp;``, four characters more; any other stays as written.
+# grow to ``&amp;``, four characters more; any other stays as written,
+# ``&amp;`` itself among them.
 # A zero-width space can follow a character a mention, a reference, raw
 # HTML, a link or a definition starts or turns on, or the scheme of a
 # URL ends on: ``@ # < h H / ] :``, or come before the ``.`` of
@@ -68,8 +72,11 @@ CONTROL = re.compile(r"[\x00-\x08\x0b-\x1f\x7f-\x9f\u2028\u2029]")
 # Code stays as written. A body whose code and grown rest fit the limit
 # is never cut.
 AMP_GROWTH = 4
-ENTITY = re.compile(r"&(?=#?[A-Za-z0-9]+;)")
+ENTITY = re.compile(r"&(?!amp;)(?=#?[A-Za-z0-9]+;)")
 GROWS = "@#<hH/]:."
+OPENER = re.compile(r"(`{3,}+|~{3,}+)(.*)")
+# A space other than a blank or a tab after the run leaves no closer.
+CLOSER = re.compile(r" {0,3}+(`++|~++)[ \t]*+")
 
 
 def limit_of(data: bytes) -> int:
@@ -96,6 +103,15 @@ SEEDS: list[bytes] = [
     b"\xffsee ftp://evil.example/x\n",
     # Reported in review: the cut left https://github.com/lfr\u2026 live.
     b"\x00" + b"http://x " * 3 + b"https://github.com/lfreleng-actions/",
+    # Reported in review: a code span or a letter keeps no later scheme.
+    b"\xff`https://github.com/lfreleng-actions/r`_https://evil.example\n"
+    b"xhttps://github.com/lfreleng-actions/r_https://evil.example\n",
+    # Reported in review: a scheme inside a kept organisation link is
+    # part of it, and stays as written.
+    b"\xffsee https://github.com/lfreleng-actions/repo/search?q=ftp://server\n",
+    # Reported in review: ``&amp;`` and outer whitespace never grow a body.
+    b"\xff" + b"&amp; " * 250 + b"\n```\nimportant\n```",
+    b"\xff" + b" " * 2000 + b"\n```\nimportant\n```",
 ]
 
 
@@ -110,34 +126,48 @@ def written_code(text: str) -> list[list[str]]:
     Each opens at column 0 with a run of three to ``MAX_FENCE_RUN``
     backticks or tildes, a backtick run with no backtick after it, and
     closes on a line of at least as many of the same character,
-    indented at most three spaces, with nothing after the run. An
-    opener nothing closes is prose.
+    indented at most three spaces, with nothing after the run but
+    blanks and tabs. An opener nothing closes is prose.
     """
     lines = text.split("\n")
+    closing = closers(lines)
     found: list[list[str]] = []
     index = 0
     while index < len(lines):
-        opener = re.match(r"(`{3,}|~{3,})(.*)", lines[index])
-        if (
-            opener is None
-            or len(opener[1]) > MAX_FENCE_RUN
-            or (opener[1][0] == "`" and "`" in opener[2])
-        ):
-            index += 1
-            continue
-        closer = re.compile(
-            rf" {{0,3}}{re.escape(opener[1][0])}{{{len(opener[1])},}}[ \t]*"
-        )
-        end = next(
-            (at for at in range(index + 1, len(lines)) if closer.fullmatch(lines[at])),
-            None,
-        )
+        end = closing.get(index)
         if end is None:
             index += 1
             continue
         found.append(lines[index + 1 : end])
         index = end + 1
     return found
+
+
+def closers(lines: list[str]) -> dict[int, int]:
+    """The line that closes each opener in ``lines``, if one does.
+
+    Each line is read once, from the last back, keeping the nearest
+    closer for each fence character and width an opener can have, so
+    no opener reads the lines after it again.
+    """
+    nearest: dict[tuple[str, int], int] = {}
+    closing: dict[int, int] = {}
+    for index in range(len(lines) - 1, -1, -1):
+        opener = OPENER.match(lines[index])
+        if (
+            opener is not None
+            and len(opener[1]) <= MAX_FENCE_RUN
+            and not (opener[1][0] == "`" and "`" in opener[2])
+        ):
+            end = nearest.get((opener[1][0], len(opener[1])))
+            if end is not None:
+                closing[index] = end
+        closer = CLOSER.fullmatch(lines[index])
+        if closer is not None:
+            run = closer[1]
+            for width in range(3, min(len(run), MAX_FENCE_RUN) + 1):
+                nearest[run[0], width] = index
+    return closing
 
 
 def verify_safe(result: str, limit: int, what: str) -> None:
@@ -169,17 +199,22 @@ def verify_code_kept(source: str, result: str, limit: int) -> None:
     """The blocks sure to render as code, and no others, come back as written.
 
     The rendered blocks are the written ones, uncut, in order and once
-    per occurrence: none dropped, duplicated or added. A body longer
-    than the limit may be cut whatever its code, so the scan for code,
-    which reads on from each opener, is skipped for one.
+    per occurrence: none dropped, duplicated or added. ``comment_text``
+    strips the outer whitespace before it fits the body to the limit,
+    so only what is left counts against it. A body longer than the
+    limit once stripped may be cut whatever its code, so the check of
+    its code is skipped for one. The
+    blocks are read from the body before the strip, as the scanner
+    reads them, so an indented fence never reaches column 0.
     """
     text = folded(source)
-    if len(text) > limit:
+    kept = text.strip()
+    if len(kept) > limit:
         return
     written = written_code(text)
     code = [line for block in written for line in block]
-    grown = growth(text) - sum(growth(line) for line in code) + text.count("\n") + 1
-    if len(text) + grown > limit:
+    grown = growth(kept) - sum(growth(line) for line in code) + kept.count("\n") + 1
+    if len(kept) + grown > limit:
         return
     rendered = [block.body for block in blocks(result.split("\n"))]
     if rendered != written:
@@ -195,6 +230,11 @@ def verify_contained(result: str) -> None:
     require(live_links(prose, ORG), "posted body")
 
 
+def verify_links_kept(source: str, contained: str) -> None:
+    """Each link containment keeps reads as ``source`` wrote it."""
+    require(altered_links(source, contained, ORG), "contained body")
+
+
 def check(data: bytes) -> None:
     """Run one input through every contract this harness checks."""
     limit = limit_of(data)
@@ -206,6 +246,7 @@ def check(data: bytes) -> None:
     verify_safe(posted, limit, "posted body")
     verify_code_kept(source, posted, limit)
     verify_contained(posted)
+    verify_links_kept(checked, body.contained(checked, ORG))
 
 
 def main() -> None:

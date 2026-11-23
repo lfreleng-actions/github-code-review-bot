@@ -935,7 +935,16 @@ GitHub links a URL after an underscore, a digit or punctuation, so
 the scheme and `www.` match wherever they appear, not at word
 boundaries alone. GFM autolinks `ftp://` as well as `http://` and
 `https://`, so an `ftp://` URL becomes text like any URL outside
-the organisation.
+the organisation. A scheme inside a URL that stays a link is part of
+that link, which GitHub runs to the same extent, so it stays as
+written: `https://github.com/<org>/repo/search?q=ftp://server` keeps
+its search intact. This holds as far as the URL is surely a link.
+GitHub links no scheme after an ASCII letter, and a backtick may
+close a code span the URL sits in, after which a later URL links on
+its own. So a scheme after a letter keeps no later scheme, and none
+after a backtick stays for an earlier URL's sake:
+`` `https://github.com/<org>/r`_https://evil.example `` breaks the
+second scheme.
 The reviewer name is the App login from the selection, or
 "the code review bot" in a secretless run; the model name comes
 from the selection, not from the session.

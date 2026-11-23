@@ -137,7 +137,9 @@ class VerdictOracleTest(unittest.TestCase):
 
     def test_verify_text_accepts_a_cut_through_an_escape(self) -> None:
         """A cut that splits an added ``&amp;`` still reads as the source."""
-        verdict_harness.verify_text("a &am...", "a &#64; b", 6, "summary")
+        for kept, limit in (("a &am...", 5), ("a &amp...", 6)):
+            self.assertEqual(verdict_harness.policy.sanitise("a &#64; b", limit), kept)
+            verdict_harness.verify_text(kept, "a &#64; b", limit, "summary")
         for wrong in ("a &am", "a &am..."):
             with self.subTest(wrong=wrong), self.assertRaises(Breach):
                 verdict_harness.verify_text(wrong, "a &#64; b", 600, "summary")
@@ -202,6 +204,83 @@ class VerdictOracleTest(unittest.TestCase):
         ):
             with self.subTest(kept=kept[:8]), self.assertRaises(Breach):
                 verdict_harness.verify_text(kept, source, 600, "summary")
+
+    def test_verify_text_breaks_colons_in_pairs(self) -> None:
+        """Reported in review: ``sanitise`` breaks non-overlapping ``::``
+        pairs, so a space after every colon hides a warning the real
+        result keeps.
+        """
+        warning = " critical security issue"
+        for count in (300, 301, 302):
+            source = ":" * count + warning
+            with self.subTest(count=count):
+                kept = verdict_harness.policy.sanitise(source, 600)
+                verdict_harness.verify_text(kept, source, 600, "summary")
+                wrong = (": " * count + warning)[:600].rstrip() + "..."
+                with self.assertRaises(Breach):
+                    verdict_harness.verify_text(wrong, source, 600, "summary")
+        with self.assertRaises(Breach):
+            verdict_harness.verify_text(
+                ": " * 299 + "::...", ":" * 301 + warning, 600, "summary"
+            )
+
+    def test_an_uncut_text_fits_the_limit(self) -> None:
+        """Reported in review: a whole match over the limit is no result
+        ``sanitise`` returns, which cuts at 600 and appends ``...``.
+        """
+        for count in (599, 600, 601):
+            source = "a" * count
+            kept = verdict_harness.policy.sanitise(source, 600)
+            with self.subTest(count=count):
+                verdict_harness.verify_text(kept, source, 600, "summary")
+                verdict_harness.one_line(kept, 600, "summary")
+        for wrong in ("a" * 601, "a" * 602):
+            with self.subTest(wrong=len(wrong)):
+                with self.assertRaises(Breach):
+                    verdict_harness.verify_text(wrong, wrong, 600, "summary")
+                with self.assertRaises(Breach):
+                    verdict_harness.one_line(wrong, 600, "summary")
+
+    def test_verify_text_cuts_only_a_text_too_long(self) -> None:
+        """Reported in review: a prefix one short is a cut only where
+        ``rstrip`` took a space, the source's or a mark's, from a text
+        that runs past the limit. Reported in review: a text that ends on
+        its mark at the limit exactly is whole, so needs no cut. Reported
+        in review: a zero-width space due before the source's space is
+        what the cut keeps, since ``rstrip`` leaves it.
+        """
+        for source in (
+            "a" * 596 + " notx",
+            "a" * 599 + " b",
+            "a" * 598 + "::x",
+            "a" * 598 + "##[x",
+            "a" * 599 + "@",
+            "a" * 598 + "@ b",
+            "a" * 599 + "@ b",
+            "a" * 598 + "< b",
+        ):
+            kept = verdict_harness.policy.sanitise(source, 600)
+            with self.subTest(source=source[-4:]):
+                self.assertTrue(kept.endswith("..."))
+                verdict_harness.verify_text(kept, source, 600, "summary")
+        for kept, source in (
+            ("a" * 596 + " no...", "a" * 596 + " not"),
+            ("a" * 596 + " not...", "a" * 596 + " not"),
+            ("a" * 596 + " no...", "a" * 596 + " notx"),
+            ("a" * 598 + ":...", "a" * 598 + ":bcd"),
+            ("a" * 596 + ": :...", "a" * 596 + ":::x"),
+            ("a" * 598 + f"@{ZWSP}...", "a" * 598 + "@"),
+            ("a" * 597 + f"@{ZWSP}...", "a" * 597 + "@"),
+            ("a" * 598 + "@...", "a" * 598 + "@ b"),
+            ("a" * 598 + "<...", "a" * 598 + "< b"),
+            ("a" * 597 + "@...", "a" * 597 + "@ b"),
+        ):
+            with self.subTest(kept=kept[-6:], source=source[-5:]):
+                with self.assertRaises(Breach):
+                    verdict_harness.verify_text(kept, source, 600, "summary")
+        whole = "a" * 598 + "@"
+        self.assertEqual(verdict_harness.policy.sanitise(whole, 600), whole + ZWSP)
+        verdict_harness.verify_text(whole + ZWSP, whole, 600, "summary")
 
     def test_verify_verdict_rejects_a_coerced_number(self) -> None:
         """A pull request number that was a boolean or a float is caught."""
@@ -296,6 +375,113 @@ class VerdictOracleTest(unittest.TestCase):
         verdict_harness.verify_posted(f"https://github.com/{ORG}/repo/blob/x.py).")
         verdict_harness.verify_posted(f"(https://github.com/{ORG}).")
 
+    def test_verify_contained_keeps_schemes_in_kept_links(self) -> None:
+        """Reported in review: a scheme broken inside an organisation link
+        changes where it goes. ``live_links`` reads such a scheme as part
+        of the link, and a scheme of its own as a link.
+        """
+        source = f"See https://github.com/{ORG}/repo/search?q=ftp://server x"
+        verdict_harness.verify_contained(source)
+        verdict_harness.verify_posted(source)
+        verdict_harness.verify_links_kept(source, source)
+        other = f"See https://github.com/{ORG}/r?q=x://y&z=https://s x"
+        for written, wrong in (
+            (source, source.replace("ftp:", "ftp:" + ZWSP)),
+            (other, other.replace("s://s", f"s:{ZWSP}//s")),
+        ):
+            with self.subTest(wrong=wrong), self.assertRaises(Breach):
+                verdict_harness.verify_links_kept(written, wrong)
+        for wrong in (
+            f"https://github.com/{ORG}/r ftp://e.com",
+            f"https://github.com/someone/?q=https://github.com/{ORG}/r",
+            f"ftp://e.com/?q=https://github.com/{ORG}/r",
+        ):
+            with self.subTest(wrong=wrong), self.assertRaises(Breach):
+                verdict_harness.verify_posted(wrong)
+        for written in (
+            f"`https://github.com/{ORG}/r`_https://evil.example",
+            f"xhttps://github.com/{ORG}/r_https://evil.example",
+        ):
+            with self.subTest(written=written):
+                verdict_harness.verify_contained(written)
+                with self.assertRaises(Breach):
+                    verdict_harness.verify_posted(written)
+        verdict_harness.verify_posted(f"_https://github.com/{ORG}/r_https://e.com")
+        ticked = f"https://github.com/{ORG}/r?u=ftp://x`y?v=ftp://z"
+        verdict_harness.verify_links_kept(
+            ticked, ticked.replace("v=ftp:", f"v=ftp:{ZWSP}")
+        )
+        source = f"https://github.com/{ORG}/r?u=ftp://server"
+        for wrong in (
+            ticked.replace("u=ftp:", f"u=ftp:{ZWSP}"),
+            source.replace("ftp:", f"ftp:{ZWSP}"),
+            source.replace("ftp:", f"ftp:{ZWSP}{ZWSP}"),
+        ):
+            with self.subTest(wrong=wrong), self.assertRaises(Breach):
+                verdict_harness.verify_links_kept(wrong.replace(ZWSP, ""), wrong)
+        broken = f"ftp:{ZWSP}//e.com https://github.com/{ORG}/r?x=ftp://y"
+        verdict_harness.verify_links_kept(broken.replace(ZWSP, ""), broken)
+        # Reported in review: a kept link whose own scheme breaks is no
+        # link in the result, so the source decides what to keep.
+        outer = source.replace("https:", f"https:{ZWSP}")
+        for wrong in (outer, outer.replace("ftp:", f"ftp:{ZWSP}")):
+            for harness in (verdict_harness, comment_harness):
+                with self.subTest(wrong=wrong), self.assertRaises(Breach):
+                    harness.verify_links_kept(source, wrong)
+        for written in (
+            f"https://github.com/{ORG}/../r?u=ftp://server",
+            f"https://github.com/{ORG}/r?u=ftp://server/..",
+            f"https://github.com/{ORG}?u=ftp://server",
+            f"xhttps://github.com/{ORG}/r?u=ftp://server",
+        ):
+            with self.subTest(written=written):
+                verdict_harness.verify_contained(written)
+        verdict_harness.verify_links_kept(
+            f"https://github.com/{ORG}?u=ftp://s",
+            f"https:{ZWSP}//github.com/{ORG}?u=ftp:{ZWSP}//s",
+        )
+        verdict_harness.verify_links_kept(
+            f"https://github.com/{ORG}/www.x](y", f"https://github.com/{ORG}/www.x](y"
+        )
+        verdict_harness.verify_links_kept(
+            f"https://github.com/{ORG}/www.x](y",
+            f"https://github.com/{ORG}/www{ZWSP}.x]{ZWSP}(y",
+        )
+        # Reported in review: a mark between two characters of a scheme
+        # breaks it as surely as one after its colon.
+        for wrong in (
+            source.replace("ftp:", f"f{ZWSP}tp:"),
+            source.replace("ftp:", f"ftp{ZWSP}:"),
+            source.replace("ftp://", f"ftp:/{ZWSP}/"),
+            source.replace("https:", f"ht{ZWSP}tps:"),
+        ):
+            for harness in (verdict_harness, comment_harness):
+                with self.subTest(wrong=wrong), self.assertRaises(Breach):
+                    harness.verify_links_kept(source, wrong)
+        # Reported in review: containment keeps a link after a dot segment
+        # and a root with nothing after it but what GitHub trims.
+        for written in (
+            f"x/../https://github.com/{ORG}/r?u=ftp://server",
+            f"https://github.com/{ORG}",
+            f"(https://github.com/{ORG}).",
+        ):
+            self.assertEqual(
+                verdict_harness.policy.contain_links(written, ORG), written
+            )
+            wrong = written.replace("https:", f"https:{ZWSP}")
+            for harness in (verdict_harness, comment_harness):
+                with self.subTest(wrong=wrong), self.assertRaises(Breach):
+                    harness.verify_links_kept(written, wrong)
+        for written in (
+            f"https://github.com/{ORG}/r/../x?u=ftp://server",
+            f"https://github.com/{ORG}'",
+            f"https://github.com/{ORG}`x",
+        ):
+            broken = verdict_harness.policy.contain_links(written, ORG)
+            with self.subTest(written=written):
+                self.assertNotEqual(broken, written)
+                verdict_harness.verify_links_kept(written, broken)
+
     def test_verify_defused_rejects_a_change(self) -> None:
         """A second pass that changes the text is caught."""
         with self.assertRaises(Breach):
@@ -368,6 +554,45 @@ class CommentOracleTest(unittest.TestCase):
         with self.assertRaises(Breach):
             comment_harness.verify_code_kept(source, "a & b " * 250, 2000)
 
+    def test_verify_code_kept_checks_beside_escaped_ampersands(self) -> None:
+        """Reported in review: ``&amp;`` stays as written, so it is no
+        growth, and a drop beside it is caught. A reference that does
+        grow still counts.
+        """
+        block = "\n```\nimportant\n```"
+        for prose in ("&amp; " * 250, "&amp; " * 331):
+            source = prose + block
+            kept = comment_harness.markdown.comment_text(source, 2000)
+            with self.subTest(size=len(source)):
+                comment_harness.verify_code_kept(source, kept, 2000)
+        source = "&amp; " * 250 + block
+        self.assertEqual(comment_harness.markdown.comment_text(source, 2000), source)
+        with self.assertRaises(Breach):
+            comment_harness.verify_code_kept(source, ("&amp; " * 250).strip(), 2000)
+        self.assertEqual(comment_harness.growth("&amp; &lt; &#64;"), 9)
+
+    def test_verify_code_kept_strips_outer_whitespace(self) -> None:
+        """Reported in review: ``comment_text`` strips the outer whitespace
+        before it fits the body, so only what is left counts against the
+        limit, and a drop is caught. Fences are read before the strip, so
+        an indented one is still no fence.
+        """
+        block = "\n```\nimportant\n```"
+        for source in (
+            " " * 2000 + block,
+            block + "\n" * 2000,
+            "x" + " " * 2000 + block,
+        ):
+            kept = comment_harness.markdown.comment_text(source, 2000)
+            with self.subTest(source=source[:2]):
+                comment_harness.verify_code_kept(source, kept, 2000)
+        for source in (" " * 2000 + block, " " * 1983 + block, block + " " * 2000):
+            with self.subTest(source=len(source)), self.assertRaises(Breach):
+                comment_harness.verify_code_kept(source, "", 2000)
+        indented = " " * 2000 + "  ```\nx\n```"
+        kept = comment_harness.markdown.comment_text(indented, 2000)
+        comment_harness.verify_code_kept(indented, kept, 2000)
+
     def test_verify_code_kept_rejects_added_blocks(self) -> None:
         """A block inserted or duplicated beside the written one is caught."""
         source = "```\na\n```"
@@ -385,6 +610,24 @@ class CommentOracleTest(unittest.TestCase):
         started = time.perf_counter()
         comment_harness.check(b"\xff" + b"~~~x\n" * 20_000)
         self.assertLess(time.perf_counter() - started, 2.0)
+
+    def test_verify_code_kept_skips_a_blank_suffix(self) -> None:
+        """Reported in review: unclosed openers before a long blank suffix,
+        or a long closing line, cost no quadratic scan. A closer line
+        ending in a space other than a blank or a tab stays no closer, as
+        ``comment_text`` reads it.
+        """
+        openers = "``````````lang\n" * 130
+        for source in (
+            openers + "~~~\nk\n~~~" + "\n" * 200_000,
+            openers + "``````````" + " " * 2_000_000 + "\u3000",
+        ):
+            started = time.perf_counter()
+            comment_harness.check(b"\xff" + source.encode())
+            self.assertLess(time.perf_counter() - started, 2.0)
+        for source in ("```\nx\n```\u3000", "```\nx\n```\u3000\n \n"):
+            with self.subTest(source=source):
+                comment_harness.check(b"\xff" + source.encode())
 
     def test_verify_contained_rejects_outside_links(self) -> None:
         """A live link outside the organisation in prose is caught."""
