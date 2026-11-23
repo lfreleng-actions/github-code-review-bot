@@ -1584,7 +1584,7 @@ against the trusted `selection.json`.
   "skipped": [
     {"repository": "lfreleng-actions/repo", "number": 5,
      "url": "https://github.com/lfreleng-actions/repo/pull/5",
-     "title": "...", "reason": "draft"}
+     "title": "...", "head_sha": "<40 hex>", "reason": "draft"}
   ],
   "pull_requests": [
     {
@@ -1647,7 +1647,10 @@ is empty in the antagonistic mode (§5). `skip_counts` carries every
 reason from §5, `governing_repository` and `untrusted_author`
 included, in table order. `skipped` has
 one row per skipped pull request; `title` may be `null` when the
-skip happened before a read. Entries sort by repository and number.
+skip happened before a read. `head_sha` is the head the state read
+returned, for every skip decided after that read (a rule of §5,
+`too_large`, `moved` and `cap`), and `null` for one decided before it;
+a review notice names that head (§19.10). Entries sort by repository and number.
 `base_sha` is the base branch's tip at the state read, not the pull
 request's `baseRefOid` (§5). `files` and `commits` come from REST
 `compare/{base_sha}...{head_sha}`, the comparison the entry records;

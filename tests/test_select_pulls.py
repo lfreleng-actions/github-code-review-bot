@@ -644,7 +644,6 @@ class SkipRulesTest(SelectionCase):
         self.assert_only_skip(selection, "bot_author")
         self.assertFalse(any(args[:2] == ["api", "graphql"] for args in self.gh.calls))
 
-    @unittest.expectedFailure
     def test_a_skipped_row_records_the_head_the_state_read_returned(self) -> None:
         """A skip after the state read names its head; one before it, none."""
         self.gh.search.append(
@@ -1375,6 +1374,7 @@ class OutputsTest(SelectionCase):
                     "number": 3,
                     "url": "https://github.com/org/alpha/pull/3",
                     "title": "Fix: Thing 3",
+                    "head_sha": HEAD,
                     "reason": "draft",
                 }
             ],
