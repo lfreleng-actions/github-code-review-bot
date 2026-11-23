@@ -203,6 +203,7 @@ jobs:
       actions: read  # Fetch prior ledgers from this repository's runs
     outputs:
       assets_sha: "${{ steps.pinned.outputs.sha }}"
+      gate: "${{ steps.gate.outputs.gate }}"
       namespace: "${{ steps.identity.outputs.namespace }}"
       evidence_id: "${{ steps.evidence.outputs.artifact-id }}"
       selection_sha256: "${{ steps.digests.outputs.selection }}"
@@ -356,6 +357,23 @@ jobs:
           validate: 'pull-request'
           owner: "${{ inputs.org }}"
           token: ''
+
+      # GitHub runs at most 256 jobs from one matrix, and a named run
+      # can owe a review notice for every pull request it names, so a
+      # run names at most that many and its notices fit one page
+      # (docs/DESIGN.md section 19.10). Checked in both modes, before
+      # the gate.
+      - name: 'Bound named pull requests'
+        env:
+          COUNT: "${{ steps.pulls.outputs.count }}"
+        run: |
+          count="${COUNT:-0}"
+          [[ "$count" =~ ^[0-9]+$ ]] || {
+            echo '::error::the pull request splitter gave no count'; exit 1; }
+          if [ "$count" -gt 256 ]; then
+            echo "::error::a run names at most 256 pull requests, not $count"
+            exit 1
+          fi
 
       - name: 'Require App for live runs'
         if: ${{ !inputs.dry_run && inputs.github_app_client_id == '' }}
@@ -541,6 +559,15 @@ jobs:
             --config "review-assets/$BOT_CONFIG" --minted-slug "$MINTED_SLUG"
           python3 review-assets/scripts/preflight.py token \
             --repository "$REPOSITORY"
+
+      # GitHub evaluates a job's outputs whatever its result, so a later
+      # job reads this from a select job that failed after it. No
+      # notice job runs, and no token mints, for a run whose gate did
+      # not pass (docs/DESIGN.md section 4.4).
+      - name: 'Record the passed gate'
+        id: gate
+        if: inputs.github_app_client_id != ''
+        run: echo 'gate=passed' >> "$GITHUB_OUTPUT"
 
       # The ledger lives in this repository's own artifacts, so the
       # native token reads it; the App token has no grant here. Each
@@ -1680,3 +1707,253 @@ jobs:
           overwrite: true
           retention-days: 90
           if-no-files-found: 'ignore'
+
+  # The pull requests a live antagonistic run was asked to review and
+  # left without a review of their head (docs/DESIGN.md section
+  # 19.10): one page of them, since the select job's bound on named
+  # pull requests keeps every run's notices to one. It runs after a
+  # failed or skipped review or apply job, and after a select job that
+  # failed past its gate, from the verified selection when there is
+  # one and from the run's own input when there is not. It holds no
+  # App key and mints nothing; its reads use the job's own token.
+  notices:
+    name: 'List missing reviews'
+    needs: [select, review, apply]
+    if: >-
+      !cancelled() && inputs.mode == 'antagonistic' && !inputs.dry_run &&
+      inputs.github_app_client_id != '' &&
+      needs.select.outputs.gate == 'passed'
+    runs-on: 'ubuntu-latest'
+    timeout-minutes: 10
+    permissions:
+      actions: read  # Fetch the selection evidence by artifact ID
+      contents: read  # Checkout the notice lister
+    outputs:
+      count: "${{ steps.list.outputs.count }}"
+      matrix: "${{ steps.list.outputs.matrix }}"
+    steps:
+      - name: 'Load egress allow-list'
+        if: inputs.harden_runner_egress == 'block'
+        # yamllint disable-line rule:line-length
+        uses: lfreleng-actions/harden-runner-block-action@65ff87957e1cac2de3203a85dbb07c31810321cb  # v0.16.4
+        with:
+          config: "${{ inputs.harden_runner_allowlist }}"
+          # yamllint disable-line rule:line-length
+          supplemental_config: "${{ inputs.harden_runner_supplemental_allowlist }}"
+          # A caller naming a list depends on it, so its absence fails
+          # here rather than at the first blocked connection.
+          # yamllint disable-line rule:line-length
+          supplemental_required: "${{ inputs.harden_runner_supplemental_allowlist != '' && 'true' || 'false' }}"
+          # yamllint disable-line rule:line-length
+          supplemental_unpinned: "${{ inputs.harden_runner_supplemental_unpinned && 'true' || 'false' }}"
+          extra_endpoints: "${{ inputs.harden_runner_extra_endpoints }}"
+          allow_list_summary: 'false'
+
+      - name: 'Harden runner'
+        # yamllint disable-line rule:line-length
+        uses: step-security/harden-runner@1d88384fd173af6ecb012dfd0264a306b711241a  # v2.22.4
+        with:
+          egress-policy: "${{ inputs.harden_runner_egress }}"
+          allowed-endpoints: "${{ env.CONNECTION_ALLOW_LIST }}"
+
+      # A select job that failed past its gate published the assets
+      # commit and may have published no evidence.
+      - name: 'Require trusted provenance'
+        env:
+          SELECTED: "${{ needs.select.result }}"
+          ASSETS_SHA: "${{ needs.select.outputs.assets_sha }}"
+          EVIDENCE_ID: "${{ needs.select.outputs.evidence_id }}"
+          SELECTION_SHA: "${{ needs.select.outputs.selection_sha256 }}"
+          LEDGER_SHA: "${{ needs.select.outputs.ledger_sha256 }}"
+        run: |
+          [[ "$ASSETS_SHA" =~ ^[0-9a-f]{40}$ ]]
+          if [ "$SELECTED" = success ]; then
+            [[ "$EVIDENCE_ID" =~ ^[1-9][0-9]*$ ]]
+            [[ "$SELECTION_SHA" =~ ^[0-9a-f]{64}$ ]]
+            [[ "$LEDGER_SHA" =~ ^[0-9a-f]{64}$ ]]
+          fi
+
+      - name: 'Checkout notice lister'
+        # yamllint disable-line rule:line-length
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: "${{ inputs.assets_repository }}"
+          ref: "${{ needs.select.outputs.assets_sha }}"
+          path: 'review-assets'
+          persist-credentials: false
+
+      - name: 'Fetch selection evidence'
+        if: needs.select.result == 'success'
+        # yamllint disable-line rule:line-length
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          artifact-ids: "${{ needs.select.outputs.evidence_id }}"
+          merge-multiple: true
+          path: 'evidence'
+
+      - name: 'Verify evidence bytes'
+        if: needs.select.result == 'success'
+        env:
+          SELECTION_SHA: "${{ needs.select.outputs.selection_sha256 }}"
+          LEDGER_SHA: "${{ needs.select.outputs.ledger_sha256 }}"
+        run: |
+          python3 review-assets/scripts/bot_evidence.py verify \
+            --directory evidence --expect "selection.json=$SELECTION_SHA" \
+            --expect "ledger.json=$LEDGER_SHA"
+
+      # Page 0 alone. The bound on named pull requests makes a second
+      # page impossible, so one fails the job rather than lose it.
+      - name: 'List missing reviews'
+        id: list
+        env:
+          GH_TOKEN: "${{ github.token }}"
+          ORG: "${{ inputs.org }}"
+          SELECTED: "${{ needs.select.result }}"
+          PULL_REQUESTS: "${{ inputs.pull_requests }}"
+        run: |
+          if [ "$SELECTED" = success ]; then
+            source=(--selection evidence/selection.json)
+          else
+            source=(--pull-requests "$PULL_REQUESTS")
+          fi
+          mkdir -p artefacts
+          python3 review-assets/scripts/review_notice.py list --org "$ORG" \
+            --bot-authors-file review-assets/config/antagonistic-authors.txt \
+            "${source[@]}" > artefacts/notices.txt
+          pages="$(sed -n 's/^pages=//p' artefacts/notices.txt)"
+          [[ "$pages" =~ ^[0-9]+$ ]] || {
+            echo '::error::the notice list gave no page count'; exit 1; }
+          if [ "$pages" -gt 1 ]; then
+            echo "::error::notices fill $pages pages; the bound allows one"
+            exit 1
+          fi
+          cat artefacts/notices.txt >> "$GITHUB_OUTPUT"
+
+  # One notice per pull request the list names, under the antagonistic
+  # App: the mode's second write, an issue comment that can neither
+  # approve nor request changes. It shares the apply job's lock for a
+  # live antagonistic write, so a notice waits for another run's review
+  # of the same pull request, and its re-read sees that review.
+  notify:
+    name: 'Notify (${{ matrix.key }})'
+    needs: [select, notices]
+    if: >-
+      !cancelled() && needs.notices.result == 'success' &&
+      needs.notices.outputs.count != '' && needs.notices.outputs.count != '0'
+    concurrency:
+      group: >-
+        ${{ format('code-review-antagonistic-apply-{0}-{1}',
+        matrix.repository, matrix.number) }}
+      cancel-in-progress: false
+      queue: max
+    runs-on: 'ubuntu-latest'
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.notices.outputs.matrix) }}
+    permissions:
+      contents: read  # Checkout the notice poster
+    steps:
+      - name: 'Load egress allow-list'
+        if: inputs.harden_runner_egress == 'block'
+        # yamllint disable-line rule:line-length
+        uses: lfreleng-actions/harden-runner-block-action@65ff87957e1cac2de3203a85dbb07c31810321cb  # v0.16.4
+        with:
+          config: "${{ inputs.harden_runner_allowlist }}"
+          # yamllint disable-line rule:line-length
+          supplemental_config: "${{ inputs.harden_runner_supplemental_allowlist }}"
+          # A caller naming a list depends on it, so its absence fails
+          # here rather than at the first blocked connection.
+          # yamllint disable-line rule:line-length
+          supplemental_required: "${{ inputs.harden_runner_supplemental_allowlist != '' && 'true' || 'false' }}"
+          # yamllint disable-line rule:line-length
+          supplemental_unpinned: "${{ inputs.harden_runner_supplemental_unpinned && 'true' || 'false' }}"
+          extra_endpoints: "${{ inputs.harden_runner_extra_endpoints }}"
+          allow_list_summary: 'false'
+
+      - name: 'Harden runner'
+        # yamllint disable-line rule:line-length
+        uses: step-security/harden-runner@1d88384fd173af6ecb012dfd0264a306b711241a  # v2.22.4
+        with:
+          egress-policy: "${{ inputs.harden_runner_egress }}"
+          allowed-endpoints: "${{ env.CONNECTION_ALLOW_LIST }}"
+
+      # The matrix came from a trusted job; its values are checked by
+      # shape anyway, and the repository against the trusted owner,
+      # before any of them scopes a token.
+      - name: 'Require trusted provenance'
+        env:
+          ORG: "${{ inputs.org }}"
+          ASSETS_SHA: "${{ needs.select.outputs.assets_sha }}"
+          KEY: "${{ matrix.key }}"
+          REPOSITORY: "${{ matrix.repository }}"
+          REPO_NAME: "${{ matrix.repo_name }}"
+          NUMBER: "${{ matrix.number }}"
+          HEAD_SHA: "${{ matrix.head_sha }}"
+          REASON: "${{ matrix.reason }}"
+        run: |
+          [[ "$ASSETS_SHA" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$KEY" =~ ^[A-Za-z0-9_.-]+$ ]]
+          repo_re='^[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9._-]+$'
+          [[ "$REPOSITORY" =~ $repo_re ]]
+          [ "${REPOSITORY#*/}" = "$REPO_NAME" ]
+          owner="${REPOSITORY%%/*}"
+          [ "${owner,,}" = "${ORG,,}" ]
+          [[ "$NUMBER" =~ ^[1-9][0-9]*$ ]]
+          [[ "$HEAD_SHA" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$REASON" =~ ^[a-z_]+$ ]]
+
+      - name: 'Checkout notice poster'
+        # yamllint disable-line rule:line-length
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: "${{ inputs.assets_repository }}"
+          ref: "${{ needs.select.outputs.assets_sha }}"
+          path: 'review-assets'
+          persist-credentials: false
+
+      # The apply job's write mint, for the one repository: post
+      # re-reads the pull request with the query apply uses, and an
+      # issue comment on a pull request needs Pull requests: write.
+      - name: 'Mint notice token'
+        id: notice-token
+        # yamllint disable-line rule:line-length
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+        with:
+          client-id: "${{ inputs.github_app_client_id }}"
+          private-key: "${{ secrets.github_app_private_key }}"
+          owner: "${{ inputs.org }}"
+          repositories: "${{ matrix.repo_name }}"
+          permission-pull-requests: 'write'
+          permission-checks: 'read'
+          permission-statuses: 'read'
+          permission-metadata: 'read'
+
+      - name: 'Pre-flight: notice token identity'
+        env:
+          MINTED_SLUG: "${{ steps.notice-token.outputs.app-slug }}"
+          BOT_CONFIG: "${{ needs.select.outputs.bot_config }}"
+        run: |
+          python3 review-assets/scripts/preflight.py identity \
+            --config "review-assets/$BOT_CONFIG" --minted-slug "$MINTED_SLUG"
+
+      - name: 'Post the notice'
+        env:
+          GH_TOKEN: "${{ steps.notice-token.outputs.token }}"
+          REPOSITORY: "${{ matrix.repository }}"
+          NUMBER: "${{ matrix.number }}"
+          HEAD_SHA: "${{ matrix.head_sha }}"
+          REASON: "${{ matrix.reason }}"
+          BOT_SLUG: "${{ steps.notice-token.outputs.app-slug }}"
+          RUN_ID: "${{ github.run_id }}"
+          # yamllint disable-line rule:line-length
+          RUN_URL: "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          WORKFLOW_REPOSITORY: "${{ github.repository }}"
+        run: |
+          python3 review-assets/scripts/review_notice.py post \
+            --repository "$REPOSITORY" --number "$NUMBER" \
+            --head "$HEAD_SHA" --reason "$REASON" --bot-slug "$BOT_SLUG" \
+            --bot-authors-file review-assets/config/antagonistic-authors.txt \
+            --run-id "$RUN_ID" --run-url "$RUN_URL" \
+            --workflow-repository "$WORKFLOW_REPOSITORY" \
+            --summary "$GITHUB_STEP_SUMMARY"

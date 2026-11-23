@@ -378,7 +378,6 @@ class TopLevelContracts(ReusableWorkflowCase):
             with self.subTest(step=later.get("name")):
                 self.assertNotRegex(str(later.get("run", "")), r"\bsudo\b")
 
-    @unittest.expectedFailure
     def test_every_allow_list_loader_passes_every_input(self) -> None:
         """Each loader passes the baseline, supplemental and extra endpoints.
 
@@ -661,7 +660,6 @@ class PreflightContracts(ReusableWorkflowCase):
 class MintProvenanceContracts(ReusableWorkflowCase):
     """No token is ever minted for an owner or scope from untrusted input."""
 
-    @unittest.expectedFailure
     def test_every_mint_owner_is_the_trusted_org_input(self) -> None:
         """owner is literally inputs.org on every create-github-app-token step."""
         mints = [
@@ -686,7 +684,6 @@ class MintProvenanceContracts(ReusableWorkflowCase):
         mint = self.action("apply", APP_TOKEN)
         self.assertEqual(mint["with"]["repositories"], "${{ matrix.repo_name }}")
 
-    @unittest.expectedFailure
     def test_notice_mint_is_the_apply_write_mint_and_no_more(self) -> None:
         """The notify job mints once, for one matrix repository, with the
         apply job's write grants exactly.
@@ -1281,7 +1278,6 @@ class ListInputContracts(ReusableWorkflowCase):
             " || steps.repositories.outputs.repositories }}",
         )
 
-    @unittest.expectedFailure
     def test_selection_reads_the_split_lists(self) -> None:
         """The raw inputs reach the splitters and nothing else, but for the
         notice list of a run whose select job failed, which parses the
@@ -2463,7 +2459,6 @@ class NoticeContracts(ReusableWorkflowCase):
     Neither runs for a run whose gate did not pass.
     """
 
-    @unittest.expectedFailure
     def test_a_run_names_at_most_256_pull_requests_before_the_gate(self) -> None:
         """The bound reads the splitter's count, directly after it, in
         either mode, before the pre-flight gate and any mint.
@@ -2485,7 +2480,6 @@ class NoticeContracts(ReusableWorkflowCase):
             self.assertLess(self.position("select", "Bound named pull requests"), later)
         self.assertIn('if [ "$count" -gt 256 ]; then', flatten(bound["run"]))
 
-    @unittest.expectedFailure
     def test_gate_is_set_after_the_last_preflight_step(self) -> None:
         """``gate`` is ``passed`` only once the identity and grant checks ran."""
         identity = self.step("select", "Pre-flight: App identity and token grants")
@@ -2502,7 +2496,6 @@ class NoticeContracts(ReusableWorkflowCase):
             self.jobs["select"]["outputs"]["gate"], "${{ steps.gate.outputs.gate }}"
         )
 
-    @unittest.expectedFailure
     def test_notices_runs_live_antagonistic_runs_past_the_gate(self) -> None:
         """After a failed or skipped review or apply job too; never in a dry
         run, the approve mode, a cancelled run or one that failed its gate.
@@ -2521,7 +2514,6 @@ class NoticeContracts(ReusableWorkflowCase):
             },
         )
 
-    @unittest.expectedFailure
     def test_notices_holds_no_app_key_and_mints_nothing(self) -> None:
         """Its reads use the job's own token."""
         self.assertEqual(self.actions("notices", APP_TOKEN), [])
@@ -2529,7 +2521,6 @@ class NoticeContracts(ReusableWorkflowCase):
         listing = self.step("notices", "list")
         self.assertEqual(listing["env"]["GH_TOKEN"], "${{ github.token }}")
 
-    @unittest.expectedFailure
     def test_notices_evidence_arrives_by_id_and_is_verified_before_use(
         self,
     ) -> None:
@@ -2564,7 +2555,6 @@ class NoticeContracts(ReusableWorkflowCase):
         ]
         self.assertEqual(order, sorted(order))
 
-    @unittest.expectedFailure
     def test_notices_lists_page_0_from_the_selection_or_the_input(self) -> None:
         """The verified selection when select succeeded, the run's input when
         not; no ``--page``, and more than one page fails the step.
@@ -2583,7 +2573,6 @@ class NoticeContracts(ReusableWorkflowCase):
         self.assertNotIn("--page", run)
         self.assertIn('if [ "$pages" -gt 1 ]; then', run)
 
-    @unittest.expectedFailure
     def test_notify_runs_one_leg_per_listed_notice(self) -> None:
         """Gated on the list, so on the gate; one leg per entry, none fail-fast."""
         job = self.jobs["notify"]
@@ -2602,7 +2591,6 @@ class NoticeContracts(ReusableWorkflowCase):
             job["strategy"]["matrix"], "${{ fromJSON(needs.notices.outputs.matrix) }}"
         )
 
-    @unittest.expectedFailure
     def test_notify_shares_the_apply_jobs_per_pull_request_group(self) -> None:
         """A notice waits for another run's review of the same pull request."""
         concurrency = self.jobs["notify"]["concurrency"]
@@ -2615,7 +2603,6 @@ class NoticeContracts(ReusableWorkflowCase):
         self.assertIs(concurrency["cancel-in-progress"], False)
         self.assertEqual(concurrency["queue"], "max")
 
-    @unittest.expectedFailure
     def test_notify_checks_the_matrix_before_the_mint(self) -> None:
         """Every matrix value by shape, the owner against the trusted org."""
         provenance = self.step("notify", "Require trusted provenance")
@@ -2629,7 +2616,6 @@ class NoticeContracts(ReusableWorkflowCase):
             self.position("notify", "notice-token"),
         )
 
-    @unittest.expectedFailure
     def test_notify_checks_the_identity_before_the_write(self) -> None:
         """The minted slug meets the mode's App config before the post."""
         identity = self.step("notify", "Pre-flight: notice token identity")
@@ -2653,7 +2639,6 @@ class NoticeContracts(ReusableWorkflowCase):
         self.assertEqual(order, sorted(order))
         self.assertEqual(len(self.actions("notify", APP_TOKEN)), 1)
 
-    @unittest.expectedFailure
     def test_the_post_step_alone_holds_the_token(self) -> None:
         """It posts with the matrix values, the minted slug and the run."""
         post = self.step("notify", "Post the notice")
@@ -2687,7 +2672,6 @@ class NoticeContracts(ReusableWorkflowCase):
             flatten(post["run"]),
         )
 
-    @unittest.expectedFailure
     def test_the_app_key_reaches_select_apply_and_notify_alone(self) -> None:
         """No other job names the key."""
         holders = {
@@ -2759,20 +2743,17 @@ class NoticeRuns(ReusableWorkflowCase):
             },
         )
 
-    @unittest.expectedFailure
     def test_the_bound_passes_256_and_an_empty_list(self) -> None:
         """256 is the most a matrix runs; no named pull request is a scan."""
         for count in ("256", "1", "0", ""):
             with self.subTest(count=count):
                 self.assertEqual(self.bound(count), 0, self.log)
 
-    @unittest.expectedFailure
     def test_the_bound_refuses_257(self) -> None:
         """One more than a matrix runs fails the select job."""
         self.assertNotEqual(self.bound("257"), 0)
         self.assertIn("at most 256 pull requests, not 257", self.log)
 
-    @unittest.expectedFailure
     def test_one_page_publishes_its_outputs(self) -> None:
         """Page 0 of at most one page reaches the job outputs."""
         for pages in ("0", "1"):
@@ -2780,14 +2761,12 @@ class NoticeRuns(ReusableWorkflowCase):
                 self.assertEqual(self.listing(pages), 0, self.log)
                 self.assertIn(f"pages={pages}", self.output.read_text(encoding="utf-8"))
 
-    @unittest.expectedFailure
     def test_more_than_one_page_fails_loudly(self) -> None:
         """A broken bound fails the job rather than drop a page."""
         self.assertNotEqual(self.listing("2"), 0)
         self.assertIn("notices fill 2 pages", self.log)
         self.assertEqual(self.output.read_text(encoding="utf-8"), "")
 
-    @unittest.expectedFailure
     def test_each_source_reaches_the_list(self) -> None:
         """The selection after a select job that succeeded, else the input."""
         self.assertEqual(self.listing("1"), 0, self.log)
