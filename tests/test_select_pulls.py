@@ -1547,6 +1547,23 @@ def bot_review(
 COPILOT_ON_HEAD = {"nodes": [bot_review("copilot-pull-request-reviewer")]}
 
 
+def open_thread(
+    login: str, kind: str = "User", association: str = "NONE", *, resolved: bool = False
+) -> dict[str, Any]:
+    """One review thread as the state query reads it, opened by ``login``."""
+    return {
+        "isResolved": resolved,
+        "comments": {
+            "nodes": [
+                {
+                    "authorAssociation": association,
+                    "author": {"__typename": kind, "login": login},
+                }
+            ]
+        },
+    }
+
+
 class LoadBotAuthorsTest(unittest.TestCase):
     """``load_bot_authors`` reads one folded login per line."""
 
@@ -1825,6 +1842,106 @@ class AntagonisticSelectionTest(SelectionCase):
         self.gh.add("alpha", 1, reviews={"nodes": [yellow]})
         selection, _, _ = self.run_main()
         self.assertEqual([e["key"] for e in selection["pull_requests"]], ["alpha-1"])
+
+    def run_with_threads(self, *threads: dict[str, Any]) -> dict[str, Any]:
+        """Run one Code Monkey pull request carrying ``threads`` as this App."""
+        self.gh.search.clear()
+        self.add_bot("alpha", 1, reviewThreads={"nodes": list(threads)})
+        return self.run_antagonistic("--bot-slug", "lf-releng-antagonistic-review-bot")
+
+    @unittest.expectedFailure
+    def test_a_maintainers_or_this_apps_open_thread_holds_the_review(self) -> None:
+        """An owner's, a member's or this App's unresolved thread skips."""
+        for name, opener in {
+            "owner": open_thread("olivia", association="OWNER"),
+            "member": open_thread("mel", association="MEMBER"),
+            "this app": open_thread("lf-releng-antagonistic-review-bot", "Bot"),
+            "this app, REST login": open_thread(
+                "LF-Releng-Antagonistic-Review-Bot[bot]", "Bot"
+            ),
+        }.items():
+            with self.subTest(name=name):
+                self.assert_only_skip(
+                    self.run_with_threads(opener), "reviewer_feedback"
+                )
+
+    def test_nobody_elses_thread_and_no_resolved_one_holds_it(self) -> None:
+        """A resolved thread, a passer-by's, another bot's or a human named
+        like the App leaves the pull request selected.
+        """
+        for name, opener in {
+            "resolved member": open_thread("mel", association="MEMBER", resolved=True),
+            "resolved app": open_thread(
+                "lf-releng-antagonistic-review-bot", "Bot", resolved=True
+            ),
+            **{
+                association.lower(): open_thread("pat", association=association)
+                for association in (
+                    "COLLABORATOR",
+                    "CONTRIBUTOR",
+                    "FIRST_TIME_CONTRIBUTOR",
+                    "FIRST_TIMER",
+                    "MANNEQUIN",
+                    "NONE",
+                )
+            },
+            "another bot": open_thread("dependabot", "Bot", "MEMBER"),
+            "human named like the app": open_thread(
+                "lf-releng-antagonistic-review-bot", "User", "CONTRIBUTOR"
+            ),
+            "member typed as a bot": open_thread("mel", "Bot", "MEMBER"),
+        }.items():
+            with self.subTest(name=name):
+                selection = self.run_with_threads(opener)
+                self.assertEqual(
+                    [e["key"] for e in selection["pull_requests"]], ["alpha-1"]
+                )
+
+    def test_copilots_thread_keeps_its_own_reason_and_comes_first(self) -> None:
+        """Copilot's open thread skips as before, ahead of a maintainer's."""
+        copilot = open_thread("copilot-pull-request-reviewer", "Bot")
+        member = open_thread("mel", association="MEMBER")
+        self.assert_only_skip(self.run_with_threads(copilot), "copilot_feedback")
+        self.assert_only_skip(
+            self.run_with_threads(member, copilot), "copilot_feedback"
+        )
+
+    def test_without_an_app_only_a_maintainers_thread_holds_it(self) -> None:
+        """A run with no App slug has no own threads to wait on."""
+        self.add_bot(
+            "alpha",
+            1,
+            reviewThreads={
+                "nodes": [open_thread("lf-releng-antagonistic-review-bot", "Bot")]
+            },
+        )
+        selection = self.run_antagonistic()
+        self.assertEqual([e["key"] for e in selection["pull_requests"]], ["alpha-1"])
+
+    @unittest.expectedFailure
+    def test_a_named_pull_request_with_an_open_thread_is_skipped(self) -> None:
+        """Naming the pull request does not lift the rule."""
+        self.add_bot(
+            "alpha",
+            1,
+            reviewThreads={"nodes": [open_thread("olivia", association="OWNER")]},
+        )
+        selection = self.run_antagonistic("--pull-requests", "alpha#1")
+        self.assert_only_skip(selection, "reviewer_feedback")
+
+    @unittest.expectedFailure
+    def test_approve_mode_never_gives_the_reviewer_reason(self) -> None:
+        """The approve mode keeps its rules: a maintainer's thread holds nothing."""
+        self.gh.add(
+            "alpha",
+            1,
+            reviewThreads={"nodes": [open_thread("olivia", association="OWNER")]},
+        )
+        selection, _, _ = self.run_main(
+            "--bot-slug", "lf-releng-antagonistic-review-bot"
+        )
+        self.assertEqual([e["key"] for e in selection["pull_requests"]], ["alpha-1"])
+        self.assertEqual(selection["skip_counts"]["reviewer_feedback"], 0)
 
     def test_a_head_this_app_reviewed_costs_no_session(self) -> None:
         """GitHub keeps the review, so it outlives any ledger that loses it."""

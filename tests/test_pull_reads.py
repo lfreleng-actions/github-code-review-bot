@@ -48,11 +48,19 @@ def review(
     }
 
 
-def thread(login: str | None, *, resolved: bool = False) -> dict[str, Any]:
+def thread(
+    login: str | None,
+    *,
+    resolved: bool = False,
+    kind: str = "Bot",
+    association: str = "NONE",
+) -> dict[str, Any]:
     """One review thread whose first comment is by ``login``."""
     return {
         "isResolved": resolved,
-        "comments": {"nodes": [{"author": actor(login, "Bot")}]},
+        "comments": {
+            "nodes": [{"authorAssociation": association, "author": actor(login, kind)}]
+        },
     }
 
 
@@ -486,6 +494,45 @@ class PullStateTest(ReadsCase):
         state = self.state_of(node)
         self.assertEqual(state["review_requests"], ["alice", "Copilot", "releng"])
         self.assertEqual(state["unresolved_copilot_threads"], 2)
+
+    @unittest.expectedFailure
+    def test_thread_authors_name_each_open_non_copilot_opener(self) -> None:
+        """An owner's, a member's and an App's open threads keep their type,
+        login and association; resolved, Copilot's and deleted ones drop out.
+        """
+        node = pull_node(
+            reviewThreads={
+                "nodes": [
+                    thread("olivia", kind="User", association="OWNER"),
+                    thread("mel", kind="User", association="MEMBER"),
+                    thread("my-app"),
+                    thread("pat", kind="User", association="CONTRIBUTOR"),
+                    thread("mel", kind="User", association="MEMBER", resolved=True),
+                    thread("copilot-pull-request-reviewer", association="MEMBER"),
+                    thread(None, association="MEMBER"),
+                ]
+            }
+        )
+        self.assertEqual(
+            self.state_of(node)["unresolved_thread_authors"],
+            [
+                {"type": "User", "login": "olivia", "association": "OWNER"},
+                {"type": "User", "login": "mel", "association": "MEMBER"},
+                {"type": "Bot", "login": "my-app", "association": "NONE"},
+                {"type": "User", "login": "pat", "association": "CONTRIBUTOR"},
+            ],
+        )
+
+    @unittest.expectedFailure
+    def test_the_query_reads_the_opening_comments_association(self) -> None:
+        """The first 100 threads, and the association beside each opener."""
+        query = " ".join(reads.PULL_QUERY.split())
+        self.assertIn("reviewThreads(first: 100)", query)
+        self.assertIn(
+            "comments(first: 1) { nodes { authorAssociation"
+            " author { __typename login } } }",
+            query,
+        )
 
     def test_deleted_author_is_not_human(self) -> None:
         """A null author normalises to no login and the bot flag."""
