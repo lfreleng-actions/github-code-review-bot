@@ -66,6 +66,8 @@ COMMENT_PATH = (
     "comment_markdown",
     "review_comments",
     "review_files",
+    "review_notice",
+    "notice_text",
 )
 
 # setup-uv reads uv settings in its working directory and executes
