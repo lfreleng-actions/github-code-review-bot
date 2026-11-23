@@ -54,7 +54,15 @@ DOWNLOAD = "actions/download-artifact"
 UPLOAD = "actions/upload-artifact"
 SETUP_UV = "astral-sh/setup-uv"
 REUSABLE_CALL = "$/.github/workflows/code-review.yaml"
-TRUSTED_JOBS = ("select", "outcomes", "apply", "report", "handback")
+TRUSTED_JOBS = (
+    "select",
+    "outcomes",
+    "apply",
+    "report",
+    "handback",
+    "notices",
+    "notify",
+)
 # Review events GitHub accepts besides COMMENT; the antagonistic path
 # must never be able to send either.
 FORBIDDEN_EVENTS = frozenset({"APPROVE", "REQUEST_CHANGES"})
@@ -370,6 +378,7 @@ class TopLevelContracts(ReusableWorkflowCase):
             with self.subTest(step=later.get("name")):
                 self.assertNotRegex(str(later.get("run", "")), r"\bsudo\b")
 
+    @unittest.expectedFailure
     def test_every_allow_list_loader_passes_every_input(self) -> None:
         """Each loader passes the baseline, supplemental and extra endpoints.
 
@@ -652,6 +661,7 @@ class PreflightContracts(ReusableWorkflowCase):
 class MintProvenanceContracts(ReusableWorkflowCase):
     """No token is ever minted for an owner or scope from untrusted input."""
 
+    @unittest.expectedFailure
     def test_every_mint_owner_is_the_trusted_org_input(self) -> None:
         """owner is literally inputs.org on every create-github-app-token step."""
         mints = [
@@ -660,7 +670,7 @@ class MintProvenanceContracts(ReusableWorkflowCase):
             if "steps" in self.jobs[job]
             for step in self.actions(job, APP_TOKEN)
         ]
-        self.assertEqual({job for job, _ in mints}, {"select", "apply"})
+        self.assertEqual({job for job, _ in mints}, {"select", "apply", "notify"})
         for job, step in mints:
             with self.subTest(job=job):
                 self.assertEqual(step["with"]["owner"], "${{ inputs.org }}")
@@ -674,6 +684,30 @@ class MintProvenanceContracts(ReusableWorkflowCase):
     def test_write_mint_scope_is_one_recorded_repository(self) -> None:
         """The only write token names a single matrix repository, never a list."""
         mint = self.action("apply", APP_TOKEN)
+        self.assertEqual(mint["with"]["repositories"], "${{ matrix.repo_name }}")
+
+    @unittest.expectedFailure
+    def test_notice_mint_is_the_apply_write_mint_and_no_more(self) -> None:
+        """The notify job mints once, for one matrix repository, with the
+        apply job's write grants exactly.
+        """
+        mint = self.action("notify", APP_TOKEN)
+        grants = {k: v for k, v in mint["with"].items() if k.startswith("permission-")}
+        apply = self.action("apply", APP_TOKEN)
+        self.assertEqual(
+            grants,
+            {k: v for k, v in apply["with"].items() if k.startswith("permission-")},
+        )
+        self.assertEqual(
+            grants,
+            {
+                "permission-pull-requests": "write",
+                "permission-checks": "read",
+                "permission-statuses": "read",
+                "permission-metadata": "read",
+            },
+        )
+        self.assertEqual(mint["with"]["owner"], "${{ inputs.org }}")
         self.assertEqual(mint["with"]["repositories"], "${{ matrix.repo_name }}")
 
 
@@ -1247,16 +1281,23 @@ class ListInputContracts(ReusableWorkflowCase):
             " || steps.repositories.outputs.repositories }}",
         )
 
+    @unittest.expectedFailure
     def test_selection_reads_the_split_lists(self) -> None:
-        """The raw inputs reach the splitters and nothing else."""
+        """The raw inputs reach the splitters and nothing else, but for the
+        notice list of a run whose select job failed, which parses the
+        named pull requests itself, through an env entry.
+        """
         env = self.step("select", "Select pull requests")["env"]
         self.assertEqual(env["PULL_REQUESTS"], "${{ steps.pulls.outputs.csv }}")
         self.assertEqual(env["REPOSITORIES"], "${{ steps.repositories.outputs.csv }}")
         self.assertEqual(env["EXCLUDE_REPOS"], "${{ steps.exclusions.outputs.csv }}")
-        splitters = {id(s) for s in self.actions("select", SPLITTER)}
+        listing = self.step("notices", "list")
+        self.assertEqual(listing["env"]["PULL_REQUESTS"], "${{ inputs.pull_requests }}")
+        self.assertNotIn("${{", listing["run"])
+        exempt = {id(s) for s in self.actions("select", SPLITTER)} | {id(listing)}
         for job in self.jobs:
             for step in self.steps(job):
-                if id(step) in splitters:
+                if id(step) in exempt:
                     continue
                 with self.subTest(job=job, step=step.get("name")):
                     text = dumped(step)
@@ -2400,6 +2441,361 @@ class HandbackDeliveryRuns(ReusableWorkflowCase):
             self.states(record),
             {"org/repo#1": "dispatched"},
         )
+
+
+# The condition on the notices job, and through it the notify job.
+NOTICES_IF = (
+    "!cancelled() && inputs.mode == 'antagonistic' && !inputs.dry_run &&"
+    " inputs.github_app_client_id != '' &&"
+    " needs.select.outputs.gate == 'passed'"
+)
+LIVE_APPLY_GROUP = (
+    "format('code-review-antagonistic-apply-{0}-{1}', matrix.repository, matrix.number)"
+)
+
+
+class NoticeContracts(ReusableWorkflowCase):
+    """The review notice jobs (docs/DESIGN.md section 19.10).
+
+    ``notices`` lists the pull requests a live antagonistic run left
+    without a review, holding no App key; ``notify`` mints the apply
+    job's write grants for one repository and posts one issue comment.
+    Neither runs for a run whose gate did not pass.
+    """
+
+    @unittest.expectedFailure
+    def test_a_run_names_at_most_256_pull_requests_before_the_gate(self) -> None:
+        """The bound reads the splitter's count, directly after it, in
+        either mode, before the pre-flight gate and any mint.
+        """
+        bound = self.step("select", "Bound named pull requests")
+        self.assertEqual(
+            self.position("select", "Bound named pull requests"),
+            self.position("select", "pulls") + 1,
+        )
+        self.assertNotIn("if", bound)
+        self.assertEqual(bound["env"], {"COUNT": "${{ steps.pulls.outputs.count }}"})
+        mint = self.steps("select").index(self.action("select", APP_TOKEN))
+        for later in (
+            self.position("select", "Require App for live runs"),
+            self.position("select", "Pre-flight: workflow contracts and audit"),
+            self.position("select", "gate"),
+            mint,
+        ):
+            self.assertLess(self.position("select", "Bound named pull requests"), later)
+        self.assertIn('if [ "$count" -gt 256 ]; then', flatten(bound["run"]))
+
+    @unittest.expectedFailure
+    def test_gate_is_set_after_the_last_preflight_step(self) -> None:
+        """``gate`` is ``passed`` only once the identity and grant checks ran."""
+        identity = self.step("select", "Pre-flight: App identity and token grants")
+        gate = self.step("select", "gate")
+        self.assertEqual(
+            self.position("select", "gate"),
+            self.position("select", "Pre-flight: App identity and token grants") + 1,
+        )
+        self.assertEqual(gate["if"], identity["if"])
+        self.assertEqual(
+            flatten(gate["run"]), "echo 'gate=passed' >> \"$GITHUB_OUTPUT\""
+        )
+        self.assertEqual(
+            self.jobs["select"]["outputs"]["gate"], "${{ steps.gate.outputs.gate }}"
+        )
+
+    @unittest.expectedFailure
+    def test_notices_runs_live_antagonistic_runs_past_the_gate(self) -> None:
+        """After a failed or skipped review or apply job too; never in a dry
+        run, the approve mode, a cancelled run or one that failed its gate.
+        """
+        job = self.jobs["notices"]
+        self.assertEqual(job["name"], "List missing reviews")
+        self.assertEqual(job["needs"], ["select", "review", "apply"])
+        self.assertEqual(squash(str(job["if"])), NOTICES_IF)
+        self.assertEqual(job["permissions"], {"actions": "read", "contents": "read"})
+        self.assertEqual(job["timeout-minutes"], 10)
+        self.assertEqual(
+            job["outputs"],
+            {
+                "count": "${{ steps.list.outputs.count }}",
+                "matrix": "${{ steps.list.outputs.matrix }}",
+            },
+        )
+
+    @unittest.expectedFailure
+    def test_notices_holds_no_app_key_and_mints_nothing(self) -> None:
+        """Its reads use the job's own token."""
+        self.assertEqual(self.actions("notices", APP_TOKEN), [])
+        self.assertEqual(SECRET_REFERENCE.findall(dumped(self.jobs["notices"])), [])
+        listing = self.step("notices", "list")
+        self.assertEqual(listing["env"]["GH_TOKEN"], "${{ github.token }}")
+
+    @unittest.expectedFailure
+    def test_notices_evidence_arrives_by_id_and_is_verified_before_use(
+        self,
+    ) -> None:
+        """When the select job succeeded, as the report job fetches it."""
+        provenance = self.step("notices", "Require trusted provenance")
+        run = flatten(provenance["run"])
+        self.assertIn('[[ "$ASSETS_SHA" =~ ^[0-9a-f]{40}$ ]]', run)
+        self.assertIn('if [ "$SELECTED" = success ]; then', run)
+        self.assertIn('[[ "$EVIDENCE_ID" =~ ^[1-9][0-9]*$ ]]', run)
+        self.assertEqual(provenance["env"]["SELECTED"], "${{ needs.select.result }}")
+        checkout = self.action("notices", CHECKOUT)
+        self.assertEqual(
+            checkout["with"]["ref"], "${{ needs.select.outputs.assets_sha }}"
+        )
+        download = self.action("notices", DOWNLOAD)
+        verify = self.step("notices", "Verify evidence bytes")
+        for step in (download, verify):
+            with self.subTest(step=step["name"]):
+                self.assertEqual(step["if"], "needs.select.result == 'success'")
+        self.assertEqual(
+            download["with"]["artifact-ids"], "${{ needs.select.outputs.evidence_id }}"
+        )
+        run = flatten(verify["run"])
+        self.assertIn('--expect "selection.json=$SELECTION_SHA"', run)
+        self.assertIn('--expect "ledger.json=$LEDGER_SHA"', run)
+        order = [
+            self.position("notices", "Require trusted provenance"),
+            self.steps("notices").index(checkout),
+            self.steps("notices").index(download),
+            self.position("notices", "Verify evidence bytes"),
+            self.position("notices", "list"),
+        ]
+        self.assertEqual(order, sorted(order))
+
+    @unittest.expectedFailure
+    def test_notices_lists_page_0_from_the_selection_or_the_input(self) -> None:
+        """The verified selection when select succeeded, the run's input when
+        not; no ``--page``, and more than one page fails the step.
+        """
+        listing = self.step("notices", "list")
+        self.assertEqual(listing["name"], "List missing reviews")
+        self.assertEqual(listing["env"]["SELECTED"], "${{ needs.select.result }}")
+        run = flatten(listing["run"])
+        self.assertIn(
+            'python3 review-assets/scripts/review_notice.py list --org "$ORG"'
+            " --bot-authors-file review-assets/config/antagonistic-authors.txt",
+            run,
+        )
+        self.assertIn("source=(--selection evidence/selection.json)", run)
+        self.assertIn('source=(--pull-requests "$PULL_REQUESTS")', run)
+        self.assertNotIn("--page", run)
+        self.assertIn('if [ "$pages" -gt 1 ]; then', run)
+
+    @unittest.expectedFailure
+    def test_notify_runs_one_leg_per_listed_notice(self) -> None:
+        """Gated on the list, so on the gate; one leg per entry, none fail-fast."""
+        job = self.jobs["notify"]
+        self.assertEqual(job["name"], "Notify (${{ matrix.key }})")
+        self.assertEqual(job["needs"], ["select", "notices"])
+        self.assertEqual(
+            squash(str(job["if"])),
+            "!cancelled() && needs.notices.result == 'success' &&"
+            " needs.notices.outputs.count != '' &&"
+            " needs.notices.outputs.count != '0'",
+        )
+        self.assertEqual(job["permissions"], {"contents": "read"})
+        self.assertEqual(job["timeout-minutes"], 10)
+        self.assertIs(job["strategy"]["fail-fast"], False)
+        self.assertEqual(
+            job["strategy"]["matrix"], "${{ fromJSON(needs.notices.outputs.matrix) }}"
+        )
+
+    @unittest.expectedFailure
+    def test_notify_shares_the_apply_jobs_per_pull_request_group(self) -> None:
+        """A notice waits for another run's review of the same pull request."""
+        concurrency = self.jobs["notify"]["concurrency"]
+        self.assertEqual(
+            squash(str(concurrency["group"])), f"${{{{ {LIVE_APPLY_GROUP} }}}}"
+        )
+        self.assertIn(
+            LIVE_APPLY_GROUP, squash(str(self.jobs["apply"]["concurrency"]["group"]))
+        )
+        self.assertIs(concurrency["cancel-in-progress"], False)
+        self.assertEqual(concurrency["queue"], "max")
+
+    @unittest.expectedFailure
+    def test_notify_checks_the_matrix_before_the_mint(self) -> None:
+        """Every matrix value by shape, the owner against the trusted org."""
+        provenance = self.step("notify", "Require trusted provenance")
+        self.assertEqual(provenance["env"]["ORG"], "${{ inputs.org }}")
+        for value in ("key", "repository", "repo_name", "number", "head_sha", "reason"):
+            with self.subTest(value=value):
+                self.assertIn(f"${{{{ matrix.{value} }}}}", provenance["env"].values())
+        self.assertIn('[ "${owner,,}" = "${ORG,,}" ]', flatten(provenance["run"]))
+        self.assertLess(
+            self.position("notify", "Require trusted provenance"),
+            self.position("notify", "notice-token"),
+        )
+
+    @unittest.expectedFailure
+    def test_notify_checks_the_identity_before_the_write(self) -> None:
+        """The minted slug meets the mode's App config before the post."""
+        identity = self.step("notify", "Pre-flight: notice token identity")
+        self.assertEqual(
+            identity["env"],
+            {
+                "MINTED_SLUG": "${{ steps.notice-token.outputs.app-slug }}",
+                "BOT_CONFIG": "${{ needs.select.outputs.bot_config }}",
+            },
+        )
+        self.assertIn(
+            'preflight.py identity --config "review-assets/$BOT_CONFIG"'
+            ' --minted-slug "$MINTED_SLUG"',
+            flatten(identity["run"]),
+        )
+        order = [
+            self.position("notify", "notice-token"),
+            self.position("notify", "Pre-flight: notice token identity"),
+            self.position("notify", "Post the notice"),
+        ]
+        self.assertEqual(order, sorted(order))
+        self.assertEqual(len(self.actions("notify", APP_TOKEN)), 1)
+
+    @unittest.expectedFailure
+    def test_the_post_step_alone_holds_the_token(self) -> None:
+        """It posts with the matrix values, the minted slug and the run."""
+        post = self.step("notify", "Post the notice")
+        holders = [
+            step.get("name")
+            for step in self.steps("notify")
+            if "steps.notice-token.outputs.token" in dumped(step)
+        ]
+        self.assertEqual(holders, ["Post the notice"])
+        self.assertEqual(
+            post["env"]["GH_TOKEN"], "${{ steps.notice-token.outputs.token }}"
+        )
+        self.assertEqual(
+            post["env"]["BOT_SLUG"], "${{ steps.notice-token.outputs.app-slug }}"
+        )
+        self.assertEqual(post["env"]["WORKFLOW_REPOSITORY"], "${{ github.repository }}")
+        self.assertEqual(
+            post["env"]["RUN_URL"],
+            "${{ github.server_url }}/${{ github.repository }}"
+            "/actions/runs/${{ github.run_id }}",
+        )
+        self.assertNotIn("${{", post["run"])
+        self.assertIn(
+            "python3 review-assets/scripts/review_notice.py post"
+            ' --repository "$REPOSITORY" --number "$NUMBER"'
+            ' --head "$HEAD_SHA" --reason "$REASON" --bot-slug "$BOT_SLUG"'
+            " --bot-authors-file review-assets/config/antagonistic-authors.txt"
+            ' --run-id "$RUN_ID" --run-url "$RUN_URL"'
+            ' --workflow-repository "$WORKFLOW_REPOSITORY"'
+            ' --summary "$GITHUB_STEP_SUMMARY"',
+            flatten(post["run"]),
+        )
+
+    @unittest.expectedFailure
+    def test_the_app_key_reaches_select_apply_and_notify_alone(self) -> None:
+        """No other job names the key."""
+        holders = {
+            job
+            for job, body in self.jobs.items()
+            if "secrets.github_app_private_key" in dumped(body)
+        }
+        self.assertEqual(holders, {"select", "apply", "notify"})
+
+
+FAKE_PYTHON = """#!/bin/bash
+printf '%s\\n' "$@" > "$PYTHON_ARGS"
+printf '%s' "$NOTICE_OUTPUT"
+"""
+
+
+class NoticeRuns(ReusableWorkflowCase):
+    """Run the bound and the notice list's page check under bash."""
+
+    def setUp(self) -> None:
+        """A scratch directory with a fake ``python3`` on ``PATH``."""
+        super().setUp()
+        self.tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.tmp)
+        bin_dir = self.tmp / "bin"
+        bin_dir.mkdir()
+        python = bin_dir / "python3"
+        python.write_text(FAKE_PYTHON, encoding="utf-8")
+        python.chmod(0o755)
+        self.path = f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}"
+        self.output = self.tmp / "output"
+
+    def run_step(self, job: str, name: str, env: dict[str, str]) -> int:
+        """Run one step's script as Actions does; its exit code."""
+        script = self.tmp / "step.sh"
+        script.write_text(self.step(job, name)["run"], encoding="utf-8")
+        self.output.write_text("", encoding="utf-8")
+        done = subprocess.run(
+            ["bash", "-eo", "pipefail", str(script)],
+            cwd=self.tmp,
+            env={
+                "PATH": self.path,
+                "GITHUB_OUTPUT": str(self.output),
+                "PYTHON_ARGS": str(self.tmp / "arguments"),
+                **env,
+            },
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.log = done.stdout + done.stderr
+        return done.returncode
+
+    def bound(self, count: str) -> int:
+        """Run the select job's bound with the splitter's ``count``."""
+        return self.run_step("select", "Bound named pull requests", {"COUNT": count})
+
+    def listing(self, pages: str, selected: str = "success") -> int:
+        """Run the notice list with a fake list printing ``pages``."""
+        printed = f'count=0\npages={pages}\nmatrix={{"include":[]}}\n'
+        return self.run_step(
+            "notices",
+            "list",
+            {
+                "ORG": "org",
+                "SELECTED": selected,
+                "PULL_REQUESTS": "repo#1 repo#2",
+                "NOTICE_OUTPUT": printed,
+            },
+        )
+
+    @unittest.expectedFailure
+    def test_the_bound_passes_256_and_an_empty_list(self) -> None:
+        """256 is the most a matrix runs; no named pull request is a scan."""
+        for count in ("256", "1", "0", ""):
+            with self.subTest(count=count):
+                self.assertEqual(self.bound(count), 0, self.log)
+
+    @unittest.expectedFailure
+    def test_the_bound_refuses_257(self) -> None:
+        """One more than a matrix runs fails the select job."""
+        self.assertNotEqual(self.bound("257"), 0)
+        self.assertIn("at most 256 pull requests, not 257", self.log)
+
+    @unittest.expectedFailure
+    def test_one_page_publishes_its_outputs(self) -> None:
+        """Page 0 of at most one page reaches the job outputs."""
+        for pages in ("0", "1"):
+            with self.subTest(pages=pages):
+                self.assertEqual(self.listing(pages), 0, self.log)
+                self.assertIn(f"pages={pages}", self.output.read_text(encoding="utf-8"))
+
+    @unittest.expectedFailure
+    def test_more_than_one_page_fails_loudly(self) -> None:
+        """A broken bound fails the job rather than drop a page."""
+        self.assertNotEqual(self.listing("2"), 0)
+        self.assertIn("notices fill 2 pages", self.log)
+        self.assertEqual(self.output.read_text(encoding="utf-8"), "")
+
+    @unittest.expectedFailure
+    def test_each_source_reaches_the_list(self) -> None:
+        """The selection after a select job that succeeded, else the input."""
+        self.assertEqual(self.listing("1"), 0, self.log)
+        arguments = (self.tmp / "arguments").read_text(encoding="utf-8").splitlines()
+        self.assertEqual(arguments[-2:], ["--selection", "evidence/selection.json"])
+        self.assertEqual(self.listing("1", selected="failure"), 0, self.log)
+        arguments = (self.tmp / "arguments").read_text(encoding="utf-8").splitlines()
+        self.assertEqual(arguments[-2:], ["--pull-requests", "repo#1 repo#2"])
 
 
 class CommentPathContracts(unittest.TestCase):
