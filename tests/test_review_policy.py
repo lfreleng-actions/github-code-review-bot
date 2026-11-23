@@ -518,6 +518,53 @@ class DisarmTests(unittest.TestCase):
             with self.subTest(raw=raw):
                 self.assertEqual(policy.contain_links(raw, "org"), expected)
 
+    @unittest.expectedFailure
+    def test_a_scheme_inside_a_kept_link_stays(self) -> None:
+        """GitHub links an organisation URL to the end of its run, so a
+        scheme later in that run starts no link of its own: breaking it
+        would only change where the kept link goes. A scheme that starts
+        a URL of its own still breaks, before a kept link or after one.
+        Reported in review: an organisation URL GitHub may not link, in
+        a code span a backtick closes or after a letter, keeps no later
+        scheme, which may start a link of its own.
+        """
+        cases = {
+            "See https://github.com/org/repo/search?q=ftp://server x": (
+                "See https://github.com/org/repo/search?q=ftp://server x"
+            ),
+            "https://github.com/org/r?a=http://e.com&b=HTTPS://e.com": (
+                "https://github.com/org/r?a=http://e.com&b=HTTPS://e.com"
+            ),
+            "https://github.com/org/r ftp://e.com http://e.com https://e.com": (
+                f"https://github.com/org/r ftp:{ZWSP}//e.com "
+                f"http:{ZWSP}//e.com https:{ZWSP}//e.com"
+            ),
+            "ftp://e.com/?q=https://github.com/org/r?u=ftp://x": (
+                f"ftp:{ZWSP}//e.com/?q=https://github.com/org/r?u=ftp://x"
+            ),
+            "https://github.com/someone/?q=https://github.com/org/r": (
+                f"https:{ZWSP}//github.com/someone/?q=https://github.com/org/r"
+            ),
+            "`https://github.com/org/r`_https://e.com": (
+                f"`https://github.com/org/r`_https:{ZWSP}//e.com"
+            ),
+            "https://github.com/org/r?u=`ftp://x": (
+                f"https://github.com/org/r?u=`ftp:{ZWSP}//x"
+            ),
+            "xhttps://github.com/org/r_https://e.com": (
+                f"xhttps://github.com/org/r_https:{ZWSP}//e.com"
+            ),
+            "_https://github.com/org/r_https://e.com": (
+                "_https://github.com/org/r_https://e.com"
+            ),
+            "1https://github.com/org/r?u=ftp://x": (
+                "1https://github.com/org/r?u=ftp://x"
+            ),
+        }
+        for raw, expected in cases.items():
+            with self.subTest(raw=raw):
+                self.assertEqual(policy.contain_links(raw, "org"), expected)
+
     def test_sanitise_cannot_open_a_code_fence(self) -> None:
         """A summary stands as a paragraph of its own; opening with a fence,
         it would turn the rest of the body into code up to the next fence.
