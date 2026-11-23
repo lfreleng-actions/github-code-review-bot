@@ -39,13 +39,16 @@ one of two modes. The **approve** mode reviews human-authored pull
 requests, approves the trivial and low-risk ones through a trusted
 job, and reports the rest. The **antagonistic** mode reviews pull
 requests from listed coding bots and posts its findings as one
-comment review, never an approval. `docs/DESIGN.md` is the
-architecture and trust model (§19 for the antagonistic mode); read
-it before changing how the jobs hand data to each other.
+comment review, never an approval; when a request for a review ends
+with none posted, a notice comment tells the pull request why.
+`docs/DESIGN.md` is the architecture and trust model (§19 for the
+antagonistic mode); read it before changing how the jobs hand data
+to each other.
 
 - `.github/workflows/code-review.yaml`: the reusable workflow (select,
-  review, apply, report); `code-review-cron.yaml` schedules and
-  dispatches the approve mode; `code-review-antagonistic.yaml`
+  review, apply, report; the antagonistic mode adds outcomes,
+  handback, notices and notify); `code-review-cron.yaml` schedules
+  and dispatches the approve mode; `code-review-antagonistic.yaml`
   dispatches the antagonistic mode; `testing.yaml` runs the suite
   and PR plumbing.
 - `scripts/`: the Python the jobs run; `tests/`: its offline suite.
@@ -72,13 +75,16 @@ zizmor --persona auditor .github/workflows/   # zero findings
 
 Nothing about the review job earns trust: never give it a credential
 that can write to a repository, and never let it hold an App key.
-Each mode makes one write from the apply job, under its own App: the
+Each mode makes one review from the apply job, under its own App: the
 approve mode an APPROVE review, the antagonistic mode a COMMENT
-review with inline comments. The antagonistic mode may also dispatch
-Code Monkey's revision workflow from the `handback` job, which alone
-holds that token, at most three rounds per pull request. Never add a
-label or a request-changes review, never let the antagonistic path
-approve, never let the approve mode comment, and never lift the round
-cap. The contract tests in `tests/test_workflow.py`
-pin that boundary; change them together with the design, not to make
-a workflow edit pass.
+review with inline comments. The antagonistic mode makes two more
+writes, each from a job of its own. The `handback` job, which alone
+holds that token, may dispatch Code Monkey's revision workflow, at
+most three rounds per pull request. The `notify` job may post one
+notice on a pull request whose requested review did not land
+(§19.10): an issue comment, never a review, and never before the
+pre-flight gate has passed. Never add a label or a request-changes
+review, never let the antagonistic path approve, never let the
+approve mode comment, and never lift the round cap. The contract
+tests in `tests/test_workflow.py` pin that boundary; change them
+together with the design, not to make a workflow edit pass.
