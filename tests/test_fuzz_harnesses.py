@@ -205,7 +205,6 @@ class VerdictOracleTest(unittest.TestCase):
             with self.subTest(kept=kept[:8]), self.assertRaises(Breach):
                 verdict_harness.verify_text(kept, source, 600, "summary")
 
-    @unittest.expectedFailure
     def test_verify_text_breaks_colons_in_pairs(self) -> None:
         """Reported in review: ``sanitise`` breaks non-overlapping ``::``
         pairs, so a space after every colon hides a warning the real
@@ -225,7 +224,6 @@ class VerdictOracleTest(unittest.TestCase):
                 ": " * 299 + "::...", ":" * 301 + warning, 600, "summary"
             )
 
-    @unittest.expectedFailure
     def test_an_uncut_text_fits_the_limit(self) -> None:
         """Reported in review: a whole match over the limit is no result
         ``sanitise`` returns, which cuts at 600 and appends ``...``.
@@ -243,7 +241,6 @@ class VerdictOracleTest(unittest.TestCase):
                 with self.assertRaises(Breach):
                     verdict_harness.one_line(wrong, 600, "summary")
 
-    @unittest.expectedFailure
     def test_verify_text_cuts_only_a_text_too_long(self) -> None:
         """Reported in review: a prefix one short is a cut only where
         ``rstrip`` took a space, the source's or a mark's, from a text

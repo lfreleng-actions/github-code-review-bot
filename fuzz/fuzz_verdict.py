@@ -131,6 +131,10 @@ SEEDS: list[bytes] = [
     verdict_text(
         summary=f"See https://github.com/{ORG}/repo/search?q=ftp://server"
     ).encode(),
+    # Reported in review: ``sanitise`` breaks non-overlapping ``::`` pairs.
+    verdict_text(summary=":" * 301 + " critical security issue").encode(),
+    # Reported in review: an exact-limit text ending on its mark is whole.
+    verdict_text(summary="a" * 598 + "@").encode(),
     # Reported in review: a JSON escape for a lone surrogate in a note
     # reached the job summary, which no UTF-8 stream can write.
     verdict_text(tier="needs-human", findings=[{"area": "ci", "note": "<n>"}])
@@ -140,10 +144,16 @@ SEEDS: list[bytes] = [
 
 
 def one_line(text: str, limit: int, what: str) -> None:
-    """``text`` is what ``sanitise`` documents: one bounded, safe line."""
+    """``text`` is what ``sanitise`` documents: one bounded, safe line.
+
+    Within the limit, or cut: at most ``limit`` characters, then
+    ``...``.
+    """
     breaches: list[str] = []
-    if len(text) > limit + len("..."):
-        breaches.append(f"{len(text)} characters, over {limit}")
+    if len(text) > limit and not (
+        text.endswith("...") and len(text) <= limit + len("...")
+    ):
+        breaches.append(f"{len(text)} characters, over {limit} and not cut")
     if CONTROL.search(text):
         breaches.append("a control character or line break")
     if text.lstrip(" ").startswith("::") or "##[" in text:
