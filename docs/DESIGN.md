@@ -42,14 +42,16 @@ every pass.
 ## 2. Goal
 
 The pipeline runs in one of two modes, chosen by the caller. They
-share every job and every trust property, and differ in whose pull
-requests they read and in their one write:
+share every trust property, and differ in whose pull requests they
+read and in what they write:
 
 - **approve**: human-authored pull requests; the trusted job may
   approve. This document describes it throughout, except §19.
 - **antagonistic**: pull requests opened by the bots
   `config/antagonistic-authors.txt` lists; the trusted job may post
-  one comment review, and never approves (§19).
+  one comment review, and never approves, and a live run posts one
+  notice comment on each pull request it left without a review
+  (§19.10).
 
 In the approve mode, review open, human-authored, non-draft pull
 requests across the
@@ -174,6 +176,12 @@ once every review entry ends. It lists the run's jobs once and hands
 the apply matrix a map from each key to its leg's session outcome
 (§18.5).
 
+In a live antagonistic run two more trusted jobs follow apply. The
+**notices** job lists, with the job-native token and no App key, the
+pull requests the run left without a review. The **notify** job runs
+once per entry of that list, mints the apply job's write grants for
+that one repository and posts one notice comment (§19.10).
+
 The **report** job gathers every result through the same bounded
 extractor, renders the step summary, writes `report.json` and
 `report.md`, and publishes the new ledger. A result enters the ledger
@@ -227,8 +235,8 @@ references them.
 ### 4.3 What the design does not trust the caller with
 
 The `owner` of every token mint is `inputs.org`, and the
-`repositories` of the one write mint is a single matrix repository
-name recorded by the trusted select job. No mint takes its owner or
+`repositories` of each write mint, apply's and notify's, is a single
+matrix repository name recorded by a trusted job. No mint takes its owner or
 scope from a pull request, an issue, agent output or a config file.
 The contract tests pin both, and the pre-flight gate re-runs those
 tests before any mint.
@@ -257,7 +265,8 @@ run closed.
 | Before the read mint | A live run's `assets_sha` equals `job.workflow_sha`                                                                      | A reviewed workflow executing unreviewed scripts through `assets_ref`                                                                                                                                          |
 | After the read mint  | The `app-slug` the mint returns equals the mode's App config                                                             | Another App's private key wired into this workflow, the other mode's included                                                                                                                                  |
 | After the read mint  | `GET /repos/{this}` with the token shows no `push`, `maintain` or `admin`                                                | A read mint that obtained more than it asked for                                                                                                                                                               |
-| Before the write     | The write mint's `app-slug` equals the mode's App config                                                                 | The same, on the one token that can write                                                                                                                                                                      |
+| Before the write     | The write mint's `app-slug` equals the mode's App config                                                                 | The same, on the token that can write                                                                                                                                                                          |
+| Before the notice    | The notice mint's `app-slug` equals the mode's App config                                                                | The same, on the notify job's token                                                                                                                                                                            |
 
 <!-- markdownlint-enable MD013 -->
 
@@ -268,6 +277,13 @@ Everything it checks is a file already on the runner or a value the
 workflow already holds; it introduces nothing new to trust. A run it
 fails is a run that must not proceed, and the error annotation names
 the check without quoting what the check read.
+
+Once the last pre-flight step passes, the select job sets its `gate`
+output to `passed`. The review notice jobs run on that output
+(§19.10), so a run the gate stopped posts nothing. Before the gate,
+directly after splitting `pull_requests`, the select job refuses a
+run that names more than 256 pull requests, the most one notice
+matrix holds.
 
 The gate is not where policy lives. It verifies that the
 workflow still has the shape the design and tests describe; the
@@ -814,7 +830,9 @@ The write token mints when three conditions hold: the run is live,
 the offline check accepted the verdict and a client id exists. It
 mints for `matrix.repo_name` alone with `pull-requests: write`. Every other
 path runs `apply_review.py apply` with the job-native token, which
-cannot approve anything.
+cannot approve anything. In the approve mode this is the run's one
+write; a live antagonistic run makes a second, a notice from the
+notify job (§19.10).
 
 `apply` re-reads the pull request with the same GraphQL query the
 selection used and refuses, with a reason each, unless the pull
@@ -1138,14 +1156,16 @@ Repository permissions the App needs, and no others:
 
 <!-- markdownlint-enable MD013 -->
 
-Two mints, each the least its step needs. Select mints
+Three mints, each the least its step needs. Select mints
 `pull-requests`, `contents`, `checks`, `statuses` and `metadata` at
 `read`, scoped to the named repositories when any and
 organisation-wide for a scan. Apply mints `pull-requests: write`
 plus the three reads for `matrix.repo_name` alone, on the live
-path and after the offline check accepted the verdict. The App key
-appears in the select and apply jobs as an input to the token
-action and nowhere else; the review job's steps reference neither
+path and after the offline check accepted the verdict. Notify, in a
+live antagonistic run, mints the same write grants for one
+`matrix.repo_name` to post a notice (§19.10). The App key appears in
+the select, apply and notify jobs as an input to the token action
+and nowhere else; the review job's steps reference neither
 the key nor an App token.
 
 The ledger lives in this repository's own artifacts, so the select
@@ -1169,10 +1189,12 @@ whatever its event. The split is the lesson of §10.1 applied again:
   other App's key fails at the first mint (§4.4).
 - **No App permission withholds approval.** GitHub grants approval with
   `pull-requests: write`. What keeps this App from approving is the
-  code: `comment_review.post`, the applier's one write, refuses any
+  code: `comment_review.post`, the applier's write, refuses any
   event but `COMMENT` at the call, and its tests assert `COMMENT` on
-  every write they see (§19.5). Leaving the App out of every ruleset
-  that honours approvals is the second line, should that code change.
+  every write they see (§19.5). The App's other write is a notice,
+  an issue comment, which can neither approve nor request changes
+  (§19.10). Leaving the App out of every ruleset that honours
+  approvals is the second line, should that code change.
 
 ### 10.2 The model credential
 
@@ -1347,13 +1369,19 @@ whatever the result's provenance.
 | Two antagonistic dispatches name one pull request        | Possible second comment review             | Apply locks per pull request across live runs and queues the rest; each re-read sees the review before it          |
 | Antagonistic scan slot outlasts the hour                 | Next slot would overlap it                 | The scan group runs slots one at a time and `queue: max` keeps each waiting; dispatches stay in their own groups   |
 | A listed commit status never completes                   | Rollup stays `PENDING`; `ci_pending`       | Past `stale_status_minutes` CI follows the other checks (§5)                                                       |
+| Antagonistic run skips a pull request it names           | No review; the bot says nothing            | Notify posts a notice with the skip reason on each named pull request owed one (§19.10)                            |
+| Antagonistic session fails or apply refuses the verdict  | No review on a selected head               | Notify posts a `no_review` notice on that head; the run's summary says which step failed                           |
+| Base moves during an antagonistic session                | Apply refuses with "base moved"            | Notify posts a `no_review` notice; the next run reviews the new base                                               |
+| Antagonistic selection fails after the gate              | No session starts                          | Notices lists the named pull requests itself; notify posts `selection_failed` on each                              |
+| Run fails at or before its gate                          | Nothing proves the boundary held           | No notice, by design: `notices` needs `gate == 'passed'`; the run's failure is the signal                          |
 
 <!-- markdownlint-enable MD013 -->
 
 ## 14. Repository Layout
 
 ```text
-.github/workflows/code-review.yaml       reusable workflow, both modes
+.github/workflows/code-review.yaml       reusable workflow, both modes;
+                                         review notices (§19.10)
 .github/workflows/code-review-cron.yaml  approve schedule and dispatch
 .github/workflows/code-review-antagonistic.yaml
                                          antagonistic dispatch (§19)
@@ -1708,8 +1736,12 @@ page `N` alone. `count=` is that matrix's size and `pages=` the
 number of pages; a page past the last is empty. Every listing of a
 page starts from the same candidates, whatever a live read then
 drops, so listing every page from 0 to `pages - 1` reaches every
-pull request owed a notice, and a job that fans out over the pages
-can run one notice matrix per page.
+pull request owed a notice. The notices job lists page 0 alone: the
+select job refuses a run that names more than 256 pull requests, and
+a scan owes notices to its matrix entries alone, at most 256, so
+page 0 is every notice.
+The job fails if the list reports a second page, rather than drop
+it.
 
 ### 18.3 `ledger.json` (report to the next run's select; trusted)
 
@@ -1987,7 +2019,9 @@ concerns, where the authoring bot can revise against them and the
 maintainer sees them before deciding. It never approves and never
 requests changes: every pull request in the organisation still goes
 through human review, and nothing this mode does can meet or
-block that rule.
+block that rule. When a live run leaves a pull request someone
+asked it to review without a review, it says so in one notice
+comment (§19.10).
 
 ### 19.2 Selection
 
@@ -2361,8 +2395,9 @@ Scheduled runs share the caller group `code-review-antagonistic-scan`
 with `queue: max`, so slots run one at a time and none cancels or
 waits on a dispatch; in the reusable workflow every antagonistic run
 keeps its per-run group. The apply job's lock per pull request
-(§19.5) serialises the one write across runs instead, and the live
-re-read and the ledger stop a head from taking two reviews.
+(§19.5), which the notify job shares (§19.10), serialises the writes
+across runs instead, and the live re-read and the ledger stop a head
+from taking two reviews.
 
 A dispatcher needs `actions: write` on this repository and nothing
 else. Code Monkey dispatches with its own credential, sending the
@@ -2563,7 +2598,28 @@ that will never come. When a live run took a request to review a
 pull request and leaves its head without a review, the run posts one
 notice on that pull request, under the antagonistic App.
 `scripts/review_notice.py` decides which pull requests a run owes a
-notice and posts each one; a later change adds the jobs that run it.
+notice and posts each one; two jobs at the end of
+`code-review.yaml` run it.
+
+- **The jobs.** `notices` runs after apply in a live antagonistic
+  run whose select job set its `gate` output, which it does after
+  the last pre-flight step, and so also after a failed or skipped
+  review or apply job. A run that fails at or before its gate posts
+  nothing: nothing yet shows the boundary held. The job holds no App
+  key and mints nothing; it reads with the job-native token. When
+  the select job succeeded it fetches the evidence by artifact ID,
+  verifies its digests and lists from `selection.json`; when select
+  failed past the gate it lists from the run's `pull_requests`
+  input. It lists page 0 alone and fails on a second page: since the
+  select job refuses a run that names more than 256 pull requests,
+  page 0 holds every notice (§18.2). `notify` runs once per
+  entry of that list. It checks every matrix value by shape and the
+  repository's owner against `inputs.org`, mints the apply job's
+  write grants for that one repository, checks the minted slug
+  against the mode's App config, and runs `post` in the one step
+  that holds the token. It shares the apply job's lock per pull
+  request with `queue: max`, so a notice waits for another run's
+  review of the same pull request and its re-read sees it.
 
 - **A comment, never a review.** A review would count as one of the
   pull request's rounds (`rounds_by`) and mark the head reviewed

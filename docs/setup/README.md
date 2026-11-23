@@ -11,15 +11,19 @@ trusted **Report**. Select builds an offline packet for each eligible
 pull request; Review runs Copilot CLI against the packet and a
 credential-free checkout; Apply corroborates the verdict, re-reads
 the live
-pull request and makes the one write; Report writes the run
-summary and the ledger. [`../DESIGN.md`](../DESIGN.md) explains why
+pull request and makes the write; Report writes the run
+summary and the ledger. The antagonistic mode adds trusted jobs: one
+hands reviewed pull requests back to Code Monkey, and in a live run
+**List missing reviews** and **Notify** post a notice on each pull
+request the run left without a review. [`../DESIGN.md`](../DESIGN.md) explains why
 each job holds what it holds.
 
 Two modes share the pipeline. The **approve** mode reviews human
 pull requests and may approve them; the **antagonistic** mode
 reviews pull requests from the bots in
 `config/antagonistic-authors.txt` and may post one comment review,
-never an approval ([`DESIGN.md` §19](../DESIGN.md)). Each runs
+never an approval, and one notice comment on a pull request it left
+without a review ([`DESIGN.md` §19](../DESIGN.md)). Each runs
 under its own App.
 
 This guide covers what an operator configures and checks.
@@ -64,7 +68,9 @@ Select mints `pull-requests`, `contents`, `checks`, `statuses` and
 `metadata` at read, scoped to the named repositories when any.
 Apply mints `pull-requests: write` for one repository, on the live
 path alone, after the offline check accepted the verdict.
-Review receives neither the App key nor any App token.
+In a live antagonistic run Notify mints the same grants for one
+repository to post a notice. Review and List missing reviews receive
+neither the App key nor any App token.
 
 ## The antagonistic App
 
