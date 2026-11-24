@@ -2592,6 +2592,22 @@ when a maintainer takes over.
   costs that pull request alone. It never runs in a dry run or the
   approve mode. The token needs Actions: write on that repository and
   nothing else.
+- **Whose parameters.** Each dispatch also passes
+  `inherit_run_parameters=true`, so the revision round runs on the
+  parameters of the Code Monkey run that published the pull request's
+  latest round (its model, runtime, round cap and switches), not on
+  the form's defaults. Code Monkey decides those from its own trusted
+  round footer; this workflow neither knows nor carries them, and
+  none of its own inputs (`model`, `reasoning_effort`,
+  `max_ai_credits`) passes to Code Monkey. Code Monkey refuses the
+  input on anything but a live `pull-requests` dispatch with
+  `max_pull_requests=0`, which is what this job sends. The job records
+  a dispatch Code Monkey refuses, such as an HTTP 422 for an input its
+  `code-monkey-cron.yaml` does not declare, as `failed` with the
+  reason `the dispatch failed: HTTP <status>; <first line of the
+  CLI's error output>` (or `no HTTP status` and `no error output` when
+  it gives none), in the delivery record and the step summary. The job
+  never retries a refusal itself; it fails, and a re-run is the retry.
 - **The delivery record.** The `handback` job writes
   `delivery/handback.json`, `{"schema": 1, "deliveries": [...]}`, with
   each pull request, its review id, and `dispatched`, `skipped` (with
