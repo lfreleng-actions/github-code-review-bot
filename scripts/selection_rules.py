@@ -100,6 +100,8 @@ class Rules:
     antagonistic rules call it last, so a pull request an earlier rule
     skips costs no paginated read. ``governing`` holds the folded
     names of the repositories the approve mode never reviews.
+    ``human_authors`` is the antagonistic opt-in that keeps a named
+    pull request by an OWNER or MEMBER human.
     """
 
     mode: str
@@ -109,6 +111,7 @@ class Rules:
     dry_run: bool = False
     reassess: bool = False
     bot_login: str | None = None
+    human_authors: bool = False
     history: Callable[[str, int], list[dict[str, Any]]] | None = None
 
 
@@ -125,24 +128,60 @@ def governing_skip(repo_name: str, rules: Rules) -> str | None:
 
 
 def author_skip(
-    author: dict[str, Any] | None, *, mode: str, bot_authors: list[str]
+    author: dict[str, Any] | None,
+    *,
+    mode: str,
+    bot_authors: list[str],
+    human_authors: bool = False,
+    association: object = None,
 ) -> str | None:
     """The author rule's skip reason for this mode, or None to keep the pull request.
 
     The approve mode keeps humans alone. The antagonistic mode keeps
     the listed bots alone; an author that cannot be read is no listed
-    bot, so it is a bot to skip in either mode.
+    bot, so it is a bot to skip in either mode. With ``human_authors``
+    set, the antagonistic mode also keeps a human whose
+    ``association`` is OWNER or MEMBER, and skips any other human as
+    untrusted.
     """
     if mode == "approve":
         return "bot_author" if reads.is_bot_author(author) else None
     if author is None:
         return "bot_author"
     if not reads.is_bot_author(author):
-        return "human_author"
+        if not human_authors:
+            return "human_author"
+        return None if trusted_association(association) else "untrusted_author"
     login = author.get("login")
     if isinstance(login, str) and bot_identity(login) in bot_authors:
         return None
     return "bot_author"
+
+
+def live_author_reason(state: dict[str, Any], selection: dict[str, Any]) -> str | None:
+    """Why the live author may no longer take an antagonistic review, if so.
+
+    The comment gate's author rule: the selection's bot list and its
+    human author opt-in, applied to the author the gate reads.
+    """
+    authors = [
+        str(login)
+        for login in cast("list[Any]", selection.get("bot_authors") or [])
+        if isinstance(login, str)
+    ]
+    humans = selection.get("review_human_authors") is True
+    skip = author_skip(
+        cast("dict[str, Any] | None", state.get("author")),
+        mode="antagonistic",
+        bot_authors=authors,
+        human_authors=humans,
+        association=state.get("author_association"),
+    )
+    if skip is None:
+        return None
+    if humans:
+        return "the author is neither a listed bot nor an OWNER or MEMBER"
+    return "the author is no longer a listed bot"
 
 
 def trusted_association(association: object) -> bool:
@@ -287,7 +326,11 @@ def first_skip(state: dict[str, Any], rules: Rules) -> str | None:
     if governing is not None:
         return governing
     author = author_skip(
-        state["author"], mode=rules.mode, bot_authors=rules.bot_authors
+        state["author"],
+        mode=rules.mode,
+        bot_authors=rules.bot_authors,
+        human_authors=rules.human_authors,
+        association=state.get("author_association"),
     )
     if author is not None:
         return author

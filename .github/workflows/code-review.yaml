@@ -103,6 +103,12 @@ on:
         description: 'Review heads the ledger already records'
         type: boolean
         default: false
+      review_human_authors:
+        description: >-
+          Antagonistic mode: also review the named pull requests whose
+          author is an OWNER or MEMBER human; needs pull_requests
+        type: boolean
+        default: false
       skip_agent:
         description: 'Plumbing test: select and report without sessions'
         type: boolean
@@ -268,6 +274,7 @@ jobs:
           MAX_AI_CREDITS: "${{ inputs.max_ai_credits }}"
           MODE: "${{ inputs.mode }}"
           APPROVE_TIERS: "${{ inputs.approve_tiers }}"
+          HUMAN_AUTHORS: "${{ inputs.review_human_authors }}"
         run: |
           [[ "$MAX_PRS" =~ ^[0-9]+$ ]] || {
             echo '::error::max_pull_requests must be a non-negative integer'
@@ -312,6 +319,12 @@ jobs:
               ledger_name='code-review-antagonistic-ledger' ;;
             *) echo '::error::mode must be approve or antagonistic'; exit 1 ;;
           esac
+          # The approve mode reviews humans already; the opt-in is the
+          # antagonistic mode's alone.
+          if [ "$HUMAN_AUTHORS" = true ] && [ "$MODE" != antagonistic ]; then
+            echo '::error::review_human_authors needs the antagonistic mode'
+            exit 1
+          fi
           # Expressions cannot add, so the job budget (session plus
           # toolchain setup and upload) is computed here.
           {
@@ -362,16 +375,22 @@ jobs:
       # can owe a review notice for every pull request it names, so a
       # run names at most that many and its notices fit one page
       # (docs/DESIGN.md section 19.10). Checked in both modes, before
-      # the gate.
+      # the gate. A maintainer's pull request is reviewed only when
+      # named: the human author opt-in never widens a scan.
       - name: 'Bound named pull requests'
         env:
           COUNT: "${{ steps.pulls.outputs.count }}"
+          HUMAN_AUTHORS: "${{ inputs.review_human_authors }}"
         run: |
           count="${COUNT:-0}"
           [[ "$count" =~ ^[0-9]+$ ]] || {
             echo '::error::the pull request splitter gave no count'; exit 1; }
           if [ "$count" -gt 256 ]; then
             echo "::error::a run names at most 256 pull requests, not $count"
+            exit 1
+          fi
+          if [ "$HUMAN_AUTHORS" = true ] && [ "$count" -eq 0 ]; then
+            echo '::error::review_human_authors needs named pull_requests'
             exit 1
           fi
 
@@ -593,6 +612,7 @@ jobs:
           MAX_AI_CREDITS: "${{ inputs.max_ai_credits }}"
           DRY_RUN: "${{ inputs.dry_run }}"
           REASSESS: "${{ inputs.reassess }}"
+          HUMAN_AUTHORS: "${{ inputs.review_human_authors }}"
           APPROVE_TIERS: "${{ inputs.approve_tiers }}"
           PULL_REQUESTS: "${{ steps.pulls.outputs.csv }}"
           REPOSITORIES: "${{ steps.repositories.outputs.csv }}"
@@ -604,6 +624,9 @@ jobs:
           extra=()
           if [ "$DRY_RUN" = true ]; then extra+=(--dry-run); fi
           if [ "$REASSESS" = true ]; then extra+=(--reassess); fi
+          if [ "$HUMAN_AUTHORS" = true ]; then
+            extra+=(--review-human-authors)
+          fi
           python3 review-assets/scripts/select_pulls.py \
             --org "$ORG" --mode "$MODE" --output-dir artefacts \
             --model "$MODEL" --approve-tiers "$APPROVE_TIERS" \

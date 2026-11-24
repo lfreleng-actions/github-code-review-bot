@@ -1325,6 +1325,7 @@ class InputContracts(ReusableWorkflowCase):
                 "max_concurrent_agents",
                 "max_runtime_minutes",
                 "reassess",
+                "review_human_authors",
                 "skip_agent",
                 "harden_runner_egress",
                 "harden_runner_allowlist",
@@ -1650,6 +1651,7 @@ class AntagonisticCallerContracts(WorkflowCase):
                 "max_pull_requests",
                 "max_concurrent_agents",
                 "reassess",
+                "review_human_authors",
                 "handback",
             },
         )
@@ -2469,7 +2471,13 @@ class NoticeContracts(ReusableWorkflowCase):
             self.position("select", "pulls") + 1,
         )
         self.assertNotIn("if", bound)
-        self.assertEqual(bound["env"], {"COUNT": "${{ steps.pulls.outputs.count }}"})
+        self.assertEqual(
+            bound["env"],
+            {
+                "COUNT": "${{ steps.pulls.outputs.count }}",
+                "HUMAN_AUTHORS": "${{ inputs.review_human_authors }}",
+            },
+        )
         mint = self.steps("select").index(self.action("select", APP_TOKEN))
         for later in (
             self.position("select", "Require App for live runs"),
@@ -2837,14 +2845,12 @@ class HumanAuthorContracts(ReusableWorkflowCase):
             "Bound named pull requests", {"HUMAN_AUTHORS": human, "COUNT": count}
         )
 
-    @unittest.expectedFailure
     def test_the_input_is_a_boolean_off_by_default(self) -> None:
         """Declared on the reusable workflow, false unless a caller asks."""
         declared = self.triggers["workflow_call"]["inputs"][HUMAN_INPUT]
         self.assertEqual(declared["type"], "boolean")
         self.assertIs(declared["default"], False)
 
-    @unittest.expectedFailure
     def test_the_checks_read_the_input(self) -> None:
         """The mode check and the named-list bound both see the input."""
         for name in ("Check inputs", "Bound named pull requests"):
@@ -2854,7 +2860,6 @@ class HumanAuthorContracts(ReusableWorkflowCase):
                     env["HUMAN_AUTHORS"], f"${{{{ inputs.{HUMAN_INPUT} }}}}"
                 )
 
-    @unittest.expectedFailure
     def test_the_check_refuses_the_approve_mode(self) -> None:
         """True in the approve mode fails before the App key is used."""
         code, output = self.check("approve", "true")
@@ -2869,7 +2874,6 @@ class HumanAuthorContracts(ReusableWorkflowCase):
                 code, output = self.check(mode, human)
                 self.assertEqual(code, 0, output)
 
-    @unittest.expectedFailure
     def test_the_bound_refuses_a_scan(self) -> None:
         """True with no named pull request fails; a named one passes."""
         code, output = self.bound("true", "0")
@@ -2880,7 +2884,6 @@ class HumanAuthorContracts(ReusableWorkflowCase):
                 code, output = self.bound(human, count)
                 self.assertEqual(code, 0, output)
 
-    @unittest.expectedFailure
     def test_the_selection_receives_the_input(self) -> None:
         """The select step passes the flag only when the input is true."""
         select = self.step("select", "Select pull requests")
@@ -2892,7 +2895,6 @@ class HumanAuthorContracts(ReusableWorkflowCase):
             flatten(select["run"]),
         )
 
-    @unittest.expectedFailure
     def test_the_antagonistic_form_offers_it_and_a_schedule_passes_false(
         self,
     ) -> None:
@@ -2907,7 +2909,6 @@ class HumanAuthorContracts(ReusableWorkflowCase):
             f" && inputs.{HUMAN_INPUT} || false }}}}",
         )
 
-    @unittest.expectedFailure
     def test_testing_forwards_it_in_the_antagonistic_mode_alone(self) -> None:
         """The manual dry run offers it; the plumbing legs never pass it."""
         testing = load_workflow(TESTING)

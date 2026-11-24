@@ -709,12 +709,11 @@ class AntagonisticReportTest(unittest.TestCase):
             ["commented", "would-comment"],
         )
         rendered = report.render_markdown(built, selection, [])
-        self.assertIn("Mode: antagonistic; dry run: no", rendered)
+        self.assertIn("Mode: antagonistic; human authors: no; dry run: no", rendered)
         self.assertIn("| Author | Comments | Verdict |", rendered)
         self.assertIn("| ? | 3 | commented |", rendered)
         self.assertIn("| ? | ? | refused |", rendered)
 
-    @unittest.expectedFailure
     def test_the_header_shows_the_human_author_opt_in(self) -> None:
         """The opt-in sits beside the mode, so a run says whose work it read."""
         for recorded, shown in ((True, "yes"), (False, "no")):

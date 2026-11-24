@@ -856,7 +856,6 @@ class CommentCommandTests(Tree):
             author_association=association,
         )
 
-    @unittest.expectedFailure
     def test_the_opt_in_admits_a_maintainer_at_the_gate(self) -> None:
         """A selection that reviews humans posts on a member's pull request."""
         self.write_selection(selection(review_human_authors=True))
@@ -872,7 +871,6 @@ class CommentCommandTests(Tree):
             ):
                 self.assertEqual(self.comment()["verdict"], "commented")
 
-    @unittest.expectedFailure
     def test_the_opt_in_refuses_an_outside_human_at_the_gate(self) -> None:
         """A contributor is refused live, as the selection would skip them."""
         self.write_selection(selection(review_human_authors=True))
@@ -886,7 +884,6 @@ class CommentCommandTests(Tree):
         self.assertEqual(result["verdict"], "refused")
         self.assertIn("neither a listed bot nor", result["reasons"][0])
 
-    @unittest.expectedFailure
     def test_a_human_pull_request_is_never_handed_back(self) -> None:
         """Findings, hand-back on, even a hand-back list naming the human."""
         self.write_selection(

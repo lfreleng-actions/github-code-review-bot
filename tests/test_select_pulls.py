@@ -2111,7 +2111,6 @@ class AntagonisticSelectionTest(SelectionCase):
             repo, number, authorAssociation=association, reviews=COPILOT_ON_HEAD
         )
 
-    @unittest.expectedFailure
     def test_the_opt_in_keeps_a_member_or_owner(self) -> None:
         """With review_human_authors a maintainer's named pull request is read."""
         for association in ("OWNER", "MEMBER"):
@@ -2127,7 +2126,6 @@ class AntagonisticSelectionTest(SelectionCase):
                 )
                 self.assertEqual(selection["pull_requests"][0]["author"], "alice")
 
-    @unittest.expectedFailure
     def test_the_opt_in_skips_an_outside_human_as_untrusted(self) -> None:
         """A contributor or a stranger is no maintainer: ``untrusted_author``."""
         for association in ("CONTRIBUTOR", "NONE"):
@@ -2139,7 +2137,6 @@ class AntagonisticSelectionTest(SelectionCase):
                 )
                 self.assert_only_skip(selection, "untrusted_author")
 
-    @unittest.expectedFailure
     def test_the_opt_in_leaves_the_bot_rule_alone(self) -> None:
         """A listed bot is kept and an unlisted one is still ``bot_author``."""
         self.add_bot("alpha", 1)
@@ -2156,7 +2153,6 @@ class AntagonisticSelectionTest(SelectionCase):
         self.assertEqual(selection["skip_counts"]["bot_author"], 1)
         self.assertEqual(sum(selection["skip_counts"].values()), 1)
 
-    @unittest.expectedFailure
     def test_without_the_opt_in_a_member_is_still_a_human_author(self) -> None:
         """The default records the input as false and changes nothing."""
         self.add_human("alpha", 1, "MEMBER")
@@ -2164,7 +2160,6 @@ class AntagonisticSelectionTest(SelectionCase):
         self.assertIs(selection["review_human_authors"], False)
         self.assert_only_skip(selection, "human_author")
 
-    @unittest.expectedFailure
     def test_the_opt_in_needs_named_pull_requests(self) -> None:
         """A scan never selects a human, so the opt-in without names fails."""
         self.add_human("alpha", 1, "MEMBER")
@@ -2174,7 +2169,6 @@ class AntagonisticSelectionTest(SelectionCase):
             self.assertEqual(caught.exception.code, 1)
             self.assertIn("needs named pull requests", self.stderr.getvalue())
 
-    @unittest.expectedFailure
     def test_the_approve_mode_refuses_the_opt_in(self) -> None:
         """Only the antagonistic mode can review a human by opt-in."""
         self.gh.add("alpha", 1)
@@ -2183,7 +2177,6 @@ class AntagonisticSelectionTest(SelectionCase):
         self.assertEqual(caught.exception.code, 1)
         self.assertIn("antagonistic mode alone", self.stderr.getvalue())
 
-    @unittest.expectedFailure
     def test_the_opt_in_reviews_a_governing_repository(self) -> None:
         """Reviewing what governs the bots is the point of the opt-in."""
         self.add_human("github-code-review-bot", 1, "MEMBER")

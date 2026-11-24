@@ -30,7 +30,7 @@ import review_comments as comments
 import review_files as files
 import review_recovery as recovery
 from selection_inputs import bot_identity
-from selection_rules import MAX_ROUNDS, author_skip, reviewed_by, rounds_by
+from selection_rules import MAX_ROUNDS, live_author_reason, reviewed_by, rounds_by
 
 SCHEMA = 1
 # The only review event this mode sends. GitHub also accepts APPROVE
@@ -128,7 +128,8 @@ def handback_due(
     Only with something to act on, a finding on a line or a defect the
     summary names, only to a bot that can revise (the hand-back
     authors), and never from the last round: after it, a maintainer
-    decides what happens next.
+    decides what happens next. A human author is never handed back,
+    whatever the list says: the maintainer reads the review and acts.
     """
     actionable = body.finding_count(check) > 0 or check.get("summary_finding") is True
     if not actionable or round_number >= MAX_ROUNDS:
@@ -152,7 +153,8 @@ def gate_reasons(
     """Reasons the live pull request may no longer take this review.
 
     No CI or approval gate: nothing here approves, so neither can be
-    relied on. The author must still be a listed bot, and the bot must
+    relied on. The author must still be a listed bot, or with the
+    human author opt-in an OWNER or MEMBER human, and the bot must
     not have reviewed this head already; ``history`` is every review,
     not the state query's last 100, so an old one is not missed.
     """
@@ -162,14 +164,9 @@ def gate_reasons(
     if state.get("is_draft"):
         reasons.append("pull request is a draft")
     reasons.extend(files.comparison_reasons(check, state))
-    authors = [
-        str(login)
-        for login in cast("list[Any]", selection.get("bot_authors") or [])
-        if isinstance(login, str)
-    ]
-    author = cast("dict[str, Any] | None", state.get("author"))
-    if author_skip(author, mode=comments.MODE, bot_authors=authors) is not None:
-        reasons.append("the author is no longer a listed bot")
+    author = live_author_reason(state, selection)
+    if author is not None:
+        reasons.append(author)
     bot_login = selection.get("bot_login")
     if (
         isinstance(bot_login, str)
