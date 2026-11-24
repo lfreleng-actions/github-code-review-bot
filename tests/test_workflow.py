@@ -1886,7 +1886,6 @@ class HandbackContracts(ReusableWorkflowCase):
         step = self.step("handback", "Dispatch the revision round")
         self.assertEqual(step["env"]["GH_TOKEN"], "${{ secrets.handback_token }}")
 
-    @unittest.expectedFailure
     def test_dispatch_target_and_list_are_fixed_and_checked(self) -> None:
         """One workflow file, live, revision mode, no count cap, the parameters
         of the run that published the round, and a validated list dispatched
@@ -2177,7 +2176,6 @@ class HandbackDeliveryRuns(ReusableWorkflowCase):
         self.assertEqual(sent, ["org/repo#2"])
         self.assertEqual(set(self.states(record).values()), {"dispatched"})
 
-    @unittest.expectedFailure
     def test_a_refused_dispatch_records_its_status_and_reason(self) -> None:
         """A refused input reads as one in the record and the summary, and the
         refusal is sent once, never retried.
@@ -2210,7 +2208,6 @@ class HandbackDeliveryRuns(ReusableWorkflowCase):
         )
         self.assertIn(f"- `org/repo#1` (review 501): failed; {reason}", summary)
 
-    @unittest.expectedFailure
     def test_a_silent_refusal_says_so(self) -> None:
         """A failure with no output or status still records a reason."""
         _, _, record, _ = self.dispatch(self.pending(1), fail="org/repo#1")

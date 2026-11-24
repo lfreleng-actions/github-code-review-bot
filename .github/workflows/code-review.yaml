@@ -1633,9 +1633,13 @@ jobs:
           }
           checkpoint
           failed=0
+          dispatch_err=$(mktemp)
           # Code Monkey caps a run at max_pull_requests, named ones
           # included, so each dispatch lifts the cap (0). One pull
           # request per dispatch keeps a failure to that pull request.
+          # inherit_run_parameters has Code Monkey take the round's
+          # model and switches from its own footer on the pull
+          # request's latest round; none of this run's inputs pass.
           for pull in $PULLS; do
             review=$(jq -r --arg pull "$pull" \
               'first(.[] | select(.pull == $pull) | .review) // empty' \
@@ -1664,13 +1668,26 @@ jobs:
               :
             elif gh workflow run code-monkey-cron.yaml --repo "$REPOSITORY" \
               -f dry_run=false -f mode=pull-requests -f max_pull_requests=0 \
-              -f pull_requests="$pull"; then
+              -f inherit_run_parameters=true \
+              -f pull_requests="$pull" 2> "$dispatch_err"; then
               state=dispatched
             else
+              # A refusal (a 422 for an input Code Monkey does not
+              # declare) is recorded once and never retried here; the
+              # failed job's re-run is the retry.
               state=failed
-              reason='the dispatch failed'
               failed=$((failed + 1))
-              echo "::warning::$pull: the dispatch failed"
+              cat "$dispatch_err" >&2
+              err=$(<"$dispatch_err")
+              status='no HTTP status'
+              if [[ "$err" =~ HTTP\ ([1-5][0-9][0-9]) ]]; then
+                status="HTTP ${BASH_REMATCH[1]}"
+              fi
+              first=${err%%$'\n'*}
+              first=${first//[$'\001'-$'\037'\`]/}
+              first=${first:0:300}
+              reason="the dispatch failed: $status; ${first:-no error output}"
+              echo "::warning::$pull: $reason"
             fi
             deliveries=$(jq -c --arg pull "$pull" --argjson review "$review" \
               --arg state "$state" --arg reason "$reason" \
