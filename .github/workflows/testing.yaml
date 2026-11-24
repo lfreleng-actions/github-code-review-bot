@@ -51,6 +51,12 @@ on:
         description: 'Pull requests to review in the manual dry-run'
         type: string
         default: '2'
+      review_human_authors:
+        description: >-
+          Antagonistic dry-run: also review named pull requests an
+          OWNER or MEMBER opened
+        type: boolean
+        default: false
 
 permissions: {}
 
@@ -119,6 +125,9 @@ jobs:
       pull_requests: "${{ inputs.pull_requests || '' }}"
       repositories: "${{ inputs.repositories || '' }}"
       max_pull_requests: "${{ inputs.max_pull_requests || '2' }}"
+      review_human_authors: >-
+        ${{ inputs.mode == 'antagonistic'
+        && inputs.review_human_authors || false }}
       max_concurrent_agents: '2'
       harden_runner_egress: 'block'
       # yamllint disable-line rule:line-length

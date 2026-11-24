@@ -5,15 +5,16 @@
 
 Kept apart from the selection flow so the accepted spellings of a
 repository list, a pull request list, the review mode, the approval
-tiers, the bot author list, the stale status rule and the session
-tuning read as one contract, and so the flow in ``select_pulls``
-stays short enough to follow.
+tiers, the bot author list, the human author opt-in, the stale status
+rule and the session tuning read as one contract, and so the flow in
+``select_pulls`` stays short enough to follow.
 """
 
 from __future__ import annotations
 
 import re
 from pathlib import Path
+from typing import Any
 
 from pull_reads import SelectionError
 
@@ -89,6 +90,19 @@ def parse_pull_requests(text: str, org: str) -> list[tuple[str, int]]:
         if (repo, number) not in targets:
             targets.append((repo, number))
     return targets
+
+
+def named_candidates(org: str, targets: list[tuple[str, int]]) -> list[dict[str, Any]]:
+    """Candidates for the pull requests named on the command line."""
+    return [
+        {
+            "repository": f"{org}/{name}",
+            "number": number,
+            "url": f"https://github.com/{org}/{name}/pull/{number}",
+            "title": None,
+        }
+        for name, number in targets
+    ]
 
 
 def parse_max_pull_requests(text: str) -> int:
@@ -176,6 +190,19 @@ def parse_mode(text: str) -> str:
     if text not in MODES:
         raise SelectionError(f"mode must be one of {', '.join(MODES)}, got {text!r}")
     return text
+
+
+def parse_human_authors(
+    enabled: bool, mode: str, targets: list[tuple[str, int]]
+) -> bool:
+    """Accept the human author opt-in: antagonistic, on named pull requests."""
+    if enabled and mode != "antagonistic":
+        raise SelectionError(
+            "review_human_authors applies to the antagonistic mode alone"
+        )
+    if enabled and not targets:
+        raise SelectionError("review_human_authors needs named pull requests")
+    return enabled
 
 
 def bot_identity(login: str) -> str:

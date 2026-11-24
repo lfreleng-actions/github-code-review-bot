@@ -51,7 +51,9 @@ from selection_inputs import (
     load_exclusions,
     load_governing_repos,
     load_stale_statuses,
+    named_candidates,
     parse_approve_tiers,
+    parse_human_authors,
     parse_max_ai_credits,
     parse_max_pull_requests,
     parse_mode,
@@ -72,19 +74,6 @@ MATRIX_LIMIT = 256
 # exceed that, so the cumulative serialised size stops the selection
 # first, with headroom for the header fields and indentation.
 MAX_SELECTION_BYTES = 12 * 1024 * 1024
-
-
-def named_candidates(org: str, targets: list[tuple[str, int]]) -> list[dict[str, Any]]:
-    """Candidates for the pull requests named on the command line."""
-    return [
-        {
-            "repository": f"{org}/{name}",
-            "number": number,
-            "url": f"https://github.com/{org}/{name}/pull/{number}",
-            "title": None,
-        }
-        for name, number in targets
-    ]
 
 
 def searched_candidates(
@@ -121,6 +110,8 @@ def searched_candidates(
             else None,
             mode=rules.mode,
             bot_authors=rules.bot_authors,
+            # A scan never selects a human; the opt-in needs named pulls.
+            human_authors=False,
         )
         if reason is not None:
             skips.add(candidate, reason)
@@ -338,6 +329,9 @@ def build_selection(args: argparse.Namespace) -> dict[str, Any]:
 
     rules = Rules(
         mode=mode,
+        human_authors=parse_human_authors(
+            bool(args.review_human_authors), mode, targets
+        ),
         governing=frozenset(load_governing_repos(args.governing_repos_file, mode)),
         bot_authors=bot_authors,
         prior=ledger.load_ledger(args.ledger),
@@ -372,6 +366,7 @@ def build_selection(args: argparse.Namespace) -> dict[str, Any]:
         "stale_status_minutes": stale_minutes,
         "bot_authors": bot_authors,
         "handback_authors": handback_authors,
+        "review_human_authors": rules.human_authors,
         "bot_login": reads.bot_login(args.bot_slug),
         "explicit_pull_requests": [
             f"{args.org}/{name}#{number}" for name, number in targets
@@ -399,6 +394,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--ledger", type=Path, required=True)
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--reassess", action="store_true")
+    parser.add_argument("--review-human-authors", action="store_true")
     parser.add_argument("--pull-requests", default="")
     parser.add_argument("--repositories", default="")
     parser.add_argument("--exclude-file", type=Path)

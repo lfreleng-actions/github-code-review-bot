@@ -14,6 +14,9 @@
 # Code Monkey dispatches this workflow for its own pull requests once
 # their Copilot review is clean; a maintainer may dispatch it by hand,
 # naming pull requests or scanning for the listed bots' open ones.
+# With review_human_authors set, a dispatch that names pull requests
+# also reviews those an OWNER or MEMBER opened, and never hands them
+# back.
 # A scan every four hours, live, catches a pull request that turned
 # clean outside a Code Monkey run; the selection rules admit only the
 # heads a dispatch would have named (docs/DESIGN.md section 19.2). The
@@ -79,6 +82,12 @@ on:
         description: >-
           Review heads the ledger records; a head this App already
           reviewed on GitHub stays skipped until a new push
+        type: boolean
+        default: false
+      review_human_authors:
+        description: >-
+          Also review the named pull requests whose author is an OWNER
+          or MEMBER human; needs pull_requests, never handed back
         type: boolean
         default: false
       handback:
@@ -178,6 +187,10 @@ jobs:
       max_pull_requests: "${{ inputs.max_pull_requests || '10' }}"
       max_concurrent_agents: "${{ inputs.max_concurrent_agents || '5' }}"
       reassess: ${{ inputs.reassess || false }}
+      # A schedule never reviews a human's pull request.
+      review_human_authors: >-
+        ${{ github.event_name == 'workflow_dispatch'
+        && inputs.review_human_authors || false }}
       harden_runner_egress: 'block'
       # yamllint disable-line rule:line-length
       harden_runner_allowlist: '@6e6cab073a93c0d58e4e8846d44e1cbddbac975b'  # v0.21.0

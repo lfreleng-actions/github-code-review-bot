@@ -849,6 +849,60 @@ class CommentCommandTests(Tree):
                 body = self.write.call_args.args[2]["body"]
                 self.assertIn("_Antagonistic round 1 of 3._", body)
 
+    def human_state(self, association: str = "MEMBER") -> dict[str, Any]:
+        """A live human-authored pull request with ``association``."""
+        return live_state(
+            author={"login": "alice", "is_bot": False},
+            author_association=association,
+        )
+
+    def test_the_opt_in_admits_a_maintainer_at_the_gate(self) -> None:
+        """A selection that reviews humans posts on a member's pull request."""
+        self.write_selection(selection(review_human_authors=True))
+        for association in ("OWNER", "MEMBER"):
+            self.replies = [{}]
+            with (
+                self.subTest(association=association),
+                patch.object(
+                    comment_review.pull_reads,
+                    "pull_state",
+                    return_value=self.human_state(association),
+                ),
+            ):
+                self.assertEqual(self.comment()["verdict"], "commented")
+
+    def test_the_opt_in_refuses_an_outside_human_at_the_gate(self) -> None:
+        """A contributor is refused live, as the selection would skip them."""
+        self.write_selection(selection(review_human_authors=True))
+        with patch.object(
+            comment_review.pull_reads,
+            "pull_state",
+            return_value=self.human_state("CONTRIBUTOR"),
+        ):
+            result = self.comment()
+        self.write.assert_not_called()
+        self.assertEqual(result["verdict"], "refused")
+        self.assertIn("neither a listed bot nor", result["reasons"][0])
+
+    def test_a_human_pull_request_is_never_handed_back(self) -> None:
+        """Findings, hand-back on, even a hand-back list naming the human."""
+        self.write_selection(
+            selection(
+                review_human_authors=True,
+                handback_authors=["lf-releng-code-monkey-bot", "alice"],
+            )
+        )
+        with patch.object(
+            comment_review.pull_reads, "pull_state", return_value=self.human_state()
+        ):
+            result = self.comment("--handback")
+        self.assertEqual(result["verdict"], "commented")
+        self.assertIs(result["handback"], False)
+        body = self.write.call_args.args[2]["body"]
+        self.assertNotIn("Revision requested", body)
+        self.assertNotIn("antagonistic-handback", body)
+        self.assertIn("_Antagonistic round 1 of 3._", body)
+
     def test_a_dry_run_hands_nothing_back(self) -> None:
         """Nothing posted, so nothing to revise against."""
         with patch.object(

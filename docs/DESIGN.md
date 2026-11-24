@@ -346,8 +346,8 @@ records a count for every reason, zero included:
 | `repository`           | Excluded by `config/excluded-repos.txt` or `exclude_repos`, archived, or outside the organisation                                                                  |
 | `governing_repository` | Approve mode alone: the repository is on `config/governing-repos.txt`, compared without case, scanned or named (below)                                             |
 | `bot_author`           | Approve mode: author is a Bot or App (`is_bot`, typename `Bot`, login ending `[bot]`) or absent. Antagonistic mode: a bot the author list does not name, or absent |
-| `human_author`         | Antagonistic mode alone: the author is a human                                                                                                                     |
-| `untrusted_author`     | Approve mode alone: `authorAssociation`, read with the state, is not `OWNER` or `MEMBER`, or is missing; fork status plays no part                                 |
+| `human_author`         | Antagonistic mode alone: the author is a human and `review_human_authors` is off                                                                                   |
+| `untrusted_author`     | `authorAssociation` is not `OWNER` or `MEMBER`, or is missing: approve mode, or a human with `review_human_authors`                                                |
 | `closed`               | Not `OPEN` at read time                                                                                                                                            |
 | `draft`                | `isDraft`                                                                                                                                                          |
 | `conflicting`          | `mergeable == CONFLICTING`; `UNKNOWN` does not skip                                                                                                                |
@@ -1608,6 +1608,7 @@ against the trusted `selection.json`.
   "max_ai_credits": null,
   "approve_tiers": ["low-risk", "trivial"],
   "bot_authors": [],
+  "review_human_authors": false,
   "bot_login": "lf-releng-code-review-bot[bot]",
   "explicit_pull_requests": ["lfreleng-actions/repo#157"],
   "explicit_repositories": ["repo"],
@@ -2040,7 +2041,18 @@ the mode reviews, one login per line, compared without case and
 without the `[bot]` suffix REST and search add. The author rule of
 §5 inverts: a human author skips as `human_author`, any bot the list
 does not name as `bot_author`. Named pull requests obey it too, so a
-dispatch cannot point the mode at a human's work.
+dispatch cannot point the mode at a human's work unless it opts in.
+
+`review_human_authors` (default off) is that opt-in. With it on, a
+named pull request whose human author's `authorAssociation` is
+`OWNER` or `MEMBER` passes the author rule, and any other human skips
+as `untrusted_author`; the bot rule does not change. It needs named
+pull requests: the reusable workflow refuses it in the approve mode
+and with an empty `pull_requests`, and `select_pulls.py` refuses it
+again, so it never widens a scan. The selection records it, the live
+gate (§19.5) applies the same rule, and the report header shows it.
+Such a pull request is never handed back (§19.9) and gets no review
+notice (§19.10): the maintainer who named it reads the review.
 
 The CI rules (`ci_pending`, `ci_failing`, `ci_none`) do not apply.
 They exist because an approval relies on green CI; a comment does
@@ -2391,8 +2403,10 @@ read comes from a different model family from the Claude default
 that writes Code Monkey's changes, `reasoning_effort` and
 `max_ai_credits` (both empty by default, §7.2), `pull_requests`,
 `repositories`, `max_pull_requests` (default 10),
-`max_concurrent_agents` (default 5), `reassess` and `handback`
-(default on, §19.9). It passes
+`max_concurrent_agents` (default 5), `reassess`,
+`review_human_authors` (default off, §19.2) and `handback`
+(default on, §19.9). A schedule passes `review_human_authors` as
+`false`. It passes
 `mode: antagonistic` and `approve_tiers: none` as literals, and the
 antagonistic App's credentials (§10.1.1); the approving App's names
 appear nowhere in it, nor the antagonistic App's in the approve
@@ -2495,7 +2509,9 @@ when a maintainer takes over.
   act on (a finding, or a defect the summary names and flags with
   `summary_finding`), the author is in `config/handback-authors.txt`
   (Code Monkey alone: the Copilot coding agent has no revision
-  workflow to dispatch), and the round is under three. The review body
+  workflow to dispatch), and the round is under three. A human
+  author, reviewed under `review_human_authors` (§19.2), is never
+  handed back, whatever the list says. The review body
   names the round and, when it hands back, says it requests a revision
   from Code Monkey: the applier writes it before the hand-back job
   dispatches anything, so it never claims a revision started. The third says a

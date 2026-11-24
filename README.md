@@ -28,7 +28,9 @@ organisation, in two modes:
   Code Monkey for a revision round, for three antagonistic rounds at
   most; after that a maintainer takes over. When a live run leaves
   a named or selected pull request without a review, it posts one
-  notice comment saying why.
+  notice comment saying why. A dispatch with `review_human_authors`
+  on also reviews the named pull requests that an OWNER or MEMBER
+  opened; those never go back for a revision round.
 
 ## 📚 Documentation
 

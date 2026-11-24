@@ -1325,6 +1325,7 @@ class InputContracts(ReusableWorkflowCase):
                 "max_concurrent_agents",
                 "max_runtime_minutes",
                 "reassess",
+                "review_human_authors",
                 "skip_agent",
                 "harden_runner_egress",
                 "harden_runner_allowlist",
@@ -1650,6 +1651,7 @@ class AntagonisticCallerContracts(WorkflowCase):
                 "max_pull_requests",
                 "max_concurrent_agents",
                 "reassess",
+                "review_human_authors",
                 "handback",
             },
         )
@@ -2469,7 +2471,13 @@ class NoticeContracts(ReusableWorkflowCase):
             self.position("select", "pulls") + 1,
         )
         self.assertNotIn("if", bound)
-        self.assertEqual(bound["env"], {"COUNT": "${{ steps.pulls.outputs.count }}"})
+        self.assertEqual(
+            bound["env"],
+            {
+                "COUNT": "${{ steps.pulls.outputs.count }}",
+                "HUMAN_AUTHORS": "${{ inputs.review_human_authors }}",
+            },
+        )
         mint = self.steps("select").index(self.action("select", APP_TOKEN))
         for later in (
             self.position("select", "Require App for live runs"),
@@ -2779,6 +2787,146 @@ class NoticeRuns(ReusableWorkflowCase):
         self.assertEqual(self.listing("1", selected="failure"), 0, self.log)
         arguments = (self.tmp / "arguments").read_text(encoding="utf-8").splitlines()
         self.assertEqual(arguments[-2:], ["--pull-requests", "repo#1 repo#2"])
+
+
+HUMAN_INPUT = "review_human_authors"
+
+
+def load_workflow(path: Path) -> dict[str | bool, Any]:
+    """Parse one workflow file."""
+    return cast(dict[str | bool, Any], yaml.safe_load(path.read_text(encoding="utf-8")))
+
+
+class HumanAuthorContracts(ReusableWorkflowCase):
+    """The antagonistic opt-in for maintainers' pull requests (section 19.2)."""
+
+    def run_step(self, name: str, env: dict[str, str]) -> tuple[int, str]:
+        """Run one select-job step under bash; its exit code and output."""
+        with tempfile.TemporaryDirectory() as tmp:
+            script = Path(tmp) / "step.sh"
+            script.write_text(self.step("select", name)["run"])
+            output = Path(tmp) / "output"
+            output.write_text("", encoding="utf-8")
+            done = subprocess.run(
+                ["bash", "-eo", "pipefail", str(script)],
+                cwd=tmp,
+                env={
+                    "PATH": os.environ.get("PATH", ""),
+                    "GITHUB_OUTPUT": str(output),
+                    **env,
+                },
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+        return done.returncode, done.stdout + done.stderr
+
+    def check(self, mode: str, human: str) -> tuple[int, str]:
+        """Run the input check for one mode and opt-in value."""
+        return self.run_step(
+            "Check inputs",
+            {
+                "MAX_PRS": "20",
+                "STALE_MINUTES": "8",
+                "MAX_RUNTIME": "20",
+                "MAX_AGENTS": "5",
+                "MODEL": "claude-opus-5.5",
+                "REASONING_EFFORT": "",
+                "MAX_AI_CREDITS": "",
+                "MODE": mode,
+                "APPROVE_TIERS": "none",
+                "HUMAN_AUTHORS": human,
+            },
+        )
+
+    def bound(self, human: str, count: str) -> tuple[int, str]:
+        """Run the named pull request bound for one opt-in value and count."""
+        return self.run_step(
+            "Bound named pull requests", {"HUMAN_AUTHORS": human, "COUNT": count}
+        )
+
+    def test_the_input_is_a_boolean_off_by_default(self) -> None:
+        """Declared on the reusable workflow, false unless a caller asks."""
+        declared = self.triggers["workflow_call"]["inputs"][HUMAN_INPUT]
+        self.assertEqual(declared["type"], "boolean")
+        self.assertIs(declared["default"], False)
+
+    def test_the_checks_read_the_input(self) -> None:
+        """The mode check and the named-list bound both see the input."""
+        for name in ("Check inputs", "Bound named pull requests"):
+            with self.subTest(step=name):
+                env = self.step("select", name)["env"]
+                self.assertEqual(
+                    env["HUMAN_AUTHORS"], f"${{{{ inputs.{HUMAN_INPUT} }}}}"
+                )
+
+    def test_the_check_refuses_the_approve_mode(self) -> None:
+        """True in the approve mode fails before the App key is used."""
+        code, output = self.check("approve", "true")
+        self.assertNotEqual(code, 0)
+        self.assertIn("needs the antagonistic mode", output)
+        for mode, human in (
+            ("antagonistic", "true"),
+            ("antagonistic", "false"),
+            ("approve", "false"),
+        ):
+            with self.subTest(mode=mode, human=human):
+                code, output = self.check(mode, human)
+                self.assertEqual(code, 0, output)
+
+    def test_the_bound_refuses_a_scan(self) -> None:
+        """True with no named pull request fails; a named one passes."""
+        code, output = self.bound("true", "0")
+        self.assertNotEqual(code, 0)
+        self.assertIn("needs named pull_requests", output)
+        for human, count in (("true", "1"), ("false", "0")):
+            with self.subTest(human=human, count=count):
+                code, output = self.bound(human, count)
+                self.assertEqual(code, 0, output)
+
+    def test_the_selection_receives_the_input(self) -> None:
+        """The select step passes the flag only when the input is true."""
+        select = self.step("select", "Select pull requests")
+        self.assertEqual(
+            select["env"]["HUMAN_AUTHORS"], f"${{{{ inputs.{HUMAN_INPUT} }}}}"
+        )
+        self.assertIn(
+            'if [ "$HUMAN_AUTHORS" = true ]; then extra+=(--review-human-authors) fi',
+            flatten(select["run"]),
+        )
+
+    def test_the_antagonistic_form_offers_it_and_a_schedule_passes_false(
+        self,
+    ) -> None:
+        """A dispatch forwards the operator's choice; a schedule never asks."""
+        caller = load_workflow(ANTAGONISTIC)
+        form = caller[TRIGGERS]["workflow_dispatch"]["inputs"][HUMAN_INPUT]
+        self.assertEqual(form["type"], "boolean")
+        self.assertIs(form["default"], False)
+        self.assertEqual(
+            squash(str(caller["jobs"]["code-review"]["with"][HUMAN_INPUT])),
+            "${{ github.event_name == 'workflow_dispatch'"
+            f" && inputs.{HUMAN_INPUT} || false }}}}",
+        )
+
+    def test_testing_forwards_it_in_the_antagonistic_mode_alone(self) -> None:
+        """The manual dry run offers it; the plumbing legs never pass it."""
+        testing = load_workflow(TESTING)
+        form = testing[TRIGGERS]["workflow_dispatch"]["inputs"][HUMAN_INPUT]
+        self.assertEqual(form["type"], "boolean")
+        self.assertIs(form["default"], False)
+        self.assertEqual(
+            squash(str(testing["jobs"]["dry-run"]["with"][HUMAN_INPUT])),
+            "${{ inputs.mode == 'antagonistic'"
+            f" && inputs.{HUMAN_INPUT} || false }}}}",
+        )
+        self.assertNotIn(HUMAN_INPUT, testing["jobs"]["plumbing"]["with"])
+
+    def test_the_approving_caller_never_passes_it(self) -> None:
+        """The approve mode ignores the input, and its caller leaves it out."""
+        cron = load_workflow(CRON)
+        self.assertNotIn(HUMAN_INPUT, cron[TRIGGERS]["workflow_dispatch"]["inputs"])
+        self.assertNotIn(HUMAN_INPUT, cron["jobs"]["code-review"]["with"])
 
 
 class CommentPathContracts(unittest.TestCase):
