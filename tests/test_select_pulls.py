@@ -2105,6 +2105,97 @@ class AntagonisticSelectionTest(SelectionCase):
         selection, _, _ = self.run_main("--bot-authors-file", str(self.authors))
         self.assert_only_skip(selection, "bot_author")
 
+    def add_human(self, repo: str, number: int, association: str) -> None:
+        """Register a human's pull request Copilot has reviewed at its head."""
+        self.gh.add(
+            repo, number, authorAssociation=association, reviews=COPILOT_ON_HEAD
+        )
+
+    @unittest.expectedFailure
+    def test_the_opt_in_keeps_a_member_or_owner(self) -> None:
+        """With review_human_authors a maintainer's named pull request is read."""
+        for association in ("OWNER", "MEMBER"):
+            with self.subTest(association=association):
+                self.install(FakeGitHub())
+                self.add_human("alpha", 1, association)
+                selection = self.run_antagonistic(
+                    "--review-human-authors", "--pull-requests", "alpha#1"
+                )
+                self.assertIs(selection["review_human_authors"], True)
+                self.assertEqual(
+                    [e["key"] for e in selection["pull_requests"]], ["alpha-1"]
+                )
+                self.assertEqual(selection["pull_requests"][0]["author"], "alice")
+
+    @unittest.expectedFailure
+    def test_the_opt_in_skips_an_outside_human_as_untrusted(self) -> None:
+        """A contributor or a stranger is no maintainer: ``untrusted_author``."""
+        for association in ("CONTRIBUTOR", "NONE"):
+            with self.subTest(association=association):
+                self.install(FakeGitHub())
+                self.add_human("alpha", 1, association)
+                selection = self.run_antagonistic(
+                    "--review-human-authors", "--pull-requests", "alpha#1"
+                )
+                self.assert_only_skip(selection, "untrusted_author")
+
+    @unittest.expectedFailure
+    def test_the_opt_in_leaves_the_bot_rule_alone(self) -> None:
+        """A listed bot is kept and an unlisted one is still ``bot_author``."""
+        self.add_bot("alpha", 1)
+        self.gh.pulls[("org/beta", 2)] = pull_node(
+            "beta",
+            2,
+            author={"__typename": "Bot", "login": "dependabot"},
+            reviews=COPILOT_ON_HEAD,
+        )
+        selection = self.run_antagonistic(
+            "--review-human-authors", "--pull-requests", "alpha#1 beta#2"
+        )
+        self.assertEqual([e["key"] for e in selection["pull_requests"]], ["alpha-1"])
+        self.assertEqual(selection["skip_counts"]["bot_author"], 1)
+        self.assertEqual(sum(selection["skip_counts"].values()), 1)
+
+    @unittest.expectedFailure
+    def test_without_the_opt_in_a_member_is_still_a_human_author(self) -> None:
+        """The default records the input as false and changes nothing."""
+        self.add_human("alpha", 1, "MEMBER")
+        selection = self.run_antagonistic("--pull-requests", "alpha#1")
+        self.assertIs(selection["review_human_authors"], False)
+        self.assert_only_skip(selection, "human_author")
+
+    @unittest.expectedFailure
+    def test_the_opt_in_needs_named_pull_requests(self) -> None:
+        """A scan never selects a human, so the opt-in without names fails."""
+        self.add_human("alpha", 1, "MEMBER")
+        for extra in ((), ("--repositories", "alpha")):
+            with self.subTest(extra=extra), self.assertRaises(SystemExit) as caught:
+                self.run_antagonistic("--review-human-authors", *extra)
+            self.assertEqual(caught.exception.code, 1)
+            self.assertIn("needs named pull requests", self.stderr.getvalue())
+
+    @unittest.expectedFailure
+    def test_the_approve_mode_refuses_the_opt_in(self) -> None:
+        """Only the antagonistic mode can review a human by opt-in."""
+        self.gh.add("alpha", 1)
+        with self.assertRaises(SystemExit) as caught:
+            self.run_main("--review-human-authors", "--pull-requests", "alpha#1")
+        self.assertEqual(caught.exception.code, 1)
+        self.assertIn("antagonistic mode alone", self.stderr.getvalue())
+
+    @unittest.expectedFailure
+    def test_the_opt_in_reviews_a_governing_repository(self) -> None:
+        """Reviewing what governs the bots is the point of the opt-in."""
+        self.add_human("github-code-review-bot", 1, "MEMBER")
+        selection = self.run_antagonistic(
+            "--review-human-authors", "--pull-requests", "github-code-review-bot#1"
+        )
+        self.assertEqual(
+            [e["key"] for e in selection["pull_requests"]],
+            ["github-code-review-bot-1"],
+        )
+        self.assertEqual(selection["skip_counts"]["governing_repository"], 0)
+
 
 APP = "lf-releng-antagonistic-review-bot"
 APP_ACTOR = {"__typename": "Bot", "login": APP}

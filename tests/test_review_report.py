@@ -714,6 +714,22 @@ class AntagonisticReportTest(unittest.TestCase):
         self.assertIn("| ? | 3 | commented |", rendered)
         self.assertIn("| ? | ? | refused |", rendered)
 
+    @unittest.expectedFailure
+    def test_the_header_shows_the_human_author_opt_in(self) -> None:
+        """The opt-in sits beside the mode, so a run says whose work it read."""
+        for recorded, shown in ((True, "yes"), (False, "no")):
+            with self.subTest(recorded=recorded):
+                selection = make_selection(
+                    mode="antagonistic", review_human_authors=recorded
+                )
+                rendered = report.render_markdown(
+                    report.build_report(selection, [], 0), selection, []
+                )
+                self.assertIn(
+                    f"Mode: antagonistic; human authors: {shown}; dry run: no",
+                    rendered,
+                )
+
     def test_a_settled_refusal_is_recorded_and_no_other(self) -> None:
         """The session's own empty verdict skips the head; a gate or failure does not."""
         results = [
