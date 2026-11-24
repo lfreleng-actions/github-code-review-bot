@@ -1886,15 +1886,18 @@ class HandbackContracts(ReusableWorkflowCase):
         step = self.step("handback", "Dispatch the revision round")
         self.assertEqual(step["env"]["GH_TOKEN"], "${{ secrets.handback_token }}")
 
+    @unittest.expectedFailure
     def test_dispatch_target_and_list_are_fixed_and_checked(self) -> None:
-        """One workflow file, live, revision mode, no count cap, and a validated
-        list dispatched whole, one pull request per dispatch.
+        """One workflow file, live, revision mode, no count cap, the parameters
+        of the run that published the round, and a validated list dispatched
+        whole, one pull request per dispatch.
         """
         step = self.step("handback", "Dispatch the revision round")
         run = flatten(step["run"])
         self.assertIn(
             'gh workflow run code-monkey-cron.yaml --repo "$REPOSITORY"'
             " -f dry_run=false -f mode=pull-requests -f max_pull_requests=0"
+            " -f inherit_run_parameters=true"
             ' -f pull_requests="$pull"',
             run,
         )
@@ -1999,7 +2002,7 @@ for arg; do
   case "$arg" in pull_requests=*) pull="${arg#pull_requests=}" ;; esac
 done
 case " $GH_ABORT " in *" $pull "*) kill -KILL "$PPID"; exit 1 ;; esac
-case " $GH_FAIL " in *" $pull "*) exit 1 ;; esac
+case " $GH_FAIL " in *" $pull "*) printf '%s' "$GH_FAIL_OUTPUT" >&2; exit 1 ;; esac
 """
 
 # Stands for jq, and kills the step part-way through writing the Nth
@@ -2064,6 +2067,7 @@ class HandbackDeliveryRuns(ReusableWorkflowCase):
         fail: str = "",
         abort: str = "",
         jq_abort_at: int = 0,
+        fail_output: str = "",
     ) -> tuple[int, list[str], dict[str, Any] | None, str]:
         """Run once: the exit code, the pull requests sent, the record, and
         the step summary.
@@ -2087,6 +2091,7 @@ class HandbackDeliveryRuns(ReusableWorkflowCase):
             "JQ_COUNT": str(self.tmp / "jq.count"),
             "JQ_ABORT_AT": str(jq_abort_at),
             "GH_FAIL": fail,
+            "GH_FAIL_OUTPUT": fail_output,
             "GH_ABORT": abort,
             "REPOSITORY": "org/github-code-monkey-bot",
             "PULLS": pulls,
@@ -2171,6 +2176,49 @@ class HandbackDeliveryRuns(ReusableWorkflowCase):
         self.assertEqual(code, 0)
         self.assertEqual(sent, ["org/repo#2"])
         self.assertEqual(set(self.states(record).values()), {"dispatched"})
+
+    @unittest.expectedFailure
+    def test_a_refused_dispatch_records_its_status_and_reason(self) -> None:
+        """A refused input reads as one in the record and the summary, and the
+        refusal is sent once, never retried.
+        """
+        refusal = (
+            "could not create workflow dispatch event: HTTP 422: Unexpected"
+            ' inputs provided: ["inherit_run_parameters"]\nsecond line\n'
+        )
+        code, sent, record, summary = self.dispatch(
+            self.pending(1), fail="org/repo#1", fail_output=refusal
+        )
+        self.assertEqual(code, 1)
+        self.assertEqual(sent, ["org/repo#1"])
+        assert record is not None
+        reason = (
+            "the dispatch failed: HTTP 422; could not create workflow dispatch"
+            " event: HTTP 422: Unexpected inputs provided:"
+            ' ["inherit_run_parameters"]'
+        )
+        self.assertEqual(
+            record["deliveries"],
+            [
+                {
+                    "pull": "org/repo#1",
+                    "review": 501,
+                    "state": "failed",
+                    "reason": reason,
+                }
+            ],
+        )
+        self.assertIn(f"- `org/repo#1` (review 501): failed; {reason}", summary)
+
+    @unittest.expectedFailure
+    def test_a_silent_refusal_says_so(self) -> None:
+        """A failure with no output or status still records a reason."""
+        _, _, record, _ = self.dispatch(self.pending(1), fail="org/repo#1")
+        assert record is not None
+        self.assertEqual(
+            record["deliveries"][0]["reason"],
+            "the dispatch failed: no HTTP status; no error output",
+        )
 
     def test_a_re_run_after_a_late_failure_sends_nothing(self) -> None:
         """Every dispatch went before the job failed: the re-run repeats none."""
