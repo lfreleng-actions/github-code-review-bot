@@ -53,6 +53,8 @@ SPLITTER = "lfreleng-actions/list-splitter-action"
 DOWNLOAD = "actions/download-artifact"
 UPLOAD = "actions/upload-artifact"
 SETUP_UV = "astral-sh/setup-uv"
+# The review job's proof that harden-runner revoked sudo and containers.
+SUDO_GATE = "Require sudo and containers off"
 REUSABLE_CALL = "$/.github/workflows/code-review.yaml"
 TRUSTED_JOBS = (
     "select",
@@ -377,6 +379,51 @@ class TopLevelContracts(ReusableWorkflowCase):
         for later in steps[index + 1 :]:
             with self.subTest(step=later.get("name")):
                 self.assertNotRegex(str(later.get("run", "")), r"\bsudo\b")
+
+    @unittest.expectedFailure
+    def test_review_job_disables_sudo_and_containers(self) -> None:
+        """harden-runner's agent revokes both at setup, as a literal.
+
+        The value is the YAML boolean, never an expression, so no
+        input, variable or dispatch field can opt the job out.
+        """
+        harden = self.action("review", HARDEN_RUNNER)
+        self.assertIs(harden["with"].get("disable-sudo-and-containers"), True)
+
+    def test_other_jobs_leave_sudo_and_containers_alone(self) -> None:
+        """Only the review job sets the input; the trusted jobs are apart."""
+        for job in self.jobs:
+            if job == "review":
+                continue
+            with self.subTest(job=job):
+                harden = self.action(job, HARDEN_RUNNER)
+                self.assertNotIn("disable-sudo-and-containers", harden["with"])
+
+    @unittest.expectedFailure
+    def test_review_job_requires_sudo_and_containers_off(self) -> None:
+        """A gate proves both are gone before any checkout or the session.
+
+        harden-runner can skip its setup and still succeed, and its
+        agent carries on past a failed revocation, so the input alone
+        is no proof. No other step of the job calls sudo or docker.
+        """
+        steps = self.steps("review")
+        gate = self.step("review", SUDO_GATE)
+        index = steps.index(gate)
+        self.assertLess(self.position("review", "Require enforced egress"), index)
+        self.assertLess(index, self.position("review", "agent"))
+        self.assertLess(index, steps.index(self.actions("review", CHECKOUT)[0]))
+        for key in ("if", "continue-on-error"):
+            with self.subTest(key=key):
+                self.assertNotIn(key, gate)
+        script = flatten(gate["run"])
+        self.assertIn("if sudo -n true", script)
+        self.assertIn("timeout 30 docker info", script)
+        for other in steps:
+            if other is gate:
+                continue
+            with self.subTest(step=other.get("name")):
+                self.assertNotRegex(str(other.get("run", "")), r"\b(sudo|docker)\b")
 
     def test_every_allow_list_loader_passes_every_input(self) -> None:
         """Each loader passes the baseline, supplemental and extra endpoints.
@@ -809,6 +856,80 @@ class ReviewContracts(ReusableWorkflowCase):
         cleanup = self.step("review", "Clear session scratch files")
         self.assertEqual(cleanup["if"], "always()")
         self.assertTrue(cleanup["continue-on-error"])
+
+
+# Stands for sudo or docker: succeeds when its name is in FAKE_WORKING.
+# Otherwise docker exits FAKE_DOCKER_STATUS, as timeout passes it on.
+FAKE_PRIVILEGE = """#!/bin/bash
+case " $FAKE_WORKING " in *" ${0##*/} "*) exit 0 ;; esac
+[ "${0##*/}" = docker ] && exit "${FAKE_DOCKER_STATUS:-1}"
+exit 1
+"""
+
+
+class SudoGateRuns(ReusableWorkflowCase):
+    """Run the review job's sudo and containers gate against stand-ins."""
+
+    def setUp(self) -> None:
+        """Put a fake ``sudo`` and ``docker`` ahead of the real ones."""
+        super().setUp()
+        self.tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.tmp)
+        bin_dir = self.tmp / "bin"
+        bin_dir.mkdir()
+        for name in ("sudo", "docker"):
+            fake = bin_dir / name
+            fake.write_text(FAKE_PRIVILEGE, encoding="utf-8")
+            fake.chmod(0o755)
+        self.path = f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}"
+
+    def run_gate(self, working: str, docker_status: int = 1) -> int:
+        """Run the gate with the named commands working; its exit code."""
+        script = self.tmp / "step.sh"
+        script.write_text(self.step("review", SUDO_GATE)["run"], encoding="utf-8")
+        done = subprocess.run(
+            ["bash", "-eo", "pipefail", str(script)],
+            cwd=self.tmp,
+            env={
+                "PATH": self.path,
+                "FAKE_WORKING": working,
+                "FAKE_DOCKER_STATUS": str(docker_status),
+            },
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        return done.returncode
+
+    @unittest.expectedFailure
+    def test_gate_fails_while_either_still_works(self) -> None:
+        """Working sudo or a reachable daemon fails the job; neither passes."""
+        for working, failed in (
+            ("", False),
+            ("sudo", True),
+            ("docker", True),
+            ("sudo docker", True),
+        ):
+            with self.subTest(working=working):
+                self.assertEqual(self.run_gate(working) != 0, failed)
+
+    @unittest.expectedFailure
+    def test_gate_fails_on_a_docker_probe_without_a_verdict(self) -> None:
+        """Only an unreachable daemon or a missing docker passes.
+
+        timeout exits 124 when docker info hangs past 30 seconds, and
+        125 or 126 when the probe cannot run; none proves the daemon
+        gone, so each fails the job.
+        """
+        for status, failed in (
+            (1, False),
+            (127, False),
+            (124, True),
+            (125, True),
+            (126, True),
+        ):
+            with self.subTest(status=status):
+                self.assertEqual(self.run_gate("", status) != 0, failed)
 
 
 FAKE_COPILOT = """#!/bin/bash
