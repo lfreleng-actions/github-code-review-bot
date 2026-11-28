@@ -663,12 +663,30 @@ So a step after harden-runner requires `agent_status` to be `ready`
 before anything else runs.
 
 Root on the runner, or the Docker daemon that stands in for it, could
-switch the filter off. The loader restarts the agent with sudo after a
-transient revert, and harden-runner's `disable-sudo-and-containers`
-hands the revocation to its agent at setup, ahead of those restarts.
-The next step revokes both instead, after the loader finishes: it stops
-Docker, deletes the runner's sudoers drop-ins, and fails unless both
-`sudo -n` and `docker info` then fail. No later step uses sudo.
+switch the filter off. harden-runner's step sets
+`disable-sudo-and-containers` to `true`, a literal like the
+allow-list coordinate, with no opt-out. Its agent then revokes sudo,
+closes the Docker and containerd sockets and uninstalls Docker as it
+starts, in harden-runner's pre hook, before any main step of the job.
+The loader's restarts still work: the agent restores the sudoers file
+before it logs `Reverted changes`, the loader waits for that line
+before it restarts the agent with sudo, and the restarted agent
+revokes sudo and the sockets again as it starts, before it sets up
+the resolver and the firewall.
+
+The input alone is no proof: harden-runner can skip its setup and
+still succeed, and its agent logs a revocation that failed and carries
+on. So a step after `Require enforced egress` and before the first
+checkout fails the job while `sudo -n true` or `docker info` still
+succeeds. It fails closed: for the step to pass, `docker info` must
+find no daemon, or no `docker` at all, so a probe that hangs past its
+30 seconds, or cannot run, fails the job too. No other step of the job
+calls sudo or docker.
+
+The cost: the agent keeps a copy of the sudoers file to restore,
+so the revocation is not permanent the way deleting the runner's
+sudoers drop-ins would be. An agent that reverts after the session
+has started gives sudo back, and egress opens with it.
 
 `preflight.py` checks the trusted jobs' coordinate alone; the
 contract tests pin this one.

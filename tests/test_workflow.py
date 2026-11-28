@@ -352,35 +352,6 @@ class TopLevelContracts(ReusableWorkflowCase):
         self.assertIn("if [ \"$AGENT_STATUS\" != 'ready' ]; then", script)
         self.assertIn("exit 1", script)
 
-    def test_review_job_revokes_sudo_and_containers(self) -> None:
-        """Root and the Docker daemon are gone before the session starts.
-
-        The loader's restarts need sudo, so the revocation follows
-        harden-runner, precedes the session, proves itself, and no
-        later step asks for sudo again.
-        """
-        steps = self.steps("review")
-        revoke = self.step("review", "Revoke sudo and containers")
-        index = steps.index(revoke)
-        self.assertLess(steps.index(self.action("review", HARDEN_RUNNER)), index)
-        self.assertLess(index, self.position("review", "agent"))
-        for key in ("if", "continue-on-error"):
-            with self.subTest(key=key):
-                self.assertNotIn(key, revoke)
-        lines = script_lines(revoke["run"])
-        for command in (
-            "sudo -n systemctl stop docker.socket docker.service",
-            "sudo -n find /etc/sudoers.d -mindepth 1 -delete",
-            "if sudo -n true 2>/dev/null; then",
-            "if docker info >/dev/null 2>&1; then",
-        ):
-            with self.subTest(command=command):
-                self.assertIn(command, [squash(line) for line in lines])
-        for later in steps[index + 1 :]:
-            with self.subTest(step=later.get("name")):
-                self.assertNotRegex(str(later.get("run", "")), r"\bsudo\b")
-
-    @unittest.expectedFailure
     def test_review_job_disables_sudo_and_containers(self) -> None:
         """harden-runner's agent revokes both at setup, as a literal.
 
@@ -399,7 +370,6 @@ class TopLevelContracts(ReusableWorkflowCase):
                 harden = self.action(job, HARDEN_RUNNER)
                 self.assertNotIn("disable-sudo-and-containers", harden["with"])
 
-    @unittest.expectedFailure
     def test_review_job_requires_sudo_and_containers_off(self) -> None:
         """A gate proves both are gone before any checkout or the session.
 
@@ -901,7 +871,6 @@ class SudoGateRuns(ReusableWorkflowCase):
         )
         return done.returncode
 
-    @unittest.expectedFailure
     def test_gate_fails_while_either_still_works(self) -> None:
         """Working sudo or a reachable daemon fails the job; neither passes."""
         for working, failed in (
@@ -913,7 +882,6 @@ class SudoGateRuns(ReusableWorkflowCase):
             with self.subTest(working=working):
                 self.assertEqual(self.run_gate(working) != 0, failed)
 
-    @unittest.expectedFailure
     def test_gate_fails_on_a_docker_probe_without_a_verdict(self) -> None:
         """Only an unreachable daemon or a missing docker passes.
 
